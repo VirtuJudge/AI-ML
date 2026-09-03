@@ -1,0 +1,30 @@
+name: Task or change
+description: Propose a scoped worker, pipeline, or model change.
+title: "change: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Why is this needed?
+    validations:
+      required: true
+  - type: textarea
+    id: work
+    attributes:
+      label: Work
+      description: What should be changed?
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: List deterministic checks and any required evaluation.
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References and dependencies
+      description: Link Docs and blocking issues.
