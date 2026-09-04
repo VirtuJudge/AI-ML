@@ -1,0 +1,16 @@
+{
+  "presentation": {
+    "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7W3",
+    "object_key": "uploads/team/project/video",
+    "checksum": "md5:invalidchecksumstring",
+    "media_type": "video/mp4"
+  },
+  "supporting_documents": [],
+  "rubric": {
+    "rubric_id": "startup_pitch",
+    "version": 1
+  },
+  "requested_capabilities": [
+    "speech"
+  ]
+}

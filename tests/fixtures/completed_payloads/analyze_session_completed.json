@@ -1,0 +1,42 @@
+{
+  "analysis_artifact": {
+    "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WL",
+    "object_key": "ai/session/analysis.json",
+    "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "schema_version": 1
+  },
+  "primary_questions": [
+    {
+      "candidate_id": "q-1",
+      "text": "What evidence supports the claimed conversion rate?",
+      "reason": "The pitch states a rate without a source.",
+      "rubric_dimension": "pitch_content_and_evidence",
+      "evidence_ids": [
+        "ev_01J7K8M9N0P1Q2R3S4T5U6V701"
+      ]
+    },
+    {
+      "candidate_id": "q-2",
+      "text": "Which technical assumption is most likely to delay the first release?",
+      "reason": "The delivery plan names dependencies but does not rank their risk.",
+      "rubric_dimension": "technical_feasibility",
+      "evidence_ids": [
+        "ev_01J7K8M9N0P1Q2R3S4T5U6V702"
+      ]
+    },
+    {
+      "candidate_id": "q-3",
+      "text": "How was the target customer segment validated?",
+      "reason": "The pitch defines a segment without presenting validation evidence.",
+      "rubric_dimension": "business_reasoning",
+      "evidence_ids": [
+        "ev_01J7K8M9N0P1Q2R3S4T5U6V703"
+      ]
+    }
+  ],
+  "speaker_labels": [
+    "SPEAKER_00",
+    "SPEAKER_01"
+  ],
+  "limitations": []
+}

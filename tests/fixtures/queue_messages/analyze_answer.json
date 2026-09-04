@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "job_id": "01J7K8M9N0P1Q2R3S4T5U6V7W4",
+  "job_type": "analyze_answer",
+  "practice_session_id": "01J7K8M9N0P1Q2R3S4T5U6V7W1",
+  "analysis_attempt": 1,
+  "created_at": "2026-09-02T12:35:00Z",
+  "trace_id": "01J7K8M9N0P1Q2R3S4T5U6V7W5",
+  "payload": {
+    "qa_round_id": "01J7K8M9N0P1Q2R3S4T5U6V7W6",
+    "question_id": "01J7K8M9N0P1Q2R3S4T5U6V7W7",
+    "answer_id": "01J7K8M9N0P1Q2R3S4T5U6V7W8",
+    "answered_by": "01J7K8M9N0P1Q2R3S4T5U6V7W9",
+    "audio": {
+      "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WA",
+      "object_key": "answers/team/session/audio",
+      "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "media_type": "audio/webm",
+      "duration_ms": 84000
+    },
+    "remaining_follow_ups": 2
+  }
+}

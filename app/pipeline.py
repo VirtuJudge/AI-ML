@@ -1,5 +1,4 @@
-"""Pipeline protocols and test implementations for pitch analysis."""
-
+from pathlib import Path
 from typing import Protocol
 
 from app.contracts import (
@@ -11,10 +10,22 @@ from app.contracts import (
     ErasureCompleted,
     FollowUpQuestion,
     GenerateReportPayload,
-    PrimaryQuestion,
     ReportCompleted,
     SessionAnalysisCompleted,
 )
+from app.providers.base import (
+    AudioMetricsProvider,
+    DiarizationProvider,
+    DocumentProvider,
+    JudgeModelProvider,
+    SpeechProvider,
+    VisionProvider,
+)
+from app.providers.fake_audio import FakeAudioMetricsProvider
+from app.providers.fake_documents import FakeDocumentProvider
+from app.providers.fake_judge import FakeJudgeModelProvider
+from app.providers.fake_speech import FakeDiarizationProvider, FakeSpeechProvider
+from app.providers.fake_vision import FakeVisionProvider
 
 FAKE_SESSION_ANALYSIS_ARTIFACT_ID = "01JEXAMPLE000000000000000A"
 FAKE_QUESTION_1_ID = "01JEXAMPLE000000000000001A"
@@ -43,9 +54,42 @@ class PitchAnalysisPipeline(Protocol):
 
 
 class FakePipeline:
-    """Deterministic fake pipeline implementation for tests and local development."""
+    """Deterministic fake pipeline implementation composed from swappable stage adapters."""
+
+    def __init__(
+        self,
+        speech_provider: SpeechProvider | None = None,
+        diarization_provider: DiarizationProvider | None = None,
+        vision_provider: VisionProvider | None = None,
+        audio_provider: AudioMetricsProvider | None = None,
+        document_provider: DocumentProvider | None = None,
+        judge_provider: JudgeModelProvider | None = None,
+    ) -> None:
+        self.speech_provider = speech_provider or FakeSpeechProvider()
+        self.diarization_provider = diarization_provider or FakeDiarizationProvider()
+        self.vision_provider = vision_provider or FakeVisionProvider()
+        self.audio_provider = audio_provider or FakeAudioMetricsProvider()
+        self.document_provider = document_provider or FakeDocumentProvider()
+        self.judge_provider = judge_provider or FakeJudgeModelProvider()
 
     async def analyze_session(self, job: AnalyzeSessionPayload) -> SessionAnalysisCompleted:
+        audio_path = Path(job.presentation.object_key)
+        transcript = await self.speech_provider.transcribe(audio_path)
+        diarization = await self.diarization_provider.diarize(audio_path)
+        await self.vision_provider.analyze_video(audio_path)
+        await self.audio_provider.extract_metrics(audio_path)
+
+        doc_chunks = []
+        for doc in job.supporting_documents:
+            chunks = await self.document_provider.extract_and_embed(Path(doc.object_key))
+            doc_chunks.extend(chunks)
+
+        questions = await self.judge_provider.generate_questions(
+            transcript=transcript.full_text,
+            rubric_id=job.rubric.rubric_id,
+            document_chunks=doc_chunks if doc_chunks else None,
+        )
+
         return SessionAnalysisCompleted(
             analysis_artifact=ArtifactRef(
                 artifact_id=FAKE_SESSION_ANALYSIS_ARTIFACT_ID,
@@ -53,33 +97,8 @@ class FakePipeline:
                 checksum=FAKE_SHA256_A,
                 schema_version=1,
             ),
-            primary_questions=[
-                PrimaryQuestion(
-                    candidate_id=FAKE_QUESTION_1_ID,
-                    text="What is your projected customer acquisition cost at scale, "
-                    "and what channels drive that estimate?",
-                    reason="Validates financial feasibility and go-to-market model assumptions.",
-                    rubric_dimension="market_and_business_model",
-                    evidence_ids=["evidence_slide_04", "evidence_speech_01"],
-                ),
-                PrimaryQuestion(
-                    candidate_id=FAKE_QUESTION_2_ID,
-                    text="How does your core proprietary technology maintain its defensive moat "
-                    "against incumbent fast-followers?",
-                    reason="Assesses technical defensibility and differentiation.",
-                    rubric_dimension="technology_and_moat",
-                    evidence_ids=["evidence_slide_07"],
-                ),
-                PrimaryQuestion(
-                    candidate_id=FAKE_QUESTION_3_ID,
-                    text="What specific milestones must be achieved during the initial pilot phase "
-                    "to secure renewal commitments?",
-                    reason="Evaluates execution roadmap and early customer validation.",
-                    rubric_dimension="execution_and_milestones",
-                    evidence_ids=["evidence_slide_09", "evidence_speech_02"],
-                ),
-            ],
-            speaker_labels=["SPEAKER_00", "SPEAKER_01"],
+            primary_questions=questions,
+            speaker_labels=diarization.speaker_labels,
             limitations=[],
         )
 

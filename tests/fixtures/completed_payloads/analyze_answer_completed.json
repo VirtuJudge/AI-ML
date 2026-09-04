@@ -1,0 +1,13 @@
+{
+  "answer_id": "01J7K8M9N0P1Q2R3S4T5U6V7W8",
+  "transcript_artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WM",
+  "assessment_artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WN",
+  "follow_up": {
+    "text": "How would that assumption change if acquisition cost doubled?",
+    "reason": "The answer depends on an unstated acquisition-cost assumption.",
+    "rubric_dimension": "business_reasoning",
+    "evidence_ids": [
+      "ev_01J7K8M9N0P1Q2R3S4T5U6V704"
+    ]
+  }
+}
