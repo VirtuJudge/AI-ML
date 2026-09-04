@@ -23,6 +23,14 @@ dev = [
     "mypy",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
