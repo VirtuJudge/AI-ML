@@ -1,11 +1,32 @@
-"""Pytest fixtures for VirtuJudge AI-ML tests."""
-
+import json
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from app.backend_client import FakeBackendClient
 from app.contracts import JobType, QueueMessage
 from app.pipeline import FakePipeline
+
+
+@pytest.fixture
+def fixtures_dir() -> Path:
+    """Fixture providing the Path to the fixtures directory."""
+    return Path(__file__).parent / "fixtures"
+
+
+def load_json_fixture(relative_path: str | Path) -> dict[str, Any]:
+    """Load a JSON fixture file by relative path from tests/fixtures."""
+    fixture_path = Path(__file__).parent / "fixtures" / relative_path
+    with fixture_path.open("r", encoding="utf-8") as f:
+        return json.load(f)  # type: ignore[no-any-return]
+
+
+def load_json_fixture_text(relative_path: str | Path) -> str:
+    """Load raw text of a JSON fixture file by relative path from tests/fixtures."""
+    fixture_path = Path(__file__).parent / "fixtures" / relative_path
+    return fixture_path.read_text(encoding="utf-8")
 
 
 @pytest.fixture
@@ -135,3 +156,16 @@ def erase_message() -> QueueMessage:
             "scope_id": "01JTEST0000000000000000044",
         },
     )
+
+
+@pytest.fixture
+def backend_client() -> FakeBackendClient:
+    """Fixture providing a FakeBackendClient instance."""
+    return FakeBackendClient()
+
+
+@pytest.fixture
+def journey_pipeline() -> FakePipeline:
+    """Fixture providing a FakePipeline with all fake providers wired."""
+    return FakePipeline()
+

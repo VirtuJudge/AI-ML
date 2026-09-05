@@ -29,6 +29,19 @@ class UpdateStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ErrorCode(StrEnum):
+    """Standard safe error codes for pipeline failures."""
+
+    INVALID_JOB_TYPE = "invalid_job_type"
+    MALFORMED_PAYLOAD = "malformed_payload"
+    INVALID_CHECKSUM = "invalid_checksum"
+    MISSING_REQUIRED_FIELD = "missing_required_field"
+    VALIDATION_ERROR = "validation_error"
+    PROVIDER_TIMEOUT = "provider_timeout"
+    PROVIDER_ERROR = "provider_error"
+    INTERNAL_ERROR = "internal_error"
+
+
 class ArtifactRef(BaseModel):
     """Reference to an artifact stored in object storage."""
 
@@ -221,11 +234,20 @@ class ProgressPayload(BaseModel):
     message: str
 
 
+class SafeFailure(BaseModel):
+    """Safe failure record matching data contracts."""
+
+    stage: str
+    code: ErrorCode | str
+    retryable: bool
+    message: str
+
+
 class FailedPayload(BaseModel):
     """Payload emitted when job execution fails."""
 
     stage: str
-    code: str
+    code: ErrorCode | str
     retryable: bool
     attempts: int = Field(ge=0)
     message: str
@@ -264,6 +286,7 @@ __all__ = [
     "AudioAssetInput",
     "EraseAIDataPayload",
     "ErasureCompleted",
+    "ErrorCode",
     "FailedPayload",
     "FollowUpQuestion",
     "GenerateReportPayload",
@@ -274,6 +297,7 @@ __all__ = [
     "QueueMessage",
     "ReportCompleted",
     "RubricRef",
+    "SafeFailure",
     "SessionAnalysisCompleted",
     "SpeakerMapping",
     "StartedPayload",

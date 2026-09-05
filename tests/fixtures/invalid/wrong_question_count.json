@@ -1,0 +1,28 @@
+{
+  "analysis_artifact": {
+    "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WL",
+    "object_key": "ai/session/analysis.json",
+    "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "schema_version": 1
+  },
+  "primary_questions": [
+    {
+      "candidate_id": "q-1",
+      "text": "Question 1",
+      "reason": "Reason 1",
+      "rubric_dimension": "pitch_content_and_evidence",
+      "evidence_ids": []
+    },
+    {
+      "candidate_id": "q-2",
+      "text": "Question 2",
+      "reason": "Reason 2",
+      "rubric_dimension": "technical_feasibility",
+      "evidence_ids": []
+    }
+  ],
+  "speaker_labels": [
+    "SPEAKER_00"
+  ],
+  "limitations": []
+}

@@ -1,0 +1,7 @@
+{
+  "stage": "speech",
+  "code": "provider_timeout",
+  "retryable": true,
+  "attempts": 3,
+  "message": "Speech analysis did not finish before the stage deadline."
+}

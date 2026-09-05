@@ -1,0 +1,18 @@
+{
+  "evaluation_artifact": {
+    "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WP",
+    "object_key": "ai/session/evaluation.json",
+    "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "schema_version": 1
+  },
+  "report_artifact": {
+    "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WQ",
+    "object_key": "ai/session/report.json",
+    "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "schema_version": 1
+  },
+  "member_feedback_user_ids": [
+    "01J7K8M9N0P1Q2R3S4T5U6V7WG"
+  ],
+  "limitations": []
+}

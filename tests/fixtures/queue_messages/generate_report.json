@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "job_id": "01J7K8M9N0P1Q2R3S4T5U6V7WB",
+  "job_type": "generate_report",
+  "practice_session_id": "01J7K8M9N0P1Q2R3S4T5U6V7W1",
+  "analysis_attempt": 1,
+  "created_at": "2026-09-02T12:40:00Z",
+  "trace_id": "01J7K8M9N0P1Q2R3S4T5U6V7WC",
+  "payload": {
+    "report_id": "01J7K8M9N0P1Q2R3S4T5U6V7WD",
+    "analysis_artifact": {
+      "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WE",
+      "object_key": "ai/session/analysis.json",
+      "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "schema_version": 1
+    },
+    "qa_artifact": {
+      "artifact_id": "01J7K8M9N0P1Q2R3S4T5U6V7WF",
+      "object_key": "ai/session/qa.json",
+      "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "schema_version": 1
+    },
+    "speaker_mappings": [
+      {
+        "speaker_label": "SPEAKER_00",
+        "user_id": "01J7K8M9N0P1Q2R3S4T5U6V7WG",
+        "display_name": "Member name"
+      }
+    ]
+  }
+}
