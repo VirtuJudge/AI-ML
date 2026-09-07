@@ -6,7 +6,18 @@ They are strictly internal to the AI-ML worker and must NEVER leak directly
 into boundary contract payloads returned to the backend orchestrator.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field
+
+
+class WordTimestamp(BaseModel):
+    """A single transcribed word with millisecond timing bounds."""
+
+    word: str
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class TranscriptionSegment(BaseModel):
@@ -16,6 +27,7 @@ class TranscriptionSegment(BaseModel):
     end_ms: int = Field(ge=0)
     text: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    words: list[WordTimestamp] = Field(default_factory=list)
 
 
 class TranscriptionResult(BaseModel):
@@ -24,6 +36,7 @@ class TranscriptionResult(BaseModel):
     segments: list[TranscriptionSegment] = Field(default_factory=list)
     full_text: str
     language: str = "en"
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class SpeakerSegment(BaseModel):
@@ -39,6 +52,7 @@ class DiarizationResult(BaseModel):
 
     segments: list[SpeakerSegment] = Field(default_factory=list)
     speaker_labels: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class VisualObservation(BaseModel):
@@ -76,4 +90,5 @@ __all__ = [
     "TranscriptionResult",
     "TranscriptionSegment",
     "VisualObservation",
+    "WordTimestamp",
 ]
