@@ -33,6 +33,8 @@ from app.providers.types import (
 )
 
 if TYPE_CHECKING:
+    from app.providers.librosa_audio import LibrosaAudioProvider
+    from app.providers.mediapipe_vision import MediaPipeVisionProvider
     from app.providers.pyannote_diarization import PyannoteDiarizationProvider
 
 __all__ = [
@@ -65,6 +67,24 @@ __all__ = [
 
 # Conditionally export real providers when their underlying ML packages are available
 try:
+    import librosa  # noqa: F401
+
+    from app.providers.librosa_audio import LibrosaAudioProvider  # noqa: F401
+
+    __all__.append("LibrosaAudioProvider")
+except ImportError:
+    pass
+
+try:
+    import mediapipe  # noqa: F401
+
+    from app.providers.mediapipe_vision import MediaPipeVisionProvider  # noqa: F401
+
+    __all__.append("MediaPipeVisionProvider")
+except ImportError:
+    pass
+
+try:
     import pyannote.audio  # type: ignore[import-not-found]  # noqa: F401
 
     from app.providers.pyannote_diarization import PyannoteDiarizationProvider  # noqa: F401
@@ -76,6 +96,14 @@ except ImportError:
 
 def __getattr__(name: str) -> Any:
     """Allow lazy resolution of real providers when imported directly."""
+    if name == "LibrosaAudioProvider":
+        from app.providers.librosa_audio import LibrosaAudioProvider
+
+        return LibrosaAudioProvider
+    if name == "MediaPipeVisionProvider":
+        from app.providers.mediapipe_vision import MediaPipeVisionProvider
+
+        return MediaPipeVisionProvider
     if name == "PyannoteDiarizationProvider":
         from app.providers.pyannote_diarization import PyannoteDiarizationProvider
 

@@ -20,6 +20,11 @@ datasets/
 artifacts/
 checkpoints/
 evaluation-results/
+*.pt
+*.pth
+*.mkv
+*.mp4
+*.wav
 
 # Runtime configuration
 .env

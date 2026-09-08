@@ -58,8 +58,14 @@ async def test_fake_vision_provider() -> None:
 
     assert isinstance(res1, list)
     assert all(isinstance(obs, VisualObservation) for obs in res1)
-    assert len(res1) == 3
+    assert len(res1) == 9
     assert res1 == res2
+
+    # Test duration_ms filtering
+    short_provider = FakeVisionProvider(duration_ms=3000)
+    short_res = await short_provider.analyze_video(DUMMY_PATH)
+    assert len(short_res) == 3
+    assert all(obs.end_ms <= 3000 for obs in short_res)
 
 
 @pytest.mark.asyncio
@@ -71,9 +77,15 @@ async def test_fake_audio_metrics_provider() -> None:
 
     assert isinstance(res1, list)
     assert all(isinstance(obs, AudioObservation) for obs in res1)
-    assert len(res1) == 3
-    assert res1[0].pitch_hz > 0
+    assert len(res1) == 9
+    assert res1[0].value > 0
     assert res1 == res2
+
+    # Test duration_ms filtering
+    short_provider = FakeAudioMetricsProvider(duration_ms=7000)
+    short_res = await short_provider.extract_metrics(DUMMY_PATH)
+    assert len(short_res) == 3
+    assert all(obs.end_ms <= 7000 for obs in short_res)
 
 
 @pytest.mark.asyncio

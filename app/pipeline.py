@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -71,13 +71,15 @@ class FakePipeline:
         self.audio_provider = audio_provider or FakeAudioMetricsProvider()
         self.document_provider = document_provider or FakeDocumentProvider()
         self.judge_provider = judge_provider or FakeJudgeModelProvider()
+        self.last_vision_observations: list[Any] = []
+        self.last_audio_observations: list[Any] = []
 
     async def analyze_session(self, job: AnalyzeSessionPayload) -> SessionAnalysisCompleted:
         audio_path = Path(job.presentation.object_key)
         transcript = await self.speech_provider.transcribe(audio_path)
         diarization = await self.diarization_provider.diarize(audio_path)
-        await self.vision_provider.analyze_video(audio_path)
-        await self.audio_provider.extract_metrics(audio_path)
+        self.last_vision_observations = await self.vision_provider.analyze_video(audio_path)
+        self.last_audio_observations = await self.audio_provider.extract_metrics(audio_path)
 
         doc_chunks = []
         for doc in job.supporting_documents:

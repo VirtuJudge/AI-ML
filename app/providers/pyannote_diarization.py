@@ -117,7 +117,25 @@ class PyannoteDiarizationProvider:
         if self.max_speakers is not None:
             kwargs["max_speakers"] = self.max_speakers
 
-        diarization_output = self._pipeline(str(audio_path), **kwargs)
+        # Load audio waveform directly via soundfile to bypass torchcodec DLL issues on Windows
+        try:
+            import soundfile as sf
+            import torch
+
+            data, sr = sf.read(str(audio_path), dtype="float32")
+            if data.ndim == 1:
+                waveform = torch.from_numpy(data).unsqueeze(0)
+            else:
+                waveform = torch.from_numpy(data.T)
+
+            if hasattr(self, "_pipeline") and hasattr(self._pipeline, "device"):
+                waveform = waveform.to(self._pipeline.device)
+
+            audio_input: Any = {"waveform": waveform, "sample_rate": sr}
+        except Exception:
+            audio_input = str(audio_path)
+
+        diarization_output = self._pipeline(audio_input, **kwargs)
 
         segments: list[SpeakerSegment] = []
         speaker_map: dict[str, str] = {}
