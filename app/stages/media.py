@@ -14,6 +14,7 @@ import os
 import tempfile
 import wave
 from pathlib import Path
+from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -80,7 +81,15 @@ class FFmpegExecutionError(MediaNormalizationError):
         self.stderr = stderr
 
 
-def get_wav_metadata(wav_path: Path) -> tuple[int, int, int]:
+class WavMetadata(NamedTuple):
+    """Explicit metadata extracted from a WAV file header."""
+
+    duration_ms: int
+    sample_rate: int
+    channels: int
+
+
+def get_wav_metadata(wav_path: Path) -> WavMetadata:
     """Read duration_ms, sample_rate, and channels from a WAV file header."""
     try:
         with wave.open(str(wav_path), "rb") as wf:
@@ -88,7 +97,11 @@ def get_wav_metadata(wav_path: Path) -> tuple[int, int, int]:
             sample_rate = wf.getframerate()
             n_frames = wf.getnframes()
             duration_ms = round((n_frames / float(sample_rate)) * 1000) if sample_rate > 0 else 0
-            return duration_ms, sample_rate, channels
+            return WavMetadata(
+                duration_ms=duration_ms,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
     except Exception as err:
         raise MediaNormalizationError("Failed to read normalized WAV file header.") from err
 
@@ -185,13 +198,13 @@ async def normalize_media(
             stderr=stderr_text,
         )
 
-    duration_ms, sample_rate, channels = get_wav_metadata(target_output)
+    meta = get_wav_metadata(target_output)
 
     return MediaNormalizationResult(
         output_path=target_output,
-        duration_ms=duration_ms,
-        sample_rate=sample_rate,
-        channels=channels,
+        duration_ms=meta.duration_ms,
+        sample_rate=meta.sample_rate,
+        channels=meta.channels,
     )
 
 
@@ -309,14 +322,14 @@ async def split_media(
             stderr=stderr_text,
         )
 
-    duration_ms, sample_rate, channels = get_wav_metadata(target_audio)
+    meta = get_wav_metadata(target_audio)
 
     return MediaSplitResult(
         audio_path=target_audio,
         video_path=target_video if has_video else None,
-        duration_ms=duration_ms,
-        sample_rate=sample_rate,
-        channels=channels,
+        duration_ms=meta.duration_ms,
+        sample_rate=meta.sample_rate,
+        channels=meta.channels,
     )
 
 
@@ -327,6 +340,7 @@ __all__ = [
     "MediaNormalizationError",
     "MediaNormalizationResult",
     "MediaSplitResult",
+    "WavMetadata",
     "create_normalization_limitation",
     "get_wav_metadata",
     "normalize_media",

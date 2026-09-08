@@ -66,7 +66,6 @@ __all__ = [
 # Conditionally export real providers when their underlying ML packages are available
 try:
     import pyannote.audio  # type: ignore[import-not-found]  # noqa: F401
-    import pyannote.audio  # noqa: F401
 
     from app.providers.pyannote_diarization import PyannoteDiarizationProvider  # noqa: F401
 

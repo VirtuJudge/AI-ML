@@ -17,7 +17,7 @@ from app.providers.types import DiarizationResult, SpeakerSegment
 class PyannoteDiarizationProvider:
     """Speaker diarization adapter powered by pyannote.audio Community-1 / 3.1."""
 
-    DEFAULT_MODEL = "pyannote/speaker-diarization-3.1"
+    DEFAULT_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote-community-1")
 
     def __init__(
         self,
@@ -31,8 +31,8 @@ class PyannoteDiarizationProvider:
         """Initialize PyannoteDiarizationProvider.
 
         Args:
-            model_name: HuggingFace model repo ID
-                (default: env DIARIZATION_MODEL or 'pyannote/speaker-diarization-3.1').
+            model_name: HuggingFace model repo ID or alias
+                (default: env DIARIZATION_MODEL or 'pyannote-community-1').
             auth_token: HuggingFace auth token for downloading gated models.
                 If omitted, reads from HUGGINGFACE_TOKEN or HF_TOKEN env var.
             device: Compute device ('cpu', 'cuda', or 'auto').
@@ -44,13 +44,7 @@ class PyannoteDiarizationProvider:
         Raises:
             ImportError: If pyannote.audio is not installed and pipeline_instance is not provided.
         """
-        env_model = os.environ.get("DIARIZATION_MODEL")
-        if model_name:
-            self.model_name = model_name
-        elif env_model and env_model != "pyannote-community-1":
-            self.model_name = env_model
-        else:
-            self.model_name = self.DEFAULT_MODEL
+        self.model_name = model_name or os.getenv("DIARIZATION_MODEL", self.DEFAULT_MODEL)
 
         resolved_token = (
             auth_token
@@ -74,15 +68,21 @@ class PyannoteDiarizationProvider:
                     "or 'pip install pyannote.audio'."
                 ) from err
 
+            hf_model = (
+                "pyannote/speaker-diarization-community-1"
+                if self.model_name == "pyannote-community-1"
+                else self.model_name
+            )
+
             # pyannote 3.1+ uses `token`, while older versions use `use_auth_token`
             try:
                 pipeline = Pipeline.from_pretrained(
-                    self.model_name,
+                    hf_model,
                     token=resolved_token,
                 )
             except TypeError:
                 pipeline = Pipeline.from_pretrained(
-                    self.model_name,
+                    hf_model,
                     use_auth_token=resolved_token,  # type: ignore[call-arg]
                 )
 

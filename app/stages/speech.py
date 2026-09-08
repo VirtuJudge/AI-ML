@@ -35,22 +35,25 @@ def validate_word_timestamps(
     *,
     strict: bool = True,
 ) -> list[Limitation]:
-    """Validate that word timestamps and segment bounds stay within media duration.
+    """Validate that word timestamps and segment bounds stay within media duration and start <= end.
 
     Args:
         transcription: Transcription result containing segments and word timestamps.
         media_duration_ms: Total media duration in milliseconds.
-        strict: If True, raises ValueError if a timestamp exceeds duration.
-                If False, clamps timestamps to media duration and produces a Limitation.
+        strict: If True, raises ValueError if a timestamp exceeds duration or is inverted.
+                If False, clamps timestamps to media duration, corrects inverted intervals,
+                and produces Limitations.
 
     Returns:
-        List of limitations if any timestamps were out of bounds in non-strict mode.
+        List of limitations if any timestamps were out of bounds or inverted in non-strict mode.
 
     Raises:
-        ValueError: If strict is True and any timestamp is negative or exceeds media_duration_ms.
+        ValueError: If strict is True and any timestamp is negative, exceeds media_duration_ms,
+                    or has start_ms > end_ms.
     """
     limitations: list[Limitation] = []
     has_out_of_bounds = False
+    has_inverted = False
 
     for seg in transcription.segments:
         if seg.start_ms < 0:
@@ -67,6 +70,27 @@ def validate_word_timestamps(
                 )
             seg.end_ms = media_duration_ms
             has_out_of_bounds = True
+
+        if seg.start_ms > media_duration_ms:
+            if strict:
+                raise ValueError(
+                    f"Segment start timestamp ({seg.start_ms}ms) exceeds "
+                    f"media duration ({media_duration_ms}ms)."
+                )
+            seg.start_ms = media_duration_ms
+            has_out_of_bounds = True
+
+        if seg.start_ms > seg.end_ms:
+            if strict:
+                raise ValueError(
+                    f"Segment start timestamp ({seg.start_ms}ms) exceeds "
+                    f"end timestamp ({seg.end_ms}ms)."
+                )
+            seg.start_ms, seg.end_ms = (
+                min(seg.start_ms, seg.end_ms),
+                max(seg.start_ms, seg.end_ms),
+            )
+            has_inverted = True
 
         for word in seg.words:
             if word.start_ms < 0:
@@ -87,12 +111,45 @@ def validate_word_timestamps(
                 word.end_ms = media_duration_ms
                 has_out_of_bounds = True
 
+            if word.start_ms > media_duration_ms:
+                if strict:
+                    raise ValueError(
+                        f"Word '{word.word}' start timestamp ({word.start_ms}ms) "
+                        f"exceeds media duration ({media_duration_ms}ms)."
+                    )
+                word.start_ms = media_duration_ms
+                has_out_of_bounds = True
+
+            if word.start_ms > word.end_ms:
+                if strict:
+                    raise ValueError(
+                        f"Word '{word.word}' start timestamp ({word.start_ms}ms) "
+                        f"exceeds end timestamp ({word.end_ms}ms)."
+                    )
+                word.start_ms, word.end_ms = (
+                    min(word.start_ms, word.end_ms),
+                    max(word.start_ms, word.end_ms),
+                )
+                has_inverted = True
+
     if has_out_of_bounds and not strict:
         limitations.append(
             Limitation(
                 code="timestamp_out_of_bounds",
                 scope="speech",
                 message="Word or segment timestamps exceeded media duration and were clamped.",
+                affected_dimensions=["delivery_pace"],
+            )
+        )
+
+    if has_inverted and not strict:
+        limitations.append(
+            Limitation(
+                code="inverted_timestamps",
+                scope="speech",
+                message=(
+                    "Word or segment start timestamps exceeded end timestamps and were corrected."
+                ),
                 affected_dimensions=["delivery_pace"],
             )
         )

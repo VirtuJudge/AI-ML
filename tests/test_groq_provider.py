@@ -263,3 +263,136 @@ async def test_groq_network_error_handling(tmp_path: Path) -> None:
 
         err_str = str(exc_info.value)
         assert "network error" in err_str.lower()
+
+
+@pytest.mark.asyncio
+async def test_groq_transcribe_file_size_exceeds_limit_raises_provider_error(
+    tmp_path: Path,
+) -> None:
+    """Verify file exceeding 25MB limit raises ProviderError before opening stream/posting."""
+    audio_file = tmp_path / "oversized.wav"
+    audio_file.write_bytes(b"dummy")
+
+    provider = GroqSpeechProvider(api_key="gsk_test", max_file_size_bytes=100)
+
+    # Audio file has 5 bytes, let's write 150 bytes to exceed 100-byte test threshold
+    audio_file.write_bytes(b"a" * 150)
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.transcribe(audio_file)
+
+        mock_post.assert_not_called()
+        err_str = str(exc_info.value)
+        assert "exceeds Groq's 25MB upload limit" in err_str
+        assert isinstance(exc_info.value, GroqSpeechProviderError)
+
+
+@pytest.mark.asyncio
+async def test_groq_api_413_payload_too_large_maps_to_provider_error(tmp_path: Path) -> None:
+    """Verify HTTP 413 rejection is cleanly mapped to GroqSpeechProviderError/ProviderError."""
+    audio_file = tmp_path / "audio.wav"
+    audio_file.write_bytes(b"dummy audio content")
+
+    mock_response = httpx.Response(
+        status_code=413,
+        text='{"error": "Payload Too Large"}',
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        provider = GroqSpeechProvider(api_key="gsk_test")
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.transcribe(audio_file)
+
+        err_str = str(exc_info.value)
+        assert "413" in err_str
+        assert "25MB" in err_str
+        assert isinstance(exc_info.value, GroqSpeechProviderError)
+
+
+@pytest.mark.asyncio
+async def test_groq_transcribe_both_top_and_nested_words_prefers_nested(
+    tmp_path: Path,
+) -> None:
+    """Verify that when both top-level and nested words exist, nested words are used."""
+    audio_file = tmp_path / "audio.wav"
+    audio_file.write_bytes(b"dummy audio content")
+
+    api_response = {
+        "text": "Hello world",
+        "language": "en",
+        "duration": 2.0,
+        "segments": [
+            {
+                "id": 0,
+                "start": 0.0,
+                "end": 2.0,
+                "text": "Hello world",
+                "words": [
+                    {"word": "Hello", "start": 0.0, "end": 0.8, "probability": 0.95},
+                    {"word": "world", "start": 0.9, "end": 1.9, "probability": 0.90},
+                ],
+            }
+        ],
+        "words": [
+            {"word": "Hello", "start": 0.0, "end": 0.8},
+            {"word": "world", "start": 0.9, "end": 1.9},
+        ],
+    }
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json=api_response,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        provider = GroqSpeechProvider(api_key="gsk_test")
+        result = await provider.transcribe(audio_file)
+
+        assert len(result.segments) == 1
+        assert len(result.segments[0].words) == 2
+        assert result.segments[0].words[0].confidence == 0.95
+
+
+@pytest.mark.asyncio
+async def test_groq_transcribe_synthesizes_segment_when_segments_empty(
+    tmp_path: Path,
+) -> None:
+    """Verify single segment is synthesized when response has no segments but has text/words."""
+    audio_file = tmp_path / "audio.wav"
+    audio_file.write_bytes(b"dummy audio content")
+
+    api_response = {
+        "text": "Standalone sentence.",
+        "language": "en",
+        "duration": 1.5,
+        "segments": [],
+        "words": [
+            {"word": "Standalone", "start": 0.1, "end": 0.8, "probability": 0.92},
+            {"word": "sentence.", "start": 0.9, "end": 1.4, "probability": 0.88},
+        ],
+    }
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json=api_response,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        provider = GroqSpeechProvider(api_key="gsk_test")
+        result = await provider.transcribe(audio_file)
+
+        assert len(result.segments) == 1
+        assert result.segments[0].text == "Standalone sentence."
+        assert result.segments[0].start_ms == 100
+        assert result.segments[0].end_ms == 1400
+        assert len(result.segments[0].words) == 2
+
+

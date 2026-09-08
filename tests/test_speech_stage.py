@@ -144,6 +144,78 @@ def test_validate_word_timestamps_negative_raises() -> None:
         validate_word_timestamps(res, media_duration_ms=5000, strict=True)
 
 
+def test_validate_word_timestamps_inverted_segment_strict_raises() -> None:
+    """Verify strict validation raises ValueError when segment start_ms exceeds end_ms."""
+    res = TranscriptionResult(
+        segments=[
+            TranscriptionSegment(
+                start_ms=3000,
+                end_ms=1000,
+                text="Inverted segment",
+            )
+        ],
+        full_text="Inverted segment",
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"Segment start timestamp \(3000ms\) exceeds end timestamp \(1000ms\)",
+    ):
+        validate_word_timestamps(res, media_duration_ms=5000, strict=True)
+
+
+def test_validate_word_timestamps_inverted_word_strict_raises() -> None:
+    """Verify strict validation raises ValueError when word start_ms exceeds end_ms."""
+    res = TranscriptionResult(
+        segments=[
+            TranscriptionSegment(
+                start_ms=1000,
+                end_ms=3000,
+                text="Inverted word",
+                words=[
+                    WordTimestamp(word="Inverted", start_ms=2500, end_ms=1500),
+                ],
+            )
+        ],
+        full_text="Inverted word",
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"Word 'Inverted' start timestamp \(2500ms\) exceeds end timestamp \(1500ms\)",
+    ):
+        validate_word_timestamps(res, media_duration_ms=5000, strict=True)
+
+
+def test_validate_word_timestamps_inverted_non_strict_flags_limitation() -> None:
+    """Verify non-strict validation corrects inverted timestamps and flags a limitation."""
+    res = TranscriptionResult(
+        segments=[
+            TranscriptionSegment(
+                start_ms=3000,
+                end_ms=1000,
+                text="Inverted segment and word",
+                words=[
+                    WordTimestamp(word="Inverted", start_ms=2500, end_ms=1200),
+                ],
+            )
+        ],
+        full_text="Inverted segment and word",
+    )
+    limitations = validate_word_timestamps(res, media_duration_ms=5000, strict=False)
+
+    inverted_lims = [lim for lim in limitations if lim.code == "inverted_timestamps"]
+    assert len(inverted_lims) == 1
+    assert inverted_lims[0].scope == "speech"
+    assert "start timestamps exceeded end timestamps" in inverted_lims[0].message
+
+    # Verify intervals were corrected such that start_ms <= end_ms
+    assert res.segments[0].start_ms == 1000
+    assert res.segments[0].end_ms == 3000
+    assert res.segments[0].words[0].start_ms == 1200
+    assert res.segments[0].words[0].end_ms == 2500
+    assert res.segments[0].start_ms <= res.segments[0].end_ms
+    assert res.segments[0].words[0].start_ms <= res.segments[0].words[0].end_ms
+
+
 @pytest.mark.asyncio
 async def test_run_speech_stage_orchestration(tmp_path: Path) -> None:
     """Verify parallel transcription & diarization and SpeechStageResult composition."""

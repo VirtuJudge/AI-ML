@@ -14,6 +14,7 @@ from app.stages.media import (
     MediaNormalizationError,
     MediaNormalizationResult,
     MediaSplitResult,
+    WavMetadata,
     create_normalization_limitation,
     get_wav_metadata,
     normalize_media,
@@ -24,8 +25,8 @@ from app.stages.media import (
 def _create_minimal_wav(
     path: Path, duration_ms: int = 2000, sample_rate: int = 16000, channels: int = 1
 ) -> Path:
-    """Helper to create a small valid PCM WAV file for tests."""
-    n_frames = int(sample_rate * (duration_ms / 1000.0))
+    """Helper to create a minimal valid PCM WAV file on disk for testing."""
+    n_frames = int((duration_ms / 1000.0) * sample_rate)
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(channels)
         wf.setsampwidth(2)
@@ -35,11 +36,18 @@ def _create_minimal_wav(
 
 
 def test_get_wav_metadata(tmp_path: Path) -> None:
-    """Verify get_wav_metadata reads correct duration, sample_rate, and channels."""
+    """Verify get_wav_metadata returns WavMetadata with explicit fields."""
     wav_path = tmp_path / "sample.wav"
     _create_minimal_wav(wav_path, duration_ms=2500, sample_rate=16000, channels=1)
 
-    duration_ms, sample_rate, channels = get_wav_metadata(wav_path)
+    meta = get_wav_metadata(wav_path)
+    assert isinstance(meta, WavMetadata)
+    assert meta.duration_ms == 2500
+    assert meta.sample_rate == 16000
+    assert meta.channels == 1
+
+    # Also verify backward-compatible tuple unpacking by position
+    duration_ms, sample_rate, channels = meta
     assert duration_ms == 2500
     assert sample_rate == 16000
     assert channels == 1
