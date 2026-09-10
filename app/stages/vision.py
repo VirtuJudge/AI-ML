@@ -14,6 +14,8 @@ from app.contracts import Limitation
 from app.providers.base import VisionProvider
 from app.providers.types import VisualObservation
 
+from app.stages.common import validate_observation_timestamps
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,46 +30,22 @@ class VisionStageResult(BaseModel):
 def validate_visual_observations(
     observations: list[VisualObservation],
     media_duration_ms: int,
+    *,
+    source_artifact_id: str = "",
 ) -> tuple[list[VisualObservation], list[Limitation]]:
     """Clamp observation timestamps and report limitations if out of bounds."""
-    valid: list[VisualObservation] = []
-    limitations: list[Limitation] = []
-    had_out_of_bounds = False
-
-    for obs in observations:
-        start_ms = obs.start_ms
-        end_ms = obs.end_ms
-        clamped = False
-
-        if end_ms > media_duration_ms:
-            end_ms = media_duration_ms
-            clamped = True
-        if start_ms > media_duration_ms:
-            start_ms = media_duration_ms
-            clamped = True
-        if start_ms > end_ms:
-            start_ms, end_ms = end_ms, start_ms
-            clamped = True
-
-        if clamped:
-            had_out_of_bounds = True
-            valid.append(obs.model_copy(update={"start_ms": start_ms, "end_ms": end_ms}))
-        else:
-            valid.append(obs)
-
-    if had_out_of_bounds:
-        limitations.append(
-            Limitation(
-                code="vision_observation_timestamp_clamped",
-                scope="vision",
-                message=(
-                    "One or more visual observations had timestamps exceeding "
-                    "media duration and were clamped."
-                ),
-                affected_dimensions=["visual_delivery"],
-            )
-        )
-    return valid, limitations
+    return validate_observation_timestamps(
+        observations,
+        media_duration_ms,
+        scope="vision",
+        clamped_code="vision_observation_timestamp_clamped",
+        clamped_message=(
+            "One or more visual observations had timestamps exceeding "
+            "media duration and were clamped."
+        ),
+        affected_dimensions=["visual_delivery"],
+        source_artifact_id=source_artifact_id,
+    )
 
 
 def check_coverage_limitations(
@@ -117,6 +95,8 @@ async def run_vision_stage(
     vision_provider: VisionProvider,
     *,
     media_duration_ms: int,
+    source_artifact_id: str = "",
+    skip_file_check: bool = False,
 ) -> VisionStageResult:
     """Run the vision measurement stage.
 
@@ -124,6 +104,8 @@ async def run_vision_stage(
         video_path: Path to video file (from split_media). None if audio-only.
         vision_provider: VisionProvider adapter (real or fake).
         media_duration_ms: Total media duration for timestamp validation.
+        source_artifact_id: Identifier of the source video artifact.
+        skip_file_check: If True, bypass file existence check (useful for fake providers).
 
     Returns:
         VisionStageResult with timed observations and any limitations.
@@ -142,7 +124,7 @@ async def run_vision_stage(
         return VisionStageResult(limitations=limitations)
 
     video_file = Path(video_path)
-    if not video_file.is_file():
+    if not skip_file_check and not video_file.is_file():
         logger.warning("Video file not found for vision analysis: %s", video_file)
         limitations.append(
             Limitation(
@@ -179,7 +161,10 @@ async def run_vision_stage(
         )
         return VisionStageResult(limitations=limitations)
 
-    validated, ts_limitations = validate_visual_observations(raw_observations, media_duration_ms)
+    resolved_artifact_id = source_artifact_id or video_file.name
+    validated, ts_limitations = validate_visual_observations(
+        raw_observations, media_duration_ms, source_artifact_id=resolved_artifact_id
+    )
     limitations.extend(ts_limitations)
 
     coverage_limitations = check_coverage_limitations(validated, media_duration_ms)

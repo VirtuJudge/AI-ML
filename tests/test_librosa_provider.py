@@ -37,6 +37,51 @@ def synthetic_sine_wav(tmp_path: Path) -> Path:
     return wav_path
 
 
+@pytest.fixture
+def synthetic_silence_wav(tmp_path: Path) -> Path:
+    """Create a 2-second silent WAV audio file."""
+    wav_path = tmp_path / "silence_2s.wav"
+    sample_rate = 16000
+    duration_s = 2.0
+    n_samples = int(sample_rate * duration_s)
+
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        # All zeros
+        wf.writeframes(bytearray(n_samples * 2))
+
+    return wav_path
+
+
+@pytest.fixture
+def synthetic_filler_wav(tmp_path: Path) -> Path:
+    """Create synthetic audio containing a vocalized hesitation (400ms 150Hz tone with silence)."""
+    wav_path = tmp_path / "filler_hesitation.wav"
+    sample_rate = 16000
+
+    # 500ms silence + 400ms 150Hz tone + 500ms silence
+    frames = bytearray()
+    silence_500ms = int(sample_rate * 0.5)
+    frames.extend(b"\x00\x00" * silence_500ms)
+
+    tone_400ms = int(sample_rate * 0.4)
+    for i in range(tone_400ms):
+        sample = int(12000 * math.sin(2 * math.pi * 150.0 * i / sample_rate))
+        frames.extend(struct.pack("<h", sample))
+
+    frames.extend(b"\x00\x00" * silence_500ms)
+
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(frames)
+
+    return wav_path
+
+
 def test_librosa_provider_satisfies_protocol() -> None:
     """Verify LibrosaAudioProvider satisfies AudioMetricsProvider Protocol."""
     provider: AudioMetricsProvider = LibrosaAudioProvider()
@@ -69,6 +114,7 @@ async def test_librosa_provider_synthetic_sine_wave(synthetic_sine_wav: Path) ->
     assert "pitch_std_hz" in metrics
     assert "pause_duration_ms" in metrics
     assert "pause_count" in metrics
+    assert "filler_count" in metrics
 
     # A pure 220Hz sine wave should yield mean pitch near 220Hz (+/- 10Hz)
     pitch_obs = metrics["pitch_mean_hz"]
@@ -81,14 +127,56 @@ async def test_librosa_provider_synthetic_sine_wave(synthetic_sine_wav: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_librosa_provider_silence_produces_no_pitch_observations(
+    synthetic_silence_wav: Path,
+) -> None:
+    """Verify that unvoiced/silent audio omits pitch metrics rather than inventing 0.0 Hz."""
+    provider = LibrosaAudioProvider(window_sec=2.0, hop_sec=2.0)
+    observations = await provider.extract_metrics(synthetic_silence_wav)
+
+    assert len(observations) > 0
+    metrics = {obs.metric: obs for obs in observations}
+
+    # Crucial contract check: unvoiced silence MUST NOT emit pitch_mean_hz = 0.0
+    assert "pitch_mean_hz" not in metrics
+    assert "pitch_std_hz" not in metrics
+
+    # Silence metrics must conform to expected tolerances (near 2000ms duration)
+    assert "pause_duration_ms" in metrics
+    pause_ms = metrics["pause_duration_ms"].value
+    assert 1850.0 <= pause_ms <= 2150.0
+
+
+@pytest.mark.asyncio
+async def test_librosa_provider_synthetic_filler_detection(
+    synthetic_filler_wav: Path,
+) -> None:
+    """Verify that vocalized hesitation (filler vowel) is detected within numeric tolerance."""
+    provider = LibrosaAudioProvider(window_sec=2.0, hop_sec=2.0)
+    observations = await provider.extract_metrics(synthetic_filler_wav)
+
+    assert len(observations) > 0
+    metrics = {obs.metric: obs for obs in observations}
+
+    assert "filler_count" in metrics
+    assert metrics["filler_count"].value >= 1.0
+
+    # The 150 Hz tone should be captured near 150 Hz (+/- 15 Hz tolerance accounting for window boundary)
+    assert "pitch_mean_hz" in metrics
+    assert 135.0 <= metrics["pitch_mean_hz"].value <= 165.0
+
+
+@pytest.mark.asyncio
 async def test_librosa_provider_real_audio() -> None:
-    """Verify provider runs on real speech audio if sample file is available."""
-    real_audio_path = Path("D:/MyData/Victories-5/test/test_audio.wav")
-    if not real_audio_path.is_file():
-        pytest.skip("Sample test audio not found on disk")
+    """Verify provider runs on real speech audio if sample file path is configured."""
+    import os
+
+    sample_env = os.getenv("TEST_SAMPLE_AUDIO")
+    if not sample_env or not Path(sample_env).is_file():
+        pytest.skip("No sample test audio path configured via TEST_SAMPLE_AUDIO")
 
     provider = LibrosaAudioProvider(window_sec=5.0, hop_sec=5.0)
-    observations = await provider.extract_metrics(real_audio_path)
+    observations = await provider.extract_metrics(Path(sample_env))
 
     assert len(observations) > 0
     metrics = {obs.metric for obs in observations}

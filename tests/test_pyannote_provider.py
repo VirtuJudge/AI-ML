@@ -166,3 +166,20 @@ async def test_pyannote_missing_audio(tmp_path: Path) -> None:
     missing = tmp_path / "non_existent.wav"
     with pytest.raises(FileNotFoundError, match="Audio file not found"):
         await provider.diarize(missing)
+
+
+@pytest.mark.asyncio
+async def test_pyannote_device_assignment(tmp_path: Path) -> None:
+    """Verify provider stores device and handles waveform tensor placement."""
+    audio_path = tmp_path / "test.wav"
+    audio_path.write_bytes(b"dummy")
+
+    mock_pipeline = _create_mock_pyannote_pipeline([(FakeTurn(0.0, 1.0), "track_0", "Spk_1")])
+    mock_pipeline.device = "cpu"
+    provider = PyannoteDiarizationProvider(
+        pipeline_instance=mock_pipeline,
+        device="cpu",
+    )
+    assert provider._device == "cpu"
+    result = await provider.diarize(audio_path)
+    assert len(result.segments) == 1

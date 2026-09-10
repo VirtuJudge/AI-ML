@@ -5,6 +5,7 @@ from app.stages.audio import (
     run_audio_stage,
     validate_audio_observations,
 )
+from app.stages.common import validate_observation_timestamps
 from app.stages.media import (
     SUPPORTED_MEDIA_EXTENSIONS,
     FFmpegExecutionError,
@@ -48,6 +49,7 @@ __all__ = [
     "run_vision_stage",
     "split_media",
     "validate_audio_observations",
+    "validate_observation_timestamps",
     "validate_visual_observations",
     "validate_word_timestamps",
 ]

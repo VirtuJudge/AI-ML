@@ -83,9 +83,9 @@ async def test_audio_stage_happy_path(dummy_audio_file: Path) -> None:
     result = await run_audio_stage(dummy_audio_file, provider, media_duration_ms=15000)
 
     assert isinstance(result, AudioStageResult)
-    assert len(result.observations) == 9
+    assert len(result.observations) == 12
     assert len(result.limitations) == 0
-    assert result.metadata["observation_count"] == 9
+    assert result.metadata["observation_count"] == 12
     assert result.metadata["provider"] == "FakeAudioMetricsProvider"
     assert result.metadata["media_duration_ms"] == 15000
 
@@ -264,12 +264,14 @@ def test_validate_audio_observations_function() -> None:
             algorithm_version="test",
         ),
     ]
-    validated, limitations = validate_audio_observations(raw, media_duration_ms=10000)
+    validated, limitations = validate_audio_observations(
+        raw, media_duration_ms=10000, source_artifact_id="audio_artifact_123"
+    )
 
-    assert len(validated) == 2
-    assert validated[0].start_ms == 10000
-    assert validated[0].end_ms == 10000
-    assert validated[1].start_ms == 4000
-    assert validated[1].end_ms == 5000
+    # Observation starting at 12000ms >= 10000ms duration is discarded; inverted 5000->4000 is swapped
+    assert len(validated) == 1
+    assert validated[0].start_ms == 4000
+    assert validated[0].end_ms == 5000
+    assert validated[0].source_artifact_id == "audio_artifact_123"
     assert len(limitations) == 1
     assert limitations[0].code == "audio_observation_timestamp_clamped"

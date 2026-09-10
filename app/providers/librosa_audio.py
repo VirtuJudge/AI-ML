@@ -52,7 +52,9 @@ class LibrosaAudioProvider:
         self.fmax = min(2000.0, float(fmax))
         self.silence_threshold_db = float(silence_threshold_db)
 
-    def _process_audio_sync(self, audio_path: Path) -> list[AudioObservation]:
+    def _process_audio_sync(
+        self, audio_path: Path, source_artifact_id: str = ""
+    ) -> list[AudioObservation]:
         """Synchronously load and analyze audio intervals."""
         if not audio_path.is_file():
             raise RuntimeError(f"Failed to load audio file {audio_path}: File does not exist")
@@ -66,6 +68,7 @@ class LibrosaAudioProvider:
             logger.warning("Loaded empty audio array from %s", audio_path)
             return []
 
+        artifact_id = source_artifact_id or audio_path.name
         total_duration_sec = len(y) / sr
         frame_ms = (self.hop_length / sr) * 1000.0
         min_pause_frames = max(1, round(250.0 / frame_ms))  # 250ms threshold for pause event
@@ -107,8 +110,11 @@ class LibrosaAudioProvider:
                 wpm_val = 0.0
 
             # 2. Fundamental frequency (pitch) mean and variation via pYIN
-            pitch_mean = 0.0
-            pitch_std = 0.0
+            pitch_mean: float | None = None
+            pitch_std: float | None = None
+            filler_count = 0
+            filler_duration_ms = 0.0
+
             try:
                 f0, voiced_flag, _ = librosa.pyin(
                     y_win,
@@ -121,10 +127,36 @@ class LibrosaAudioProvider:
                 if len(valid_voiced) > 0:
                     pitch_mean = round(float(np.mean(valid_voiced)), 2)
                     pitch_std = round(float(np.std(valid_voiced)), 2)
-            except Exception:
-                logger.debug("Pitch estimation failed for window [%.2f, %.2f]", w_start, w_end)
 
-            # 3. Silence / pause detection via RMS energy thresholding
+                # 3. Acoustic filler word detection
+                # Hesitation / vocalized pauses ("uh", "um") are continuous voiced segments
+                # lasting between 200ms and 1000ms with steady pitch (low contour deviation).
+                min_filler_frames = max(2, int(round(200.0 / frame_ms)))
+                max_filler_frames = max(min_filler_frames, int(round(1000.0 / frame_ms)))
+                consec_voiced = 0
+                run_pitches: list[float] = []
+
+                for i, is_v in enumerate(voiced_flag):
+                    if is_v and not np.isnan(f0[i]):
+                        consec_voiced += 1
+                        run_pitches.append(float(f0[i]))
+                    else:
+                        if min_filler_frames <= consec_voiced <= max_filler_frames and run_pitches:
+                            if float(np.std(run_pitches)) < 35.0:
+                                filler_count += 1
+                                filler_duration_ms += consec_voiced * frame_ms
+                        consec_voiced = 0
+                        run_pitches = []
+
+                if min_filler_frames <= consec_voiced <= max_filler_frames and run_pitches:
+                    if float(np.std(run_pitches)) < 35.0:
+                        filler_count += 1
+                        filler_duration_ms += consec_voiced * frame_ms
+
+            except Exception:
+                logger.debug("Pitch and filler estimation failed for window [%.2f, %.2f]", w_start, w_end)
+
+            # 4. Silence / pause detection via RMS energy thresholding
             pause_duration_ms = 0.0
             pause_count = 0
             try:
@@ -154,35 +186,48 @@ class LibrosaAudioProvider:
                 logger.debug("Pause analysis failed for window [%.2f, %.2f]", w_start, w_end)
 
             # Add contract-compliant acoustic observations
+            observations.append(
+                AudioObservation(
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    metric="speaking_rate_wpm",
+                    value=wpm_val,
+                    unit="words_per_minute",
+                    confidence=0.85,
+                    source_artifact_id=artifact_id,
+                    algorithm_version=ALGORITHM_VERSION,
+                )
+            )
+
+            # Only emit pitch observations when voiced speech was actually detected
+            if pitch_mean is not None and pitch_std is not None:
+                observations.extend(
+                    [
+                        AudioObservation(
+                            start_ms=start_ms,
+                            end_ms=end_ms,
+                            metric="pitch_mean_hz",
+                            value=pitch_mean,
+                            unit="hertz",
+                            confidence=0.85,
+                            source_artifact_id=artifact_id,
+                            algorithm_version=ALGORITHM_VERSION,
+                        ),
+                        AudioObservation(
+                            start_ms=start_ms,
+                            end_ms=end_ms,
+                            metric="pitch_std_hz",
+                            value=pitch_std,
+                            unit="hertz",
+                            confidence=0.85,
+                            source_artifact_id=artifact_id,
+                            algorithm_version=ALGORITHM_VERSION,
+                        ),
+                    ]
+                )
+
             observations.extend(
                 [
-                    AudioObservation(
-                        start_ms=start_ms,
-                        end_ms=end_ms,
-                        metric="speaking_rate_wpm",
-                        value=wpm_val,
-                        unit="words_per_minute",
-                        confidence=0.85,
-                        algorithm_version=ALGORITHM_VERSION,
-                    ),
-                    AudioObservation(
-                        start_ms=start_ms,
-                        end_ms=end_ms,
-                        metric="pitch_mean_hz",
-                        value=pitch_mean,
-                        unit="hertz",
-                        confidence=0.85,
-                        algorithm_version=ALGORITHM_VERSION,
-                    ),
-                    AudioObservation(
-                        start_ms=start_ms,
-                        end_ms=end_ms,
-                        metric="pitch_std_hz",
-                        value=pitch_std,
-                        unit="hertz",
-                        confidence=0.85,
-                        algorithm_version=ALGORITHM_VERSION,
-                    ),
                     AudioObservation(
                         start_ms=start_ms,
                         end_ms=end_ms,
@@ -190,6 +235,7 @@ class LibrosaAudioProvider:
                         value=pause_duration_ms,
                         unit="milliseconds",
                         confidence=0.85,
+                        source_artifact_id=artifact_id,
                         algorithm_version=ALGORITHM_VERSION,
                     ),
                     AudioObservation(
@@ -199,6 +245,17 @@ class LibrosaAudioProvider:
                         value=float(pause_count),
                         unit="count",
                         confidence=0.85,
+                        source_artifact_id=artifact_id,
+                        algorithm_version=ALGORITHM_VERSION,
+                    ),
+                    AudioObservation(
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        metric="filler_count",
+                        value=float(filler_count),
+                        unit="count",
+                        confidence=0.80,
+                        source_artifact_id=artifact_id,
                         algorithm_version=ALGORITHM_VERSION,
                     ),
                 ]
@@ -206,9 +263,13 @@ class LibrosaAudioProvider:
 
         return observations
 
-    async def extract_metrics(self, audio_path: Path) -> list[AudioObservation]:
+    async def extract_metrics(
+        self, audio_path: Path, *, source_artifact_id: str = ""
+    ) -> list[AudioObservation]:
         """Asynchronously analyze audio file and extract acoustic observations."""
-        return await asyncio.to_thread(self._process_audio_sync, Path(audio_path))
+        return await asyncio.to_thread(
+            self._process_audio_sync, Path(audio_path), source_artifact_id
+        )
 
 
 __all__ = [

@@ -13,9 +13,12 @@ class FakeVisionProvider:
     def __init__(self, *, duration_ms: int = 15000) -> None:
         self._duration_ms = duration_ms
 
-    async def analyze_video(self, video_path: Path) -> list[VisualObservation]:
+    async def analyze_video(
+        self, video_path: Path, *, source_artifact_id: str = ""
+    ) -> list[VisualObservation]:
         # Generate observations at 0s, 5s, 10s if they fit within duration
         observations: list[VisualObservation] = []
+        artifact_id = source_artifact_id or video_path.name
         sample_points = [
             (0, 1000, "gaze_direction", 1.0, "categorical_index", 0.95),  # 1 = camera
             (0, 1000, "head_pitch_degrees", -2.5, "degrees", 0.92),
@@ -37,6 +40,7 @@ class FakeVisionProvider:
                         value=value,
                         unit=unit,
                         confidence=conf,
+                        source_artifact_id=artifact_id,
                         algorithm_version=ALGORITHM_VERSION,
                     )
                 )

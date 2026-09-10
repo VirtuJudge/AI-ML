@@ -285,7 +285,7 @@ async def test_vision_stage_no_private_frames_in_metadata(dummy_video_file: Path
 
 
 def test_validate_visual_observations_inversion() -> None:
-    """Unit test validate_visual_observations handles inverted start_ms and end_ms."""
+    """Unit test validate_visual_observations handles inverted timestamps and out-of-bounds start."""
     obs = [
         VisualObservation(
             start_ms=5000,
@@ -293,13 +293,24 @@ def test_validate_visual_observations_inversion() -> None:
             metric="gaze_direction",
             value=1.0,
             unit="categorical_index",
-        )
+        ),
+        VisualObservation(
+            start_ms=12000,
+            end_ms=15000,
+            metric="shoulder_symmetry_ratio",
+            value=0.95,
+            unit="ratio",
+        ),
     ]
-    validated, limitations = validate_visual_observations(obs, media_duration_ms=10000)
+    validated, limitations = validate_visual_observations(
+        obs, media_duration_ms=10000, source_artifact_id="video_art_456"
+    )
 
+    # Inverted 5000->2000 is corrected; out-of-bounds 12000ms is discarded
     assert len(validated) == 1
     assert validated[0].start_ms == 2000
     assert validated[0].end_ms == 5000
+    assert validated[0].source_artifact_id == "video_art_456"
     assert len(limitations) == 1
     assert limitations[0].code == "vision_observation_timestamp_clamped"
 

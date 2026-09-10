@@ -14,6 +14,8 @@ from app.contracts import Limitation
 from app.providers.base import AudioMetricsProvider
 from app.providers.types import AudioObservation
 
+from app.stages.common import validate_observation_timestamps
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,46 +30,22 @@ class AudioStageResult(BaseModel):
 def validate_audio_observations(
     observations: list[AudioObservation],
     media_duration_ms: int,
+    *,
+    source_artifact_id: str = "",
 ) -> tuple[list[AudioObservation], list[Limitation]]:
     """Clamp observation timestamps and report limitations if out of bounds."""
-    valid: list[AudioObservation] = []
-    limitations: list[Limitation] = []
-    had_out_of_bounds = False
-
-    for obs in observations:
-        start_ms = obs.start_ms
-        end_ms = obs.end_ms
-        clamped = False
-
-        if end_ms > media_duration_ms:
-            end_ms = media_duration_ms
-            clamped = True
-        if start_ms > media_duration_ms:
-            start_ms = media_duration_ms
-            clamped = True
-        if start_ms > end_ms:
-            start_ms, end_ms = end_ms, start_ms
-            clamped = True
-
-        if clamped:
-            had_out_of_bounds = True
-            valid.append(obs.model_copy(update={"start_ms": start_ms, "end_ms": end_ms}))
-        else:
-            valid.append(obs)
-
-    if had_out_of_bounds:
-        limitations.append(
-            Limitation(
-                code="audio_observation_timestamp_clamped",
-                scope="audio_features",
-                message=(
-                    "One or more audio observations had timestamps exceeding "
-                    "media duration and were clamped."
-                ),
-                affected_dimensions=["delivery_pace", "acoustic_features"],
-            )
-        )
-    return valid, limitations
+    return validate_observation_timestamps(
+        observations,
+        media_duration_ms,
+        scope="audio_features",
+        clamped_code="audio_observation_timestamp_clamped",
+        clamped_message=(
+            "One or more audio observations had timestamps exceeding "
+            "media duration and were clamped."
+        ),
+        affected_dimensions=["delivery_pace", "acoustic_features"],
+        source_artifact_id=source_artifact_id,
+    )
 
 
 async def run_audio_stage(
@@ -75,6 +53,8 @@ async def run_audio_stage(
     audio_provider: AudioMetricsProvider,
     *,
     media_duration_ms: int,
+    source_artifact_id: str = "",
+    skip_file_check: bool = False,
 ) -> AudioStageResult:
     """Run the audio acoustic measurement stage.
 
@@ -82,6 +62,8 @@ async def run_audio_stage(
         audio_path: Path to normalized 16kHz mono WAV. None if audio missing.
         audio_provider: AudioMetricsProvider adapter (real or fake).
         media_duration_ms: Total media duration for timestamp validation.
+        source_artifact_id: Identifier of the source audio artifact.
+        skip_file_check: If True, bypass file existence check (useful for fake providers).
 
     Returns:
         AudioStageResult with timed observations and any limitations.
@@ -100,7 +82,7 @@ async def run_audio_stage(
         return AudioStageResult(limitations=limitations)
 
     audio_file = Path(audio_path)
-    if not audio_file.is_file():
+    if not skip_file_check and not audio_file.is_file():
         logger.warning("Audio file not found for acoustic analysis: %s", audio_file)
         limitations.append(
             Limitation(
@@ -137,7 +119,10 @@ async def run_audio_stage(
         )
         return AudioStageResult(limitations=limitations)
 
-    validated, ts_limitations = validate_audio_observations(raw_observations, media_duration_ms)
+    resolved_artifact_id = source_artifact_id or audio_file.name
+    validated, ts_limitations = validate_audio_observations(
+        raw_observations, media_duration_ms, source_artifact_id=resolved_artifact_id
+    )
     limitations.extend(ts_limitations)
 
     metadata: dict[str, Any] = {

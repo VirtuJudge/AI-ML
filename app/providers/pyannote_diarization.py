@@ -56,8 +56,11 @@ class PyannoteDiarizationProvider:
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
 
+        self._device: Any = None
         if pipeline_instance is not None:
             self._pipeline = pipeline_instance
+            if hasattr(pipeline_instance, "device"):
+                self._device = pipeline_instance.device
         else:
             try:
                 from pyannote.audio import Pipeline
@@ -101,8 +104,9 @@ class PyannoteDiarizationProvider:
                 else:
                     dev = torch.device(self.device)
                 pipeline.to(dev)
+                self._device = dev
             except Exception:
-                pass
+                self._device = None
 
             self._pipeline = pipeline
 
@@ -128,8 +132,8 @@ class PyannoteDiarizationProvider:
             else:
                 waveform = torch.from_numpy(data.T)
 
-            if hasattr(self, "_pipeline") and hasattr(self._pipeline, "device"):
-                waveform = waveform.to(self._pipeline.device)
+            if self._device is not None:
+                waveform = waveform.to(self._device)
 
             audio_input: Any = {"waveform": waveform, "sample_rate": sr}
         except Exception:

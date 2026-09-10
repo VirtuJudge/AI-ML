@@ -34,16 +34,29 @@ POSE_MODEL_URL = (
 ALGORITHM_VERSION = f"mediapipe/{mp.__version__}"
 
 
+MIN_MODEL_BYTES = 500_000  # Task models are 5-10MB; anything under 500KB is incomplete
+
+
 def _ensure_model(model_path: Path, url: str) -> Path:
-    """Ensure that the required task model file exists, downloading if necessary."""
-    if model_path.is_file() and model_path.stat().st_size > 0:
+    """Ensure that the required task model file exists and is valid, downloading atomically if necessary."""
+    if model_path.is_file() and model_path.stat().st_size >= MIN_MODEL_BYTES:
         return model_path
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = model_path.with_suffix(".tmp")
     logger.info("Downloading MediaPipe model from %s to %s", url, model_path)
     try:
-        urllib.request.urlretrieve(url, model_path)
+        urllib.request.urlretrieve(url, tmp_path)
+        if not tmp_path.is_file() or tmp_path.stat().st_size < MIN_MODEL_BYTES:
+            size = tmp_path.stat().st_size if tmp_path.is_file() else 0
+            raise RuntimeError(f"Downloaded model is incomplete or corrupt ({size} bytes)")
+        os.replace(tmp_path, model_path)
     except Exception as exc:
+        if tmp_path.is_file():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         raise RuntimeError(
             f"Failed to download MediaPipe model from {url} to {model_path}: {exc}"
         ) from exc
@@ -116,7 +129,12 @@ class MediaPipeVisionProvider:
         self._pose_landmarker = vision.PoseLandmarker.create_from_options(options)
         return self._pose_landmarker
 
-    def _process_video_sync(self, video_path: Path) -> list[VisualObservation]:
+    def _process_video_sync(
+        self,
+        video_path: Path,
+        media_duration_ms: int | None = None,
+        source_artifact_id: str = "",
+    ) -> list[VisualObservation]:
         """Synchronously sample frames and extract visual observations per tracked person."""
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -130,6 +148,11 @@ class MediaPipeVisionProvider:
         step_frames = max(1, round(fps / self.sample_fps))
         interval_ms = round(1000.0 / self.sample_fps)
 
+        if media_duration_ms is None and total_frames > 0 and fps > 0:
+            media_duration_ms = round(total_frames / fps * 1000.0)
+
+        artifact_id = source_artifact_id or video_path.name
+
         face_landmarker = self._get_face_landmarker()
         pose_landmarker = self._get_pose_landmarker()
 
@@ -137,20 +160,27 @@ class MediaPipeVisionProvider:
 
         # Multi-person tracking state across frames
         tracked_persons: dict[str, tuple[float, float]] = {}
-        prev_upper_body_midpoints: dict[str, tuple[float, float]] = {}
+        prev_upper_body_midpoints: dict[str, tuple[float, float, int]] = {}
 
         frame_idx = 0
         try:
-            while frame_idx < total_frames:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            while True:
+                if total_frames > 0 and frame_idx >= total_frames:
+                    break
+
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     break
 
                 frame_h, frame_w = frame.shape[:2]
                 frame_ms = round(frame_idx / fps * 1000.0)
+                if media_duration_ms is not None and frame_ms >= media_duration_ms:
+                    break
+
                 start_ms = frame_ms
                 end_ms = frame_ms + interval_ms
+                if media_duration_ms is not None and media_duration_ms > start_ms:
+                    end_ms = min(end_ms, media_duration_ms)
 
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
@@ -177,15 +207,12 @@ class MediaPipeVisionProvider:
                                     best_pid = pid
 
                             if best_pid is None:
-                                # Only allocate new ID if all existing tracked persons
-                                # are already assigned in this frame
-                                if (
-                                    len(assigned_pids) == len(tracked_persons)
-                                    and len(tracked_persons) < self.max_persons
-                                ):
+                                # No existing unassigned track is close enough (dist < 0.40)
+                                if len(tracked_persons) < self.max_persons:
                                     best_pid = f"PERSON_{len(tracked_persons):02d}"
                                     tracked_persons[best_pid] = (fc_x, fc_y)
-                                elif tracked_persons:
+                                else:
+                                    # All slots full: fallback to closest unassigned track if any exist
                                     unassigned = [
                                         p for p in tracked_persons if p not in assigned_pids
                                     ]
@@ -198,11 +225,7 @@ class MediaPipeVisionProvider:
                                             ),
                                         )
                                     else:
-                                        best_pid = f"PERSON_{len(tracked_persons):02d}"
-                                        tracked_persons[best_pid] = (fc_x, fc_y)
-                                else:
-                                    best_pid = f"PERSON_{len(tracked_persons):02d}"
-                                    tracked_persons[best_pid] = (fc_x, fc_y)
+                                        continue
 
                             # Smoothly update centroid with exponential moving average
                             old_x, old_y = tracked_persons[best_pid]
@@ -252,6 +275,7 @@ class MediaPipeVisionProvider:
                                         value=gaze_idx,
                                         unit="categorical_index",
                                         confidence=0.90,
+                                        source_artifact_id=artifact_id,
                                         speaker_label=best_pid,
                                         algorithm_version=ALGORITHM_VERSION,
                                     ),
@@ -262,6 +286,7 @@ class MediaPipeVisionProvider:
                                         value=round(pitch_deg, 2),
                                         unit="degrees",
                                         confidence=0.90,
+                                        source_artifact_id=artifact_id,
                                         speaker_label=best_pid,
                                         algorithm_version=ALGORITHM_VERSION,
                                     ),
@@ -272,6 +297,7 @@ class MediaPipeVisionProvider:
                                         value=round(yaw_deg, 2),
                                         unit="degrees",
                                         confidence=0.90,
+                                        source_artifact_id=artifact_id,
                                         speaker_label=best_pid,
                                         algorithm_version=ALGORITHM_VERSION,
                                     ),
@@ -282,6 +308,7 @@ class MediaPipeVisionProvider:
                                         value=round(mar, 4),
                                         unit="ratio",
                                         confidence=0.90,
+                                        source_artifact_id=artifact_id,
                                         speaker_label=best_pid,
                                         algorithm_version=ALGORITHM_VERSION,
                                     ),
@@ -308,13 +335,24 @@ class MediaPipeVisionProvider:
                                 else 1.0
                             )
 
+                            # Posture openness: ratio of arm span (wrists or elbows) to shoulder width
+                            # MediaPipe Pose: 13=left elbow, 14=right elbow, 15=left wrist, 16=right wrist
+                            le, re = pl[13], pl[14]
+                            lw, rw = pl[15], pl[16]
+                            wrist_span = math.sqrt((lw.x - rw.x) ** 2 + (lw.y - rw.y) ** 2)
+                            elbow_span = math.sqrt((le.x - re.x) ** 2 + (le.y - re.y) ** 2)
+                            arm_span = max(wrist_span, elbow_span)
+                            posture_openness = (
+                                round(arm_span / dx_shoulder, 2)
+                                if dx_shoulder > 1e-4
+                                else 1.0
+                            )
+
                             shoulder_cx = (ls.x + rs.x) / 2.0
                             mid_x = shoulder_cx * frame_w
                             mid_y = (ls.y + rs.y) / 2.0 * frame_h
-                            current_midpoint = (mid_x, mid_y)
 
-                            # Match pose to the nearest detected face person
-                            # or existing tracked person
+                            # Match pose to the nearest detected face person or existing tracked person
                             best_pid = None
                             best_xdiff = 0.40
                             for pid, fl in detected_face_persons:
@@ -326,12 +364,21 @@ class MediaPipeVisionProvider:
                                     best_pid = pid
 
                             if best_pid is None:
-                                remaining_face_pids = [
-                                    p for p, _ in detected_face_persons
-                                    if p not in assigned_pose_pids
-                                ]
-                                if remaining_face_pids:
-                                    best_pid = remaining_face_pids[0]
+                                for pid, (px, py) in tracked_persons.items():
+                                    if pid in assigned_pose_pids:
+                                        continue
+                                    xdiff = abs(px - shoulder_cx)
+                                    if xdiff < best_xdiff:
+                                        best_xdiff = xdiff
+                                        best_pid = pid
+
+                            if best_pid is None:
+                                if len(tracked_persons) < self.max_persons:
+                                    best_pid = f"PERSON_{len(tracked_persons):02d}"
+                                    tracked_persons[best_pid] = (
+                                        shoulder_cx,
+                                        (ls.y + rs.y) / 2.0,
+                                    )
                                 elif tracked_persons:
                                     unassigned_tracked = [
                                         p for p in tracked_persons if p not in assigned_pose_pids
@@ -340,12 +387,6 @@ class MediaPipeVisionProvider:
                                         best_pid = min(
                                             unassigned_tracked,
                                             key=lambda p: abs(tracked_persons[p][0] - shoulder_cx),
-                                        )
-                                    elif len(tracked_persons) < self.max_persons:
-                                        best_pid = f"PERSON_{len(tracked_persons):02d}"
-                                        tracked_persons[best_pid] = (
-                                            shoulder_cx,
-                                            (ls.y + rs.y) / 2.0,
                                         )
                                     else:
                                         best_pid = "PERSON_00"
@@ -358,14 +399,18 @@ class MediaPipeVisionProvider:
 
                             assigned_pose_pids.add(best_pid)
 
-                            prev_mid = prev_upper_body_midpoints.get(best_pid)
-                            if prev_mid is not None:
-                                displacement = math.sqrt(
-                                    (mid_x - prev_mid[0]) ** 2 + (mid_y - prev_mid[1]) ** 2
-                                )
+                            prev_data = prev_upper_body_midpoints.get(best_pid)
+                            if prev_data is not None:
+                                prev_mid_x, prev_mid_y, prev_frame_idx = prev_data
+                                if frame_idx - prev_frame_idx <= step_frames * 1.5:
+                                    displacement = math.sqrt(
+                                        (mid_x - prev_mid_x) ** 2 + (mid_y - prev_mid_y) ** 2
+                                    )
+                                else:
+                                    displacement = 0.0
                             else:
                                 displacement = 0.0
-                            prev_upper_body_midpoints[best_pid] = current_midpoint
+                            prev_upper_body_midpoints[best_pid] = (mid_x, mid_y, frame_idx)
 
                             observations.extend(
                                 [
@@ -376,6 +421,18 @@ class MediaPipeVisionProvider:
                                         value=round(sym_ratio, 4),
                                         unit="ratio",
                                         confidence=0.88,
+                                        source_artifact_id=artifact_id,
+                                        speaker_label=best_pid,
+                                        algorithm_version=ALGORITHM_VERSION,
+                                    ),
+                                    VisualObservation(
+                                        start_ms=start_ms,
+                                        end_ms=end_ms,
+                                        metric="posture_openness",
+                                        value=float(posture_openness),
+                                        unit="ratio",
+                                        confidence=0.88,
+                                        source_artifact_id=artifact_id,
                                         speaker_label=best_pid,
                                         algorithm_version=ALGORITHM_VERSION,
                                     ),
@@ -386,6 +443,7 @@ class MediaPipeVisionProvider:
                                         value=round(displacement, 2),
                                         unit="pixels",
                                         confidence=0.88,
+                                        source_artifact_id=artifact_id,
                                         speaker_label=best_pid,
                                         algorithm_version=ALGORITHM_VERSION,
                                     ),
@@ -401,15 +459,34 @@ class MediaPipeVisionProvider:
                 del rgb_frame
                 del mp_image
 
-                frame_idx += step_frames
+                # Fast-forward next (step_frames - 1) frames without full decoding
+                for _ in range(step_frames - 1):
+                    frame_idx += 1
+                    if total_frames > 0 and frame_idx >= total_frames:
+                        break
+                    if not cap.grab():
+                        break
+
+                frame_idx += 1
         finally:
             cap.release()
 
         return observations
 
-    async def analyze_video(self, video_path: Path) -> list[VisualObservation]:
+    async def analyze_video(
+        self,
+        video_path: Path,
+        *,
+        media_duration_ms: int | None = None,
+        source_artifact_id: str = "",
+    ) -> list[VisualObservation]:
         """Asynchronously analyze video file and extract visual observations."""
-        return await asyncio.to_thread(self._process_video_sync, Path(video_path))
+        return await asyncio.to_thread(
+            self._process_video_sync,
+            Path(video_path),
+            media_duration_ms,
+            source_artifact_id,
+        )
 
 
 __all__ = [
