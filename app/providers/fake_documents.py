@@ -8,24 +8,41 @@ from app.providers.types import DocumentChunk
 class FakeDocumentProvider:
     """Deterministic document parser and chunk extractor."""
 
-    async def extract_and_embed(self, doc_path: Path) -> list[DocumentChunk]:
+    async def extract_and_embed(
+        self, doc_path: Path, *, asset_version_id: str = ""
+    ) -> list[DocumentChunk]:
+        resolved_version = asset_version_id or "01JEXAMPLE0000000000DOC01"
         return [
             DocumentChunk(
-                chunk_id="chunk_doc_01",
-                page_number=1,
+                chunk_id=f"{resolved_version}_p1_c1",
+                asset_version_id=resolved_version,
+                page_or_slide=1,
                 text=(
                     "Executive Summary: VirtuJudge delivers realistic pitch "
                     "rehearsal with instant feedback."
                 ),
+                start_offset=0,
+                end_offset=74,
+                extraction_method="fake/1.0.0",
+                chunking_version="v1_fake",
+                embedding_model="fake-embedding-128d",
+                embedding_dimensions=128,
                 embedding=[0.01] * 128,
             ),
             DocumentChunk(
-                chunk_id="chunk_doc_02",
-                page_number=2,
+                chunk_id=f"{resolved_version}_p2_c1",
+                asset_version_id=resolved_version,
+                page_or_slide=2,
                 text=(
                     "Financial Projections: Projected customer acquisition cost of $450 "
                     "with 85% gross margins."
                 ),
+                start_offset=0,
+                end_offset=86,
+                extraction_method="fake/1.0.0",
+                chunking_version="v1_fake",
+                embedding_model="fake-embedding-128d",
+                embedding_dimensions=128,
                 embedding=[0.02] * 128,
             ),
         ]

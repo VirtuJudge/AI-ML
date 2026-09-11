@@ -87,8 +87,15 @@ class DocumentChunk(BaseModel):
     """A parsed and vectorized document chunk."""
 
     chunk_id: str
-    page_number: int = Field(ge=1)
+    asset_version_id: str = ""
+    page_or_slide: int = Field(ge=1)
     text: str
+    start_offset: int | None = None
+    end_offset: int | None = None
+    extraction_method: str = ""
+    chunking_version: str = ""
+    embedding_model: str | None = None
+    embedding_dimensions: int | None = None
     embedding: list[float] | None = None
 
 

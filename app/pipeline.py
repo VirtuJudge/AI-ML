@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -34,6 +34,7 @@ from app.providers.types import (
     VisualObservation,
 )
 from app.stages.audio import run_audio_stage
+from app.stages.documents import run_document_stage
 from app.stages.media import split_media
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
@@ -258,22 +259,23 @@ class FakePipeline:
             audio_res.observations,
         )
 
+        doc_stage_res = await run_document_stage(
+            job.supporting_documents,
+            self.document_provider,
+        )
+
         all_limitations = (
             speech_res.limitations
             + vision_res.limitations
             + audio_res.limitations
             + corr_limitations
+            + doc_stage_res.limitations
         )
-
-        doc_chunks = []
-        for doc in job.supporting_documents:
-            chunks = await self.document_provider.extract_and_embed(Path(doc.object_key))
-            doc_chunks.extend(chunks)
 
         questions = await self.judge_provider.generate_questions(
             transcript=speech_res.transcription.full_text,
             rubric_id=job.rubric.rubric_id,
-            document_chunks=doc_chunks if doc_chunks else None,
+            document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
         )
 
         return SessionAnalysisCompleted(

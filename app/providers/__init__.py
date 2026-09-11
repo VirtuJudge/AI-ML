@@ -33,9 +33,17 @@ from app.providers.types import (
 )
 
 if TYPE_CHECKING:
+    from app.providers.http_embedding import (
+        HttpEmbeddingProvider,
+        HttpEmbeddingProviderError,
+    )
     from app.providers.librosa_audio import LibrosaAudioProvider
     from app.providers.mediapipe_vision import MediaPipeVisionProvider
     from app.providers.pyannote_diarization import PyannoteDiarizationProvider
+    from app.providers.pymupdf_documents import (
+        DocumentExtractionError,
+        PyMuPDFDocumentProvider,
+    )
 
 __all__ = [
     "AudioMetricsProvider",
@@ -85,11 +93,33 @@ except ImportError:
     pass
 
 try:
-    import pyannote.audio  # type: ignore[import-not-found]  # noqa: F401
+    import pyannote.audio  # noqa: F401
 
     from app.providers.pyannote_diarization import PyannoteDiarizationProvider  # noqa: F401
 
     __all__.append("PyannoteDiarizationProvider")
+except ImportError:
+    pass
+
+try:
+    import pymupdf  # noqa: F401
+
+    from app.providers.pymupdf_documents import (  # noqa: F401
+        DocumentExtractionError,
+        PyMuPDFDocumentProvider,
+    )
+
+    __all__.extend(["DocumentExtractionError", "PyMuPDFDocumentProvider"])
+except ImportError:
+    pass
+
+try:
+    from app.providers.http_embedding import (  # noqa: F401
+        HttpEmbeddingProvider,
+        HttpEmbeddingProviderError,
+    )
+
+    __all__.extend(["HttpEmbeddingProvider", "HttpEmbeddingProviderError"])
 except ImportError:
     pass
 
@@ -108,4 +138,20 @@ def __getattr__(name: str) -> Any:
         from app.providers.pyannote_diarization import PyannoteDiarizationProvider
 
         return PyannoteDiarizationProvider
+    if name == "PyMuPDFDocumentProvider":
+        from app.providers.pymupdf_documents import PyMuPDFDocumentProvider
+
+        return PyMuPDFDocumentProvider
+    if name == "DocumentExtractionError":
+        from app.providers.pymupdf_documents import DocumentExtractionError
+
+        return DocumentExtractionError
+    if name == "HttpEmbeddingProvider":
+        from app.providers.http_embedding import HttpEmbeddingProvider
+
+        return HttpEmbeddingProvider
+    if name == "HttpEmbeddingProviderError":
+        from app.providers.http_embedding import HttpEmbeddingProviderError
+
+        return HttpEmbeddingProviderError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
