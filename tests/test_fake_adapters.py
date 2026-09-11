@@ -101,6 +101,10 @@ async def test_fake_document_and_embedding_providers() -> None:
     assert all(isinstance(chunk, DocumentChunk) for chunk in doc_res1)
     assert len(doc_res1) == 2
     assert doc_res1 == doc_res2
+    assert doc_res1[0].page_or_slide == 1
+    assert doc_res1[0].extraction_method == "fake/1.0.0"
+    assert doc_res1[0].chunking_version == "v1_fake"
+    assert doc_res1[0].asset_version_id != ""
 
     embeddings = await embed_provider.embed(["text a", "text b"])
     assert len(embeddings) == 2

@@ -6,6 +6,11 @@ from app.stages.audio import (
     validate_audio_observations,
 )
 from app.stages.common import validate_observation_timestamps
+from app.stages.documents import (
+    SUPPORTED_DOCUMENT_EXTENSIONS,
+    DocumentStageResult,
+    run_document_stage,
+)
 from app.stages.media import (
     SUPPORTED_MEDIA_EXTENSIONS,
     FFmpegExecutionError,
@@ -31,8 +36,10 @@ from app.stages.vision import (
 )
 
 __all__ = [
+    "SUPPORTED_DOCUMENT_EXTENSIONS",
     "SUPPORTED_MEDIA_EXTENSIONS",
     "AudioStageResult",
+    "DocumentStageResult",
     "FFmpegExecutionError",
     "FFmpegNotFoundError",
     "MediaNormalizationError",
@@ -45,6 +52,7 @@ __all__ = [
     "get_wav_metadata",
     "normalize_media",
     "run_audio_stage",
+    "run_document_stage",
     "run_speech_stage",
     "run_vision_stage",
     "split_media",

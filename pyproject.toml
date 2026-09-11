@@ -41,6 +41,17 @@ audio = [
     "librosa>=0.10.0",
     "soundfile>=0.12.0",
 ]
+documents = [
+    "pymupdf>=1.25.0",
+    "python-pptx>=1.0.0",
+]
+embeddings = [
+    "httpx",
+]
+storage = [
+    "asyncpg>=0.30.0",
+    "pgvector>=0.3.0",
+]
 
 [dependency-groups]
 dev = [

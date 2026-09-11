@@ -49,6 +49,39 @@ async def test_analyze_session_completes(fake_pipeline: FakePipeline) -> None:
 
 
 @pytest.mark.asyncio
+async def test_analyze_session_with_supporting_documents(
+    fake_pipeline: FakePipeline, tmp_path: Path
+) -> None:
+    """Test that analyze_session processes supporting documents and generates questions."""
+    doc_path = tmp_path / "pitch_deck.pdf"
+    doc_path.write_bytes(b"%PDF dummy")
+
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTEST0000000000000000001",
+            object_key="uploads/presentation.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+        ),
+        supporting_documents=[
+            AssetInput(
+                artifact_id="01JTESTDOC0000000000000001",
+                object_key=str(doc_path),
+                checksum="sha256:" + "b" * 64,
+                media_type="application/pdf",
+            )
+        ],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "documents", "questions"],
+    )
+
+    result = await fake_pipeline.analyze_session(payload)
+    assert len(result.primary_questions) == 3
+    assert result.analysis_artifact.artifact_id is not None
+    assert len(result.limitations) == 0
+
+
+@pytest.mark.asyncio
 async def test_analyze_session_result_is_stable(fake_pipeline: FakePipeline) -> None:
     """Test that analyze_session returns stable, identical results for repeated calls."""
     payload = AnalyzeSessionPayload(

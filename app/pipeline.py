@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -15,6 +15,7 @@ from app.contracts import (
     ReportCompleted,
     SessionAnalysisCompleted,
 )
+from app.document_store import DocumentStore, FakeDocumentStore
 from app.providers.base import (
     AudioMetricsProvider,
     DiarizationProvider,
@@ -34,6 +35,7 @@ from app.providers.types import (
     VisualObservation,
 )
 from app.stages.audio import run_audio_stage
+from app.stages.documents import run_document_stage
 from app.stages.media import split_media
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
@@ -206,6 +208,7 @@ class FakePipeline:
         audio_provider: AudioMetricsProvider | None = None,
         document_provider: DocumentProvider | None = None,
         judge_provider: JudgeModelProvider | None = None,
+        document_store: DocumentStore | None = None,
     ) -> None:
         self.speech_provider = speech_provider or FakeSpeechProvider()
         self.diarization_provider = diarization_provider or FakeDiarizationProvider()
@@ -213,6 +216,7 @@ class FakePipeline:
         self.audio_provider = audio_provider or FakeAudioMetricsProvider()
         self.document_provider = document_provider or FakeDocumentProvider()
         self.judge_provider = judge_provider or FakeJudgeModelProvider()
+        self.document_store = document_store or FakeDocumentStore()
 
     async def analyze_session(self, job: AnalyzeSessionPayload) -> SessionAnalysisCompleted:
         input_file = Path(job.presentation.object_key)
@@ -258,22 +262,28 @@ class FakePipeline:
             audio_res.observations,
         )
 
+        session_id = getattr(job, "session_id", None) or job.presentation.artifact_id
+        doc_stage_res = await run_document_stage(
+            job.supporting_documents,
+            self.document_provider,
+            practice_session_id=session_id,
+        )
+
+        if doc_stage_res.chunks and self.document_store is not None:
+            await self.document_store.store_chunks(session_id, doc_stage_res.chunks)
+
         all_limitations = (
             speech_res.limitations
             + vision_res.limitations
             + audio_res.limitations
             + corr_limitations
+            + doc_stage_res.limitations
         )
-
-        doc_chunks = []
-        for doc in job.supporting_documents:
-            chunks = await self.document_provider.extract_and_embed(Path(doc.object_key))
-            doc_chunks.extend(chunks)
 
         questions = await self.judge_provider.generate_questions(
             transcript=speech_res.transcription.full_text,
             rubric_id=job.rubric.rubric_id,
-            document_chunks=doc_chunks if doc_chunks else None,
+            document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
         )
 
         return SessionAnalysisCompleted(
@@ -325,9 +335,14 @@ class FakePipeline:
         )
 
     async def erase_data(self, job: EraseAIDataPayload) -> ErasureCompleted:
+        deleted_records = 14
+        if job.scope == "practice_session" and self.document_store is not None:
+            deleted_docs = await self.document_store.delete_by_session(job.scope_id)
+            deleted_records += deleted_docs
+
         return ErasureCompleted(
             erasure_request_id=job.erasure_request_id,
-            deleted_records=14,
+            deleted_records=deleted_records,
             deleted_objects=6,
         )
 

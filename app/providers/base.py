@@ -43,7 +43,9 @@ class AudioMetricsProvider(Protocol):
 class DocumentProvider(Protocol):
     """Protocol for document ingestion, parsing, and vectorization."""
 
-    async def extract_and_embed(self, doc_path: Path) -> list[DocumentChunk]: ...
+    async def extract_and_embed(
+        self, doc_path: Path, *, asset_version_id: str = ""
+    ) -> list[DocumentChunk]: ...
 
 
 class JudgeModelProvider(Protocol):
