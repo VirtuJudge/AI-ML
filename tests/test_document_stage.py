@@ -288,3 +288,49 @@ async def test_document_stage_prompt_injection_safe(dummy_pdf_file: Path) -> Non
     # Untrusted data is preserved literally without execution or template interpretation
     assert result.chunks[0].text == injection_text
 
+
+@pytest.mark.asyncio
+async def test_document_stage_empty_document(dummy_pdf_file: Path) -> None:
+    """Verify document with no extractable text yields an empty_document limitation."""
+    provider = EmptyDocumentProvider()
+    docs = [
+        AssetInput(
+            artifact_id="01JTESTDOC_EMPTY_01",
+            object_key=str(dummy_pdf_file),
+            checksum="sha256:" + "0" * 64,
+            media_type="application/pdf",
+        )
+    ]
+    result = await run_document_stage(docs, provider)
+
+    assert len(result.chunks) == 0
+    assert len(result.limitations) == 1
+    assert result.limitations[0].code == "empty_document"
+    assert result.limitations[0].scope == "documents"
+
+
+@pytest.mark.asyncio
+async def test_document_stage_embedding_failure_limitation(dummy_pdf_file: Path) -> None:
+    """Verify embedding failure emits a document_embedding_failed limitation."""
+
+    class EmbeddingFailureProvider:
+        async def extract_and_embed(
+            self, doc_path: Path, *, asset_version_id: str = ""
+        ) -> list[DocumentChunk]:
+            raise RuntimeError("Embedding API failure")
+
+    docs = [
+        AssetInput(
+            artifact_id="01JTESTDOC_EMB_FAIL_01",
+            object_key=str(dummy_pdf_file),
+            checksum="sha256:" + "e" * 64,
+            media_type="application/pdf",
+        )
+    ]
+    result = await run_document_stage(docs, EmbeddingFailureProvider())
+
+    assert len(result.chunks) == 0
+    assert len(result.limitations) == 1
+    assert result.limitations[0].code == "document_embedding_failed"
+    assert result.limitations[0].scope == "documents"
+

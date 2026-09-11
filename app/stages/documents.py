@@ -98,7 +98,20 @@ async def run_document_stage(
             chunks = await document_provider.extract_and_embed(
                 doc_path, asset_version_id=artifact_id
             )
-            all_chunks.extend(chunks)
+            if not chunks:
+                logger.warning(
+                    "Supporting document produced no text chunks: artifact_id=%s", artifact_id
+                )
+                limitations.append(
+                    Limitation(
+                        code="empty_document",
+                        scope="documents",
+                        message=f"Supporting document '{artifact_id}' contains no readable text or is empty.",
+                        affected_dimensions=["market_and_business_model", "technology_and_moat"],
+                    )
+                )
+            else:
+                all_chunks.extend(chunks)
         except Exception as exc:
             err_msg = str(exc).lower()
             logger.warning("Document extraction failed for artifact_id=%s", artifact_id)
@@ -108,6 +121,9 @@ async def run_document_stage(
             elif "unsupported" in err_msg:
                 code = "unsupported_document_format"
                 msg = f"Supporting document '{artifact_id}' has an unsupported internal format."
+            elif "embedding" in err_msg:
+                code = "document_embedding_failed"
+                msg = f"Failed to generate embeddings for supporting document '{artifact_id}'."
             else:
                 code = "document_extraction_failed"
                 msg = f"Failed to extract content from supporting document '{artifact_id}'."

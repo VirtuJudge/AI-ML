@@ -98,6 +98,11 @@ class DocumentChunk(BaseModel):
     embedding_dimensions: int | None = None
     embedding: list[float] | None = None
 
+    @property
+    def id(self) -> str:
+        """Alias for chunk_id conforming to Data-Contracts.md."""
+        return self.chunk_id
+
 
 __all__ = [
     "AudioObservation",

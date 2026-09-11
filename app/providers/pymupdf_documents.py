@@ -58,27 +58,8 @@ class PyMuPDFDocumentProvider:
         chunks: list[DocumentChunk] = []
         text_len = len(text)
 
-        if text_len <= self.chunk_size:
-            start_offset = 0
-            end_offset = text_len
-            chunk_key = f"{asset_version_id}:{page_or_slide}:{start_offset}:{self.chunking_version}"
-            chunk_hash = hashlib.sha256(chunk_key.encode()).hexdigest()[:16]
-            chunk_id = f"{asset_version_id}_p{page_or_slide}_{chunk_hash}"
-
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=chunk_id,
-                    asset_version_id=asset_version_id,
-                    page_or_slide=page_or_slide,
-                    text=text,
-                    start_offset=start_offset,
-                    end_offset=end_offset,
-                    extraction_method=extraction_method,
-                    chunking_version=self.chunking_version,
-                )
-            )
-            return chunks
-
+        # The stepping loop naturally handles single-chunk texts (when text_len <= chunk_size)
+        # as well as multi-chunk sliding windows with identical offset and hash semantics.
         step = max(1, self.chunk_size - self.chunk_overlap)
         start_offset = 0
 
@@ -207,7 +188,13 @@ class PyMuPDFDocumentProvider:
                     chunk.embedding_dimensions = len(emb)
                     chunk.embedding_model = model_name
             except Exception as exc:
-                logger.warning("Embedding generation failed for document %s: %s", doc_path, exc)
+                # Log safe identifier only, never the host file path or document content
+                logger.warning(
+                    "Embedding generation failed for asset_version_id=%s: %s",
+                    resolved_version,
+                    exc,
+                )
+                raise DocumentExtractionError(f"Embedding generation failed: {exc}") from exc
 
         return chunks
 

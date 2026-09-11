@@ -15,7 +15,11 @@ import os
 import sys
 from pathlib import Path
 
-from app.document_store import FakeDocumentStore
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv(usecwd=True))
+
+from app.document_store import FakeDocumentStore, create_document_store
 from app.providers.fake_documents import FakeEmbeddingProvider
 from app.providers.http_embedding import HttpEmbeddingProvider
 from app.providers.pymupdf_documents import PyMuPDFDocumentProvider
@@ -50,6 +54,17 @@ def parse_arguments() -> argparse.Namespace:
         "-o",
         type=Path,
         help="Save output to a JSON file.",
+    )
+    parser.add_argument(
+        "--database-url",
+        type=str,
+        default=None,
+        help="Optional database URL for pgvector. If omitted, uses DATABASE_URL from .env.",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Force using offline FakeDocumentStore without connecting to database.",
     )
     return parser.parse_args()
 
@@ -95,10 +110,22 @@ async def main() -> None:
         print(f"\nExtraction failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    # Store in isolated document store
-    store = FakeDocumentStore()
+    # Store in configured document store (PgVector if DATABASE_URL, otherwise FakeDocumentStore)
+    if args.offline:
+        store = FakeDocumentStore()
+    else:
+        try:
+            store = await create_document_store(args.database_url)
+        except Exception as exc:
+            if not args.json:
+                print(f"\nNote: Database connection unavailable ({exc}). Using offline FakeDocumentStore.")
+            store = FakeDocumentStore()
+
     session_id = f"session_{file_path.stem}"
-    await store.store_chunks(session_id, chunks)
+    stored_count = await store.store_chunks(session_id, chunks)
+    if not args.json:
+        store_type = "Supabase / PostgreSQL pgvector ('ai_document_chunks')" if not isinstance(store, FakeDocumentStore) else "offline FakeDocumentStore"
+        print(f"\nDocument Store: Successfully saved {stored_count} chunks to {store_type} (session_id={session_id})")
 
     # If a query is provided, embed it and retrieve top-k
     retrieved_chunks = []
