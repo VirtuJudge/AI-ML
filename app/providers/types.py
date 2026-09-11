@@ -56,21 +56,31 @@ class DiarizationResult(BaseModel):
 
 
 class VisualObservation(BaseModel):
-    """Visual tracking metrics extracted from video frames."""
+    """A timed visual measurement from a video interval."""
 
-    timestamp_ms: int = Field(ge=0)
-    gaze_direction: str
-    posture: str
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    metric: str
+    value: float
+    unit: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    source_artifact_id: str = ""
+    speaker_label: str | None = None
+    algorithm_version: str = ""
 
 
 class AudioObservation(BaseModel):
-    """Acoustic features extracted from speech audio."""
+    """A timed acoustic measurement from an audio interval."""
 
-    timestamp_ms: int = Field(ge=0)
-    pitch_hz: float = Field(ge=0.0)
-    speaking_rate_wpm: float = Field(ge=0.0)
-    pause_duration_ms: int = Field(default=0, ge=0)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    metric: str
+    value: float
+    unit: str
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    source_artifact_id: str = ""
+    speaker_label: str | None = None
+    algorithm_version: str = ""
 
 
 class DocumentChunk(BaseModel):
