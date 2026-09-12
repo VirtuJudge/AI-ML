@@ -201,6 +201,40 @@ async def run_pipeline_on_video(
     if len(audio_result.observations) > 15:
         print(f"  ... and {len(audio_result.observations) - 15} more observations")
 
+    # -------------------------------------------------------------------------
+    # Step 6: 3-Judge Panel Question Generation (Groq LLM)
+    # -------------------------------------------------------------------------
+    print("\n[Step 6/6] Generating 3 Grounded Primary Questions via Groq 3-Judge Panel...")
+    from app.providers.groq_judge import GroqJudgeModelProvider
+    from app.stages.questions import run_question_stage
+    from app.stages.speech import SpeechStageResult
+
+    speech_result = SpeechStageResult(
+        transcription=transcription,
+        diarization=diar_result,
+        speaker_labels=diar_result.speaker_labels,
+        limitations=[],
+    )
+
+    judge_provider = GroqJudgeModelProvider()
+    question_res = await run_question_stage(
+        judge_provider,
+        speech_result=speech_result,
+        vision_result=vision_result,
+        audio_result=audio_result,
+        rubric_id="startup_pitch",
+    )
+
+    print(f"  [OK] Primary questions generated: {len(question_res.primary_questions)}")
+    print("\n" + "=" * 70)
+    print("AI-05: 3 Grounded Primary Questions (Live Video Evaluation)")
+    print("=" * 70)
+    for idx, q in enumerate(question_res.primary_questions, start=1):
+        print(f"\n[Judge {idx}] Dimension: {q.rubric_dimension}")
+        print(f"  Question:  {q.text}")
+        print(f"  Reason:    {q.reason}")
+        print(f"  Evidence:  {', '.join(q.evidence_ids)}")
+
     print("\n" + "=" * 70)
     print("PIPELINE EXECUTION COMPLETE")
     print("=" * 70 + "\n")

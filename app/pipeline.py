@@ -37,6 +37,7 @@ from app.providers.types import (
 from app.stages.audio import run_audio_stage
 from app.stages.documents import run_document_stage
 from app.stages.media import split_media
+from app.stages.questions import run_question_stage
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
 
@@ -256,7 +257,7 @@ class FakePipeline:
             ),
         )
 
-        _, _, _, corr_limitations = combine_timed_evidence(
+        updated_visual, updated_audio, _, corr_limitations = combine_timed_evidence(
             speech_res.diarization,
             vision_res.observations,
             audio_res.observations,
@@ -272,18 +273,16 @@ class FakePipeline:
         if doc_stage_res.chunks and self.document_store is not None:
             await self.document_store.store_chunks(session_id, doc_stage_res.chunks)
 
-        all_limitations = (
-            speech_res.limitations
-            + vision_res.limitations
-            + audio_res.limitations
-            + corr_limitations
-            + doc_stage_res.limitations
-        )
-
-        questions = await self.judge_provider.generate_questions(
-            transcript=speech_res.transcription.full_text,
-            rubric_id=job.rubric.rubric_id,
+        question_stage_res = await run_question_stage(
+            self.judge_provider,
+            speech_result=speech_res,
+            vision_result=vision_res,
+            audio_result=audio_res,
             document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
+            visual_observations=updated_visual,
+            audio_observations=updated_audio,
+            rubric_id=job.rubric.rubric_id,
+            extra_limitations=corr_limitations + doc_stage_res.limitations,
         )
 
         return SessionAnalysisCompleted(
@@ -293,9 +292,9 @@ class FakePipeline:
                 checksum=FAKE_SHA256_A,
                 schema_version=1,
             ),
-            primary_questions=questions,
+            primary_questions=question_stage_res.primary_questions,
             speaker_labels=speech_res.speaker_labels,
-            limitations=all_limitations,
+            limitations=question_stage_res.limitations,
         )
 
     async def analyze_answer(self, job: AnalyzeAnswerPayload) -> AnswerAnalysisCompleted:

@@ -4,7 +4,7 @@ Defines structural interfaces (typing.Protocol) for swappable AI/ML adapters.
 """
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.contracts import PrimaryQuestion
 from app.providers.types import (
@@ -56,6 +56,7 @@ class JudgeModelProvider(Protocol):
         transcript: str,
         rubric_id: str,
         document_chunks: list[DocumentChunk] | None = None,
+        evidence_bundle: Any = None,
     ) -> list[PrimaryQuestion]: ...
 
 

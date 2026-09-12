@@ -16,6 +16,13 @@ from app.providers.fake_documents import FakeDocumentProvider, FakeEmbeddingProv
 from app.providers.fake_judge import FakeJudgeModelProvider
 from app.providers.fake_speech import FakeDiarizationProvider, FakeSpeechProvider
 from app.providers.fake_vision import FakeVisionProvider
+from app.providers.groq_judge import GroqJudgeModelProvider
+from app.providers.groq_pool import (
+    AllKeysExhaustedError,
+    GroqKeyPool,
+    GroqPoolError,
+    GroqRateLimitError,
+)
 from app.providers.groq_speech import (
     GroqSpeechProvider,
     GroqSpeechProviderError,
@@ -46,6 +53,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "AllKeysExhaustedError",
     "AudioMetricsProvider",
     "AudioObservation",
     "DiarizationProvider",
@@ -60,6 +68,10 @@ __all__ = [
     "FakeJudgeModelProvider",
     "FakeSpeechProvider",
     "FakeVisionProvider",
+    "GroqJudgeModelProvider",
+    "GroqKeyPool",
+    "GroqPoolError",
+    "GroqRateLimitError",
     "GroqSpeechProvider",
     "GroqSpeechProviderError",
     "JudgeModelProvider",
