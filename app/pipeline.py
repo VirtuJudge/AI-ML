@@ -1,6 +1,10 @@
 import asyncio
+import hashlib
+import os
 from pathlib import Path
 from typing import Protocol
+
+import ulid
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -40,6 +44,9 @@ from app.stages.media import split_media
 from app.stages.questions import run_question_stage
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
+from app.storage import create_object_storage
+from app.storage.base import ObjectStorageProtocol
+from app.storage.local import LocalDiskObjectStorage
 
 FAKE_SESSION_ANALYSIS_ARTIFACT_ID = "01JEXAMPLE000000000000000A"
 FAKE_QUESTION_1_ID = "01JEXAMPLE000000000000001A"
@@ -210,6 +217,7 @@ class FakePipeline:
         document_provider: DocumentProvider | None = None,
         judge_provider: JudgeModelProvider | None = None,
         document_store: DocumentStore | None = None,
+        object_storage: ObjectStorageProtocol | None = None,
     ) -> None:
         self.speech_provider = speech_provider or FakeSpeechProvider()
         self.diarization_provider = diarization_provider or FakeDiarizationProvider()
@@ -218,10 +226,28 @@ class FakePipeline:
         self.document_provider = document_provider or FakeDocumentProvider()
         self.judge_provider = judge_provider or FakeJudgeModelProvider()
         self.document_store = document_store or FakeDocumentStore()
+        if object_storage is not None:
+            self.object_storage = object_storage
+        elif os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
+            self.object_storage = LocalDiskObjectStorage()
+        else:
+            self.object_storage = create_object_storage()
 
     async def analyze_session(self, job: AnalyzeSessionPayload) -> SessionAnalysisCompleted:
         input_file = Path(job.presentation.object_key)
         skip_file_check = not input_file.is_file()
+
+        # If object key is remote and not on local disk, download via object storage
+        if skip_file_check:
+            temp_dir = Path(".storage/temp_media") / job.presentation.artifact_id
+            temp_dest = temp_dir / Path(job.presentation.object_key).name
+            try:
+                await self.object_storage.download_file(job.presentation.object_key, temp_dest)
+                if temp_dest.is_file():
+                    input_file = temp_dest
+                    skip_file_check = False
+            except Exception:
+                pass
 
         if not skip_file_check:
             split_res = await split_media(input_file)
@@ -257,7 +283,7 @@ class FakePipeline:
             ),
         )
 
-        updated_visual, updated_audio, _, corr_limitations = combine_timed_evidence(
+        updated_visual, updated_audio, speaker_mapping, corr_limitations = combine_timed_evidence(
             speech_res.diarization,
             vision_res.observations,
             audio_res.observations,
@@ -285,13 +311,55 @@ class FakePipeline:
             extra_limitations=corr_limitations + doc_stage_res.limitations,
         )
 
+        artifact_key = f"ai/session/{session_id}/analysis.json"
+        hash_digest = hashlib.sha256(f"{session_id}:analysis".encode()).digest()[:16]
+        artifact_id = str(ulid.from_bytes(hash_digest))
+
+        artifact_payload = {
+            "artifact_id": artifact_id,
+            "session_id": session_id,
+            "schema_version": 1,
+            "created_at": "2026-09-02T12:00:00Z",
+            "transcript": {
+                "text": speech_res.transcription.full_text,
+                "segments": [s.model_dump() for s in speech_res.transcription.segments],
+            },
+            "observations": {
+                "visual": [o.model_dump() for o in vision_res.observations],
+                "audio": [o.model_dump() for o in audio_res.observations],
+                "speaker_mapping": [
+                    {"visual": k, "audio": v} for k, v in speaker_mapping.items()
+                ],
+            },
+            "evidence_bundle": {
+                "items": [
+                    item.model_dump()
+                    for item in question_stage_res.evidence_bundle.items
+                ],
+                "has_documents": question_stage_res.evidence_bundle.has_documents,
+                "has_vision": question_stage_res.evidence_bundle.has_vision,
+                "has_audio": question_stage_res.evidence_bundle.has_audio,
+            },
+            "primary_questions": [
+                q.model_dump() for q in question_stage_res.primary_questions
+            ],
+            "limitations": [lim.model_dump() for lim in question_stage_res.limitations],
+            "metadata": {
+                "media_duration_ms": duration_ms,
+                "has_documents": question_stage_res.evidence_bundle.has_documents,
+                "has_vision": question_stage_res.evidence_bundle.has_vision,
+                "has_audio": question_stage_res.evidence_bundle.has_audio,
+            },
+        }
+
+        analysis_ref = await self.object_storage.upload_json(
+            artifact_key,
+            artifact_payload,
+            artifact_id=artifact_id,
+        )
+
         return SessionAnalysisCompleted(
-            analysis_artifact=ArtifactRef(
-                artifact_id=FAKE_SESSION_ANALYSIS_ARTIFACT_ID,
-                object_key="artifacts/session_analysis.json",
-                checksum=FAKE_SHA256_A,
-                schema_version=1,
-            ),
+            analysis_artifact=analysis_ref,
             primary_questions=question_stage_res.primary_questions,
             speaker_labels=speech_res.speaker_labels,
             limitations=question_stage_res.limitations,
