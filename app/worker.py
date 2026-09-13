@@ -80,7 +80,10 @@ async def process_job(
     try:
         result: Any
         if message.job_type == JobType.ANALYZE_SESSION:
-            session_payload = AnalyzeSessionPayload.model_validate(message.payload)
+            payload_dict = dict(message.payload)
+            if "practice_session_id" not in payload_dict and message.practice_session_id:
+                payload_dict["practice_session_id"] = message.practice_session_id
+            session_payload = AnalyzeSessionPayload.model_validate(payload_dict)
             result = await pipeline.analyze_session(session_payload)
         elif message.job_type == JobType.ANALYZE_ANSWER:
             answer_payload = AnalyzeAnswerPayload.model_validate(message.payload)

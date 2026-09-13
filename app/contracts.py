@@ -131,6 +131,7 @@ class AnalyzeSessionPayload(BaseModel):
     supporting_documents: list[AssetInput] = Field(default_factory=list)
     rubric: RubricRef
     requested_capabilities: list[str] = Field(default_factory=list)
+    practice_session_id: str | None = None
 
 
 class AnalyzeAnswerPayload(BaseModel):

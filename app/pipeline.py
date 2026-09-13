@@ -1,6 +1,12 @@
 import asyncio
+import hashlib
+import logging
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
+
+import ulid
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -37,8 +43,18 @@ from app.providers.types import (
 from app.stages.audio import run_audio_stage
 from app.stages.documents import run_document_stage
 from app.stages.media import split_media
+from app.stages.questions import run_question_stage
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
+from app.storage import create_object_storage
+from app.storage.base import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    ObjectStorageProtocol,
+)
+from app.storage.local import LocalDiskObjectStorage
+
+logger = logging.getLogger(__name__)
 
 FAKE_SESSION_ANALYSIS_ARTIFACT_ID = "01JEXAMPLE000000000000000A"
 FAKE_QUESTION_1_ID = "01JEXAMPLE000000000000001A"
@@ -209,6 +225,7 @@ class FakePipeline:
         document_provider: DocumentProvider | None = None,
         judge_provider: JudgeModelProvider | None = None,
         document_store: DocumentStore | None = None,
+        object_storage: ObjectStorageProtocol | None = None,
     ) -> None:
         self.speech_provider = speech_provider or FakeSpeechProvider()
         self.diarization_provider = diarization_provider or FakeDiarizationProvider()
@@ -217,10 +234,67 @@ class FakePipeline:
         self.document_provider = document_provider or FakeDocumentProvider()
         self.judge_provider = judge_provider or FakeJudgeModelProvider()
         self.document_store = document_store or FakeDocumentStore()
+        if object_storage is not None:
+            self.object_storage = object_storage
+        elif os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
+            self.object_storage = LocalDiskObjectStorage()
+        else:
+            self.object_storage = create_object_storage()
+
+    def _is_synthetic_speech_run(self) -> bool:
+        """Check whether the pipeline is executing with purely fake/synthetic speech provider."""
+        return isinstance(self.speech_provider, FakeSpeechProvider)
 
     async def analyze_session(self, job: AnalyzeSessionPayload) -> SessionAnalysisCompleted:
         input_file = Path(job.presentation.object_key)
         skip_file_check = not input_file.is_file()
+
+        # If object key is remote and not on local disk, download via object storage
+        if skip_file_check:
+            temp_dir = Path(".storage/temp_media") / job.presentation.artifact_id
+            temp_dest = temp_dir / Path(job.presentation.object_key).name
+            try:
+                await self.object_storage.download_file(job.presentation.object_key, temp_dest)
+                if temp_dest.is_file():
+                    input_file = temp_dest
+                    skip_file_check = False
+                else:
+                    raise ObjectStorageError(
+                        f"Download succeeded but file not found at destination '{temp_dest}'."
+                    )
+            except ObjectNotFoundError as err:
+                if not self._is_synthetic_speech_run():
+                    logger.error(
+                        "Presentation media '%s' not found in object storage: %s",
+                        job.presentation.object_key,
+                        err,
+                        exc_info=True,
+                    )
+                    raise
+                logger.warning(
+                    "Presentation media '%s' not found in storage; using synthetic inputs.",
+                    job.presentation.object_key,
+                )
+            except Exception as exc:
+                if not self._is_synthetic_speech_run():
+                    logger.error(
+                        "Failed to download presentation media '%s' from object storage: %s",
+                        job.presentation.object_key,
+                        exc,
+                        exc_info=True,
+                    )
+                    msg = f"Failed to download media '{job.presentation.object_key}': {exc}"
+                    raise ObjectStorageError(msg) from exc
+                logger.warning(
+                    "Error downloading media '%s' from storage in synthetic mode: %s",
+                    job.presentation.object_key,
+                    exc,
+                )
+
+        if not skip_file_check and not input_file.is_file():
+            raise FileNotFoundError(
+                f"Presentation media file '{input_file}' does not exist."
+            )
 
         if not skip_file_check:
             split_res = await split_media(input_file)
@@ -256,13 +330,17 @@ class FakePipeline:
             ),
         )
 
-        _, _, _, corr_limitations = combine_timed_evidence(
+        updated_visual, updated_audio, speaker_mapping, corr_limitations = combine_timed_evidence(
             speech_res.diarization,
             vision_res.observations,
             audio_res.observations,
         )
 
-        session_id = getattr(job, "session_id", None) or job.presentation.artifact_id
+        session_id = (
+            job.practice_session_id
+            or getattr(job, "session_id", None)
+            or job.presentation.artifact_id
+        )
         doc_stage_res = await run_document_stage(
             job.supporting_documents,
             self.document_provider,
@@ -272,30 +350,74 @@ class FakePipeline:
         if doc_stage_res.chunks and self.document_store is not None:
             await self.document_store.store_chunks(session_id, doc_stage_res.chunks)
 
-        all_limitations = (
-            speech_res.limitations
-            + vision_res.limitations
-            + audio_res.limitations
-            + corr_limitations
-            + doc_stage_res.limitations
+        question_stage_res = await run_question_stage(
+            self.judge_provider,
+            speech_result=speech_res,
+            vision_result=vision_res,
+            audio_result=audio_res,
+            document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
+            visual_observations=updated_visual,
+            audio_observations=updated_audio,
+            rubric_id=job.rubric.rubric_id,
+            extra_limitations=corr_limitations + doc_stage_res.limitations,
         )
 
-        questions = await self.judge_provider.generate_questions(
-            transcript=speech_res.transcription.full_text,
-            rubric_id=job.rubric.rubric_id,
-            document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
+        artifact_key = f"ai/session/{session_id}/analysis.json"
+        created_at = "2026-09-02T12:00:00Z"
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        ts_bytes = int(dt.timestamp() * 1000).to_bytes(6, byteorder="big")
+        rand_bytes = hashlib.sha256(f"{session_id}:analysis".encode()).digest()[:10]
+        artifact_id = str(ulid.from_bytes(ts_bytes + rand_bytes))
+
+        artifact_payload = {
+            "artifact_id": artifact_id,
+            "session_id": session_id,
+            "practice_session_id": session_id,
+            "schema_version": 1,
+            "created_at": created_at,
+            "transcript": {
+                "text": speech_res.transcription.full_text,
+                "segments": [s.model_dump() for s in speech_res.transcription.segments],
+            },
+            "observations": {
+                "visual": [o.model_dump() for o in vision_res.observations],
+                "audio": [o.model_dump() for o in audio_res.observations],
+                "speaker_mapping": [
+                    {"visual": k, "audio": v} for k, v in speaker_mapping.items()
+                ],
+            },
+            "evidence_bundle": {
+                "items": [
+                    item.model_dump()
+                    for item in question_stage_res.evidence_bundle.items
+                ],
+                "has_documents": question_stage_res.evidence_bundle.has_documents,
+                "has_vision": question_stage_res.evidence_bundle.has_vision,
+                "has_audio": question_stage_res.evidence_bundle.has_audio,
+            },
+            "primary_questions": [
+                q.model_dump() for q in question_stage_res.primary_questions
+            ],
+            "limitations": [lim.model_dump() for lim in question_stage_res.limitations],
+            "metadata": {
+                "media_duration_ms": duration_ms,
+                "has_documents": question_stage_res.evidence_bundle.has_documents,
+                "has_vision": question_stage_res.evidence_bundle.has_vision,
+                "has_audio": question_stage_res.evidence_bundle.has_audio,
+            },
+        }
+
+        analysis_ref = await self.object_storage.upload_json(
+            artifact_key,
+            artifact_payload,
+            artifact_id=artifact_id,
         )
 
         return SessionAnalysisCompleted(
-            analysis_artifact=ArtifactRef(
-                artifact_id=FAKE_SESSION_ANALYSIS_ARTIFACT_ID,
-                object_key="artifacts/session_analysis.json",
-                checksum=FAKE_SHA256_A,
-                schema_version=1,
-            ),
-            primary_questions=questions,
+            analysis_artifact=analysis_ref,
+            primary_questions=question_stage_res.primary_questions,
             speaker_labels=speech_res.speaker_labels,
-            limitations=all_limitations,
+            limitations=question_stage_res.limitations,
         )
 
     async def analyze_answer(self, job: AnalyzeAnswerPayload) -> AnswerAnalysisCompleted:

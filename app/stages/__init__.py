@@ -11,6 +11,11 @@ from app.stages.documents import (
     DocumentStageResult,
     run_document_stage,
 )
+from app.stages.evidence import (
+    EvidenceBundle,
+    EvidenceItem,
+    build_evidence_bundle,
+)
 from app.stages.media import (
     SUPPORTED_MEDIA_EXTENSIONS,
     FFmpegExecutionError,
@@ -22,6 +27,10 @@ from app.stages.media import (
     get_wav_metadata,
     normalize_media,
     split_media,
+)
+from app.stages.questions import (
+    QuestionStageResult,
+    run_question_stage,
 )
 from app.stages.speech import (
     SpeechStageResult,
@@ -40,19 +49,24 @@ __all__ = [
     "SUPPORTED_MEDIA_EXTENSIONS",
     "AudioStageResult",
     "DocumentStageResult",
+    "EvidenceBundle",
+    "EvidenceItem",
     "FFmpegExecutionError",
     "FFmpegNotFoundError",
     "MediaNormalizationError",
     "MediaNormalizationResult",
     "MediaSplitResult",
+    "QuestionStageResult",
     "SpeechStageResult",
     "VisionStageResult",
+    "build_evidence_bundle",
     "check_coverage_limitations",
     "create_normalization_limitation",
     "get_wav_metadata",
     "normalize_media",
     "run_audio_stage",
     "run_document_stage",
+    "run_question_stage",
     "run_speech_stage",
     "run_vision_stage",
     "split_media",

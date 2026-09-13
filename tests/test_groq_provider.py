@@ -396,3 +396,65 @@ async def test_groq_transcribe_synthesizes_segment_when_segments_empty(
         assert len(result.segments[0].words) == 2
 
 
+@pytest.mark.asyncio
+async def test_groq_transcribe_multi_key_failover_on_429(tmp_path: Path) -> None:
+    """Verify GroqSpeechProvider automatically fails over to Key 2 when Key 1 hits 429."""
+    from app.providers.groq_pool import GroqKeyPool
+
+    audio_file = tmp_path / "pitch.wav"
+    audio_file.write_bytes(b"dummy wav content")
+
+    pool = GroqKeyPool(api_keys=["gsk_key_1", "gsk_key_2"])
+    provider = GroqSpeechProvider(key_pool=pool)
+
+    # Key 1 returns 429 rate limit, Key 2 returns 200 success
+    resp_429 = httpx.Response(
+        status_code=429,
+        text='{"error": "rate_limit_exceeded"}',
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+    resp_200 = httpx.Response(
+        status_code=200,
+        json={
+            "text": "Pitch transcribed with backup key.",
+            "language": "en",
+            "duration": 3.0,
+            "segments": [
+                {
+                    "id": 0,
+                    "start": 0.0,
+                    "end": 3.0,
+                    "text": "Pitch transcribed with backup key.",
+                }
+            ],
+        },
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = [resp_429, resp_200]
+
+        result = await provider.transcribe(audio_file)
+
+        assert result.full_text == "Pitch transcribed with backup key."
+        assert mock_post.await_count == 2
+        # Verify first call used Key 1 and second call used Key 2
+        first_auth = mock_post.call_args_list[0].kwargs["headers"]["Authorization"]
+        second_auth = mock_post.call_args_list[1].kwargs["headers"]["Authorization"]
+        assert first_auth == "Bearer gsk_key_1"
+        assert second_auth == "Bearer gsk_key_2"
+
+
+@pytest.mark.asyncio
+async def test_groq_speech_with_custom_key_pool() -> None:
+    """Verify GroqSpeechProvider accepts an external GroqKeyPool."""
+    from app.providers.groq_pool import GroqKeyPool
+
+    pool = GroqKeyPool(api_keys=["gsk_custom_1", "gsk_custom_2"])
+    provider = GroqSpeechProvider(key_pool=pool)
+
+    assert provider.key_pool is pool
+    assert provider.api_key == "gsk_custom_1"
+
+
+

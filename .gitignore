@@ -18,6 +18,7 @@ venv/
 models/
 datasets/
 artifacts/
+.storage/
 checkpoints/
 evaluation-results/
 *.pt

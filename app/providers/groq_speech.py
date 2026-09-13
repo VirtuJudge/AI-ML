@@ -17,6 +17,10 @@ from typing import Any
 
 import httpx
 
+from app.providers.groq_pool import (
+    GroqKeyPool,
+    GroqPoolError,
+)
 from app.providers.types import (
     TranscriptionResult,
     TranscriptionSegment,
@@ -36,7 +40,8 @@ class GroqSpeechProvider:
     """Speech transcription adapter powered by GroqCloud's Whisper API.
 
     Satisfies the SpeechProvider protocol by sending audio to Groq's
-    OpenAI-compatible speech-to-text endpoint via httpx.
+    OpenAI-compatible speech-to-text endpoint via httpx. Supports
+    multi-key failover and rotation via GroqKeyPool.
 
     Note:
         GroqCloud enforces a 25MB maximum file size limit for audio uploads.
@@ -50,6 +55,7 @@ class GroqSpeechProvider:
         self,
         api_key: str | None = None,
         *,
+        key_pool: GroqKeyPool | None = None,
         model: str = DEFAULT_MODEL,
         api_url: str = API_URL,
         timeout: float = 60.0,
@@ -59,7 +65,8 @@ class GroqSpeechProvider:
         """Initialize GroqSpeechProvider.
 
         Args:
-            api_key: GroqCloud API key. If omitted, read from GROQ_API_KEY env var.
+            api_key: GroqCloud API key. If omitted and key_pool is None, read from GROQ_API_KEY.
+            key_pool: Optional GroqKeyPool instance for multi-key rotation and failover.
             model: Model identifier (default: "whisper-large-v3-turbo").
             api_url: Groq API endpoint URL.
             timeout: Request timeout in seconds (default: 60.0).
@@ -69,14 +76,35 @@ class GroqSpeechProvider:
         Raises:
             ValueError: If no API key is provided and GROQ_API_KEY is unset or empty.
         """
-        resolved_key = api_key if api_key is not None else os.environ.get("GROQ_API_KEY")
-        if not resolved_key or not resolved_key.strip():
-            raise ValueError(
-                "Groq API key is required. Provide `api_key` to GroqSpeechProvider "
-                "or set the GROQ_API_KEY environment variable."
+        if key_pool is not None:
+            self.key_pool = key_pool
+            self.api_key = key_pool.api_keys[0] if key_pool.api_keys else ""
+        elif api_key is not None:
+            resolved_key = api_key.strip()
+            if not resolved_key:
+                raise ValueError(
+                    "Groq API key is required. Provide `api_key` to GroqSpeechProvider "
+                    "or set the GROQ_API_KEY environment variable."
+                )
+            self.api_key = resolved_key
+            self.key_pool = GroqKeyPool(
+                api_keys=[resolved_key],
+                timeout=timeout,
+                http_client=http_client,
+            )
+        else:
+            resolved_key = os.environ.get("GROQ_API_KEY", "").strip()
+            if not resolved_key:
+                raise ValueError(
+                    "Groq API key is required. Provide `api_key` to GroqSpeechProvider "
+                    "or set the GROQ_API_KEY environment variable."
+                )
+            self.api_key = resolved_key
+            self.key_pool = GroqKeyPool(
+                timeout=timeout,
+                http_client=http_client,
             )
 
-        self.api_key = resolved_key.strip()
         self.model = model
         self.api_url = api_url
         self.timeout = timeout
@@ -141,10 +169,7 @@ class GroqSpeechProvider:
         filename = audio_path.name
         mime_type = mimetypes.guess_type(filename)[0] or "audio/wav"
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        data = {
+        data: dict[str, Any] = {
             "model": self.model,
             "response_format": "verbose_json",
             "timestamp_granularities[]": ["word", "segment"],
@@ -154,44 +179,19 @@ class GroqSpeechProvider:
         }
 
         try:
-            if self._client is not None:
-                response = await self._client.post(
-                    self.api_url,
-                    headers=headers,
-                    data=data,
-                    files=files,
-                )
-            else:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(
-                        self.api_url,
-                        headers=headers,
-                        data=data,
-                        files=files,
-                    )
-        except httpx.RequestError as err:
-            raise GroqSpeechProviderError(
-                f"Groq Whisper API request failed due to network error: {type(err).__name__}"
-            ) from None
-
-        if response.status_code == 413:
-            raise GroqSpeechProviderError(
-                f"Groq Whisper API rejected upload: audio file exceeds 25MB request limit "
-                f"(status 413: {response.reason_phrase})"
+            resp_data = await self.key_pool.post_multipart(
+                "/audio/transcriptions",
+                data=data,
+                files=files,
+                timeout=self.timeout,
             )
+        except GroqPoolError as err:
+            raise GroqSpeechProviderError(str(err)) from err
 
-        if response.is_error or response.status_code >= 400:
-            raise GroqSpeechProviderError(
-                f"Groq Whisper API request failed with status {response.status_code}: "
-                f"{response.reason_phrase}"
-            )
-
-        try:
-            resp_data = response.json()
-        except Exception:
+        if not isinstance(resp_data, dict):
             raise GroqSpeechProviderError(
                 "Groq Whisper API returned a response that could not be parsed as JSON."
-            ) from None
+            )
 
         full_text = str(resp_data.get("text", "")).strip()
         detected_language = str(resp_data.get("language", "en"))

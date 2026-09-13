@@ -13,6 +13,7 @@ dependencies = [
     "redis[hiredis]",
     "httpx",
     "ulid-py",
+    "boto3>=1.34.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ embeddings = [
 storage = [
     "asyncpg>=0.30.0",
     "pgvector>=0.3.0",
+    "boto3>=1.34.0",
 ]
 
 [dependency-groups]
