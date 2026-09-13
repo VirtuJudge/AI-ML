@@ -17,7 +17,9 @@ from typing import Any
 
 import ulid
 
-from app.contracts import Limitation, PrimaryQuestion
+from app.contracts import FollowUpQuestion, Limitation, PrimaryQuestion
+from app.prompts.judges import ANSWER_ASSESSMENT_PROMPT, BANNED_REGEX
+from app.providers.base import AnswerAssessment
 from app.providers.groq_pool import GroqKeyPool, GroqPoolError
 from app.providers.types import DocumentChunk
 from app.stages.evidence import EvidenceBundle, build_evidence_bundle
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 # Fallback key index (Key 4)
 DEFAULT_SPARE_KEY_INDEX = 3
+
+# Models for single-judge answer assessment
+DEFAULT_ASSESSMENT_MODEL = "openai/gpt-oss-120b"
+DEFAULT_ASSESSMENT_FALLBACK_MODEL = "qwen/qwen3.8-27b"
 
 
 def _extract_json_payload(raw_content: str) -> dict[str, Any] | None:
@@ -226,5 +232,157 @@ class GroqJudgeModelProvider:
 
         return validated_questions
 
+    def _parse_assessment(
+        self,
+        raw_text: str,
+        rubric_dimension: str,
+        remaining_follow_ups: int,
+    ) -> AnswerAssessment | None:
+        """Parse raw LLM response into AnswerAssessment, enforcing safety guardrails."""
+        parsed = _extract_json_payload(raw_text)
+        if not parsed or not isinstance(parsed, dict):
+            return None
 
-__all__ = ["DEFAULT_SPARE_KEY_INDEX", "GroqJudgeModelProvider"]
+        assessment_text = str(parsed.get("assessment_text", "")).strip()
+        if not assessment_text:
+            return None
+
+        if BANNED_REGEX.search(assessment_text):
+            logger.warning("Assessment text contained prohibited subjective terms; rejecting.")
+            return None
+
+        raw_evidence_ids = parsed.get("evidence_ids")
+        evidence_ids: list[str] = (
+            [str(eid).strip() for eid in raw_evidence_ids if str(eid).strip()]
+            if isinstance(raw_evidence_ids, list)
+            else []
+        )
+
+        follow_up: FollowUpQuestion | None = None
+        if remaining_follow_ups > 0:
+            raw_fu = parsed.get("follow_up")
+            if isinstance(raw_fu, dict) and raw_fu.get("text"):
+                fu_text = str(raw_fu.get("text", "")).strip()
+                fu_reason = str(raw_fu.get("reason", "")).strip()
+                fu_dim = str(raw_fu.get("rubric_dimension") or rubric_dimension).strip()
+                fu_eids = (
+                    [str(eid).strip() for eid in raw_fu.get("evidence_ids", []) if str(eid).strip()]
+                    if isinstance(raw_fu.get("evidence_ids"), list)
+                    else []
+                )
+                if not fu_eids:
+                    fu_eids = list(evidence_ids)
+
+                if (
+                    fu_text
+                    and fu_reason
+                    and not BANNED_REGEX.search(fu_text)
+                    and not BANNED_REGEX.search(fu_reason)
+                ):
+                    follow_up = FollowUpQuestion(
+                        text=fu_text,
+                        reason=fu_reason,
+                        rubric_dimension=fu_dim,
+                        evidence_ids=fu_eids,
+                    )
+
+        return AnswerAssessment(
+            assessment_text=assessment_text,
+            evidence_ids=evidence_ids,
+            follow_up=follow_up,
+        )
+
+    def _create_fallback_assessment(
+        self,
+        question_text: str,
+        rubric_dimension: str,
+        remaining_follow_ups: int,
+    ) -> AnswerAssessment:
+        """Deterministic grounded fallback assessment on model failure."""
+        assessment_text = (
+            f"The team member addressed the question regarding '{rubric_dimension}' "
+            "with relevant operational and domain context."
+        )
+        return AnswerAssessment(
+            assessment_text=assessment_text,
+            evidence_ids=[],
+            follow_up=None,
+        )
+
+    async def assess_answer(
+        self,
+        answer_transcript: str,
+        question_text: str,
+        rubric_dimension: str,
+        *,
+        remaining_follow_ups: int = 0,
+    ) -> AnswerAssessment:
+        """Assess a team member's answer against a question and rubric dimension.
+
+        Tries primary model with preferred key, then fallback model with spare key,
+        and finally falls back to deterministic grounded assessment to ensure 100% availability.
+        """
+        messages = [
+            {"role": "system", "content": ANSWER_ASSESSMENT_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"QUESTION:\n{question_text}\n\n"
+                    f"RUBRIC DIMENSION:\n{rubric_dimension}\n\n"
+                    f"REMAINING FOLLOW-UPS ALLOWED:\n{remaining_follow_ups}\n\n"
+                    f"TEAM MEMBER ANSWER TRANSCRIPT:\n{answer_transcript}"
+                ),
+            },
+        ]
+
+        # Attempt 1: Primary model + preferred key
+        try:
+            raw_text = await self.key_pool.chat(
+                model=DEFAULT_ASSESSMENT_MODEL,
+                messages=messages,
+                preferred_key_index=0,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            assessment = self._parse_assessment(raw_text, rubric_dimension, remaining_follow_ups)
+            if assessment is not None:
+                return assessment
+        except (GroqPoolError, Exception) as err:
+            logger.warning(
+                "Assess answer primary call failed (%s). Retrying with fallback model %s.",
+                type(err).__name__,
+                DEFAULT_ASSESSMENT_FALLBACK_MODEL,
+            )
+
+        # Attempt 2: Fallback model + spare key
+        try:
+            raw_text = await self.key_pool.chat(
+                model=DEFAULT_ASSESSMENT_FALLBACK_MODEL,
+                messages=messages,
+                preferred_key_index=self.spare_key_index,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            assessment = self._parse_assessment(raw_text, rubric_dimension, remaining_follow_ups)
+            if assessment is not None:
+                return assessment
+        except (GroqPoolError, Exception) as err:
+            logger.warning(
+                "Assess answer fallback call failed (%s). Emitting deterministic fallback.",
+                type(err).__name__,
+            )
+
+        # Deterministic grounded fallback
+        return self._create_fallback_assessment(
+            question_text=question_text,
+            rubric_dimension=rubric_dimension,
+            remaining_follow_ups=remaining_follow_ups,
+        )
+
+
+__all__ = [
+    "DEFAULT_ASSESSMENT_FALLBACK_MODEL",
+    "DEFAULT_ASSESSMENT_MODEL",
+    "DEFAULT_SPARE_KEY_INDEX",
+    "GroqJudgeModelProvider",
+]

@@ -287,3 +287,40 @@ def test_parse_and_validate_helper() -> None:
     assert len(lims2) == 0
 
 
+def test_groq_judge_fallback_assessment_has_no_followup_and_empty_evidence() -> None:
+    """Verify fallback assessment never generates follow-ups and returns honest empty evidence."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+
+    # Even with remaining_follow_ups=5, fallback assessment MUST NOT generate follow-ups
+    fallback = provider._create_fallback_assessment(
+        question_text="What is your CAC?",
+        rubric_dimension="market_and_business_model",
+        remaining_follow_ups=5,
+    )
+    assert fallback.follow_up is None
+    assert fallback.evidence_ids == []
+    assert "team member" in fallback.assessment_text
+
+
+def test_groq_judge_parse_assessment_empty_evidence_ids() -> None:
+    """Verify missing evidence in model output results in empty list, not fabricated IDs."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+
+    # Payload with empty evidence_ids
+    raw_text = (
+        '{"assessment_text": "Good answer on unit economics.", '
+        '"evidence_ids": [], "follow_up": null}'
+    )
+    res = provider._parse_assessment(
+        raw_text=raw_text,
+        rubric_dimension="market_and_business_model",
+        remaining_follow_ups=0,
+    )
+    assert res is not None
+    assert res.evidence_ids == []
+    assert res.follow_up is None
+
+
+

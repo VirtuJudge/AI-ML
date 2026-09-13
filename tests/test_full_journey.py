@@ -75,6 +75,8 @@ async def test_complete_product_journey(journey_pipeline: FakePipeline) -> None:
         )
         answer_result = await journey_pipeline.analyze_answer(answer_job)
         assert isinstance(answer_result, AnswerAnalysisCompleted)
+        assert answer_result.transcript_artifact_id
+        assert answer_result.assessment_artifact_id
         assert answer_result.follow_up is not None
         qa_answers.append(answer_result)
 
@@ -95,6 +97,8 @@ async def test_complete_product_journey(journey_pipeline: FakePipeline) -> None:
     )
     follow_up_result = await journey_pipeline.analyze_answer(follow_up_job)
     assert isinstance(follow_up_result, AnswerAnalysisCompleted)
+    assert follow_up_result.transcript_artifact_id
+    assert follow_up_result.assessment_artifact_id
     assert follow_up_result.follow_up is None
 
     # 4. Generate Report (feeding analysis_artifact from session into report generation)

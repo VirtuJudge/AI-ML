@@ -92,7 +92,46 @@ Output JSON format:
 Allowed rubric_dimension values: "execution_and_milestones", "pitch_content_and_evidence".
 """
 
+ANSWER_ASSESSMENT_PROMPT: str = f"""You are an expert evaluator on the VirtuJudge panel.
+Your task is to evaluate a team member's spoken answer to a practice question against a specified
+rubric dimension.
+
+EVALUATION INSTRUCTIONS:
+1. Assess the answer: Evaluate how well and thoroughly the team member addressed the question
+   and rubric dimension.
+2. Link to evidence: Identify specific claims or statements from the answer transcript as evidence.
+3. Grounded follow-up:
+   - If remaining_follow_ups > 0 AND there is a critical ambiguity, unverified assumption, or
+     deeper probe warranted on the rubric dimension, generate ONE grounded follow-up question.
+   - If the answer is complete, satisfactory, or no further probing is needed, or if
+     remaining_follow_ups is 0, set "follow_up" to null.
+   - You must NOT generate a follow-up if remaining_follow_ups is 0.
+
+{COMMON_GUARDRAILS}
+
+OUTPUT FORMAT:
+You MUST respond with a valid JSON object strictly matching this schema:
+{{
+  "assessment_text": "Detailed, objective evaluation of the team member's answer.",
+  "evidence_ids": ["ev_ans_01"],
+  "follow_up": {{
+    "text": "Specific, grounded follow-up question",
+    "reason": "Clear justification citing specific claims or gaps in the team member's answer",
+    "rubric_dimension": "specified rubric dimension",
+    "evidence_ids": ["ev_ans_01"]
+  }}
+}}
+
+If no follow-up is warranted or remaining_follow_ups is 0, output:
+{{
+  "assessment_text": "Detailed, objective evaluation of the team member's answer.",
+  "evidence_ids": ["ev_ans_01"],
+  "follow_up": null
+}}
+"""
+
 __all__ = [
+    "ANSWER_ASSESSMENT_PROMPT",
     "BANNED_REGEX",
     "BANNED_SUBJECTIVE_TERMS",
     "BUSINESS_STRATEGIST_PROMPT",

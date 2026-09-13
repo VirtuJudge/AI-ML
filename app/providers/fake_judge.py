@@ -1,11 +1,12 @@
-"""Fake judge model provider generating grounded evaluation questions."""
+"""Fake judge model provider generating grounded evaluation questions and assessments."""
 
-from app.contracts import PrimaryQuestion
+from app.contracts import FollowUpQuestion, PrimaryQuestion
+from app.providers.base import AnswerAssessment
 from app.providers.types import DocumentChunk
 
 
 class FakeJudgeModelProvider:
-    """Deterministic LLM judge provider for question generation."""
+    """Deterministic LLM judge provider for question generation and answer assessment."""
 
     async def generate_questions(
         self,
@@ -22,10 +23,7 @@ class FakeJudgeModelProvider:
             doc_ids = [i.evidence_id for i in evidence_bundle.items if i.source == "documents"]
             if speech_ids:
                 speech_id = speech_ids[0]
-            if doc_ids:
-                doc_id = doc_ids[0]
-            else:
-                doc_id = speech_id
+            doc_id = doc_ids[0] if doc_ids else speech_id
 
         return [
             PrimaryQuestion(
@@ -53,6 +51,48 @@ class FakeJudgeModelProvider:
                 evidence_ids=[doc_id],
             ),
         ]
+
+    async def assess_answer(
+        self,
+        answer_transcript: str,
+        question_text: str,
+        rubric_dimension: str,
+        *,
+        remaining_follow_ups: int = 0,
+    ) -> AnswerAssessment:
+        """Deterministic assessment of a team member's answer."""
+        assessment_text = (
+            f"The team member's response directly addresses the question '{question_text}' "
+            f"regarding dimension '{rubric_dimension}' with substantive reasoning and "
+            "operational clarity."
+        )
+        evidence_ids: list[str] = []
+
+        is_comprehensive = any(
+            term in answer_transcript.lower()
+            for term in ["comprehensive", "detailed", "thorough", "exhaustive", "complete"]
+        )
+
+        follow_up: FollowUpQuestion | None = None
+        if remaining_follow_ups > 0 and answer_transcript.strip() and not is_comprehensive:
+            follow_up = FollowUpQuestion(
+                text=(
+                    "Could you elaborate on the key assumptions underlying your approach "
+                    f"to {rubric_dimension}?"
+                ),
+                reason=(
+                    "Clarifies operational trade-offs identified in the answer regarding "
+                    f"{rubric_dimension}."
+                ),
+                rubric_dimension=rubric_dimension,
+                evidence_ids=[],
+            )
+
+        return AnswerAssessment(
+            assessment_text=assessment_text,
+            evidence_ids=evidence_ids,
+            follow_up=follow_up,
+        )
 
 
 __all__ = ["FakeJudgeModelProvider"]
