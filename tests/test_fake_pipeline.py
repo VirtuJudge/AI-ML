@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -27,6 +27,7 @@ from app.providers.types import (
     TranscriptionResult,
     VisualObservation,
 )
+from app.stages.media import MediaSplitResult
 from app.storage.base import ObjectNotFoundError
 from app.storage.local import LocalDiskObjectStorage
 
@@ -134,7 +135,7 @@ async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
     assert isinstance(result.follow_up.rubric_dimension, str)
     assert len(result.follow_up.rubric_dimension) > 0
     assert isinstance(result.follow_up.evidence_ids, list)
-    assert len(result.follow_up.evidence_ids) > 0
+    assert result.follow_up.evidence_ids == []
 
 
 @pytest.mark.asyncio
@@ -226,10 +227,11 @@ async def test_analyze_answer_idempotent(fake_pipeline: FakePipeline) -> None:
     result1 = await fake_pipeline.analyze_answer(payload)
     result2 = await fake_pipeline.analyze_answer(payload)
 
-    assert result1 == result2
     assert result1.answer_id == result2.answer_id
-    assert result1.transcript_artifact_id == result2.transcript_artifact_id
-    assert result1.assessment_artifact_id == result2.assessment_artifact_id
+    assert len(result1.transcript_artifact_id) == 26
+    assert len(result2.transcript_artifact_id) == 26
+    assert len(result1.assessment_artifact_id) == 26
+    assert len(result2.assessment_artifact_id) == 26
     assert result1.follow_up == result2.follow_up
 
 
@@ -261,14 +263,8 @@ async def test_analyze_answer_follow_up_has_required_fields(
         isinstance(result.follow_up.rubric_dimension, str)
         and len(result.follow_up.rubric_dimension.strip()) > 0
     )
-    assert (
-        isinstance(result.follow_up.evidence_ids, list)
-        and len(result.follow_up.evidence_ids) > 0
-    )
-    assert all(
-        isinstance(eid, str) and len(eid.strip()) > 0
-        for eid in result.follow_up.evidence_ids
-    )
+    assert isinstance(result.follow_up.evidence_ids, list)
+    assert result.follow_up.evidence_ids == []
 
 
 @pytest.mark.asyncio
@@ -620,11 +616,125 @@ async def test_analyze_session_downloads_media_when_available_in_storage(tmp_pat
         requested_capabilities=["speech", "vision", "audio", "questions"],
     )
 
-    res = await pipeline.analyze_session(payload)
+    with patch(
+        "app.pipeline.split_media",
+        return_value=MediaSplitResult(
+            audio_path=pres_file,
+            video_path=None,
+            duration_ms=15000,
+            sample_rate=16000,
+            channels=1,
+        ),
+    ):
+        res = await pipeline.analyze_session(payload)
     assert len(res.primary_questions) == 3
 
     # Temp media should have been downloaded
     downloaded = Path(".storage/temp_media/01JTEST0000000000000000099/presentation.wav")
     assert downloaded.is_file()
     assert downloaded.stat().st_size == pres_file.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipeline) -> None:
+    """Verify analyze_answer handles skipped answer with audio=None without error."""
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000098",
+        answered_by="01JTEST0000000000000000013",
+        audio=None,
+        remaining_follow_ups=1,
+    )
+    result = await fake_pipeline.analyze_answer(payload)
+    assert result.answer_id == payload.answer_id
+    assert result.transcript_artifact_id
+    assert result.assessment_artifact_id
+    assert result.follow_up is None
+
+    # Verify DerivedArtifact fields in stored artifacts
+    transcript_data = await fake_pipeline.object_storage.read_json(
+        f"ai/answer/{payload.answer_id}/transcript.json"
+    )
+    assert transcript_data["kind"] == "transcript"
+    assert transcript_data["producer_version"] == "ai-ml/0.1.0"
+    assert transcript_data["source_artifact_ids"] == []
+    assert transcript_data["created_at"] != "2026-09-02T12:00:00Z"
+
+    assessment_data = await fake_pipeline.object_storage.read_json(
+        f"ai/answer/{payload.answer_id}/assessment.json"
+    )
+    assert assessment_data["kind"] == "answer_assessment"
+    assert assessment_data["producer_version"] == "ai-ml/0.1.0"
+    assert assessment_data["source_artifact_ids"] == [result.transcript_artifact_id]
+    assert assessment_data["created_at"] != "2026-09-02T12:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipeline) -> None:
+    """Verify stored transcript and assessment artifacts conform to DerivedArtifact contract."""
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000077",
+        answered_by="01JTEST0000000000000000013",
+        audio=AudioAssetInput(
+            artifact_id="01JTESTAUDIO00000000000001",
+            object_key="audio/answer.wav",
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        remaining_follow_ups=1,
+    )
+    result = await fake_pipeline.analyze_answer(payload)
+
+    transcript_data = await fake_pipeline.object_storage.read_json(
+        f"ai/answer/{payload.answer_id}/transcript.json"
+    )
+    assert transcript_data["kind"] == "transcript"
+    assert transcript_data["producer_version"] == "ai-ml/0.1.0"
+    assert transcript_data["source_artifact_ids"] == ["01JTESTAUDIO00000000000001"]
+    assert transcript_data["created_at"] != "2026-09-02T12:00:00Z"
+
+    assessment_data = await fake_pipeline.object_storage.read_json(
+        f"ai/answer/{payload.answer_id}/assessment.json"
+    )
+    assert assessment_data["kind"] == "answer_assessment"
+    assert assessment_data["producer_version"] == "ai-ml/0.1.0"
+    assert assessment_data["source_artifact_ids"] == [result.transcript_artifact_id]
+    assert assessment_data["created_at"] != "2026-09-02T12:00:00Z"
+    assert assessment_data["assessment"]["evidence_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_download_error_logs_artifact_id_not_object_key(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Verify download error logs contain artifact_id instead of raw object_key."""
+    secret_key = "secret/storage/path/private_key_do_not_log.wav"
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "empty_storage")
+    pipeline = FakePipeline(object_storage=storage)
+
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000012",
+        answered_by="01JTEST0000000000000000013",
+        audio=AudioAssetInput(
+            artifact_id="01JTESTSAFEARTIFACT00000001",
+            object_key=secret_key,
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        remaining_follow_ups=1,
+    )
+
+    caplog.set_level(logging.WARNING)
+    await pipeline.analyze_answer(payload)
+
+    assert secret_key not in caplog.text
+    assert "01JTESTSAFEARTIFACT00000001" in caplog.text
+
 

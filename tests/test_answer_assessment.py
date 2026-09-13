@@ -25,13 +25,13 @@ async def test_run_answer_assessment_stage_with_follow_up() -> None:
 
     assert isinstance(result, AnswerAssessmentResult)
     assert result.assessment.assessment_text != ""
-    assert len(result.assessment.evidence_ids) > 0
+    assert result.assessment.evidence_ids == []
     assert result.assessment.follow_up is not None
     assert isinstance(result.assessment.follow_up, FollowUpQuestion)
     assert result.assessment.follow_up.text != ""
     assert result.assessment.follow_up.reason != ""
     assert result.assessment.follow_up.rubric_dimension == rubric_dimension
-    assert len(result.assessment.follow_up.evidence_ids) > 0
+    assert result.assessment.follow_up.evidence_ids == []
     assert result.metadata["stage"] == "answer_assessment"
     assert result.metadata["has_follow_up"] is True
     assert result.metadata["judge_provider"] == "FakeJudgeModelProvider"
@@ -55,7 +55,7 @@ async def test_run_answer_assessment_stage_without_follow_up() -> None:
 
     assert isinstance(result, AnswerAssessmentResult)
     assert result.assessment.assessment_text != ""
-    assert len(result.assessment.evidence_ids) > 0
+    assert result.assessment.evidence_ids == []
     assert result.assessment.follow_up is None
     assert result.metadata["has_follow_up"] is False
     assert result.metadata["rubric_dimension"] == rubric_dimension
@@ -125,5 +125,5 @@ async def test_run_answer_assessment_stage_follow_up_contract_fields() -> None:
     assert isinstance(follow_up.text, str) and len(follow_up.text.strip()) > 0
     assert isinstance(follow_up.reason, str) and len(follow_up.reason.strip()) > 0
     assert follow_up.rubric_dimension == rubric_dimension
-    assert isinstance(follow_up.evidence_ids, list) and len(follow_up.evidence_ids) > 0
-    assert all(isinstance(eid, str) and len(eid.strip()) > 0 for eid in follow_up.evidence_ids)
+    assert isinstance(follow_up.evidence_ids, list)
+    assert follow_up.evidence_ids == []

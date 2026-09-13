@@ -180,3 +180,54 @@ def test_session_analysis_completed_serialization() -> None:
     serialized = completed.model_dump_json()
     deserialized = SessionAnalysisCompleted.model_validate_json(serialized)
     assert deserialized == completed
+
+
+def test_analyze_answer_payload_optional_audio() -> None:
+    """Verify AnalyzeAnswerPayload accepts None, omitted audio, and null for skipped answers."""
+    from app.contracts import AnalyzeAnswerPayload, AudioAssetInput
+
+    # 1. audio omitted
+    p1 = AnalyzeAnswerPayload.model_validate(
+        {
+            "qa_round_id": "qa_01",
+            "question_id": "q_01",
+            "answer_id": "ans_01",
+            "answered_by": "user_01",
+            "remaining_follow_ups": 2,
+        }
+    )
+    assert p1.audio is None
+
+    # 2. audio: None
+    p2 = AnalyzeAnswerPayload.model_validate(
+        {
+            "qa_round_id": "qa_01",
+            "question_id": "q_01",
+            "answer_id": "ans_01",
+            "answered_by": "user_01",
+            "audio": None,
+            "remaining_follow_ups": 0,
+        }
+    )
+    assert p2.audio is None
+
+    # 3. audio as AudioAssetInput dict
+    p3 = AnalyzeAnswerPayload.model_validate(
+        {
+            "qa_round_id": "qa_01",
+            "question_id": "q_01",
+            "answer_id": "ans_01",
+            "answered_by": "user_01",
+            "audio": {
+                "artifact_id": "art_01",
+                "object_key": "audio.wav",
+                "checksum": "sha256:" + "a" * 64,
+                "media_type": "audio/wav",
+                "duration_ms": 5000,
+            },
+            "remaining_follow_ups": 1,
+        }
+    )
+    assert isinstance(p3.audio, AudioAssetInput)
+    assert p3.audio.duration_ms == 5000
+

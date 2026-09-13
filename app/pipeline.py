@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -56,6 +56,19 @@ from app.storage.base import (
 from app.storage.local import LocalDiskObjectStorage
 
 logger = logging.getLogger(__name__)
+
+PRODUCER_VERSION: str = "ai-ml/0.1.0"
+
+
+def generate_deterministic_ulid(seed_key: str, dt: datetime | str | None = None) -> str:
+    """Generate a deterministic ULID from a seed key and timestamp."""
+    if dt is None:
+        dt = datetime.now(UTC)
+    elif isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+    ts_bytes = int(dt.timestamp() * 1000).to_bytes(6, byteorder="big")
+    rand_bytes = hashlib.sha256(seed_key.encode()).digest()[:10]
+    return str(ulid.from_bytes(ts_bytes + rand_bytes))
 
 FAKE_SESSION_ANALYSIS_ARTIFACT_ID = "01JEXAMPLE000000000000000A"
 FAKE_QUESTION_1_ID = "01JEXAMPLE000000000000001A"
@@ -365,10 +378,7 @@ class FakePipeline:
 
         artifact_key = f"ai/session/{session_id}/analysis.json"
         created_at = "2026-09-02T12:00:00Z"
-        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        ts_bytes = int(dt.timestamp() * 1000).to_bytes(6, byteorder="big")
-        rand_bytes = hashlib.sha256(f"{session_id}:analysis".encode()).digest()[:10]
-        artifact_id = str(ulid.from_bytes(ts_bytes + rand_bytes))
+        artifact_id = generate_deterministic_ulid(f"{session_id}:analysis", created_at)
 
         artifact_payload = {
             "artifact_id": artifact_id,
@@ -451,29 +461,35 @@ class FakePipeline:
                 except ObjectNotFoundError as err:
                     if not self._is_synthetic_speech_run():
                         logger.error(
-                            "Answer audio '%s' not found in object storage: %s",
-                            audio_asset.object_key,
+                            "Answer audio artifact '%s' not found in object storage: %s",
+                            audio_asset.artifact_id,
                             err,
                             exc_info=True,
                         )
                         raise
                     logger.warning(
-                        "Answer audio '%s' not found in storage; using synthetic inputs.",
-                        audio_asset.object_key,
+                        "Answer audio artifact '%s' not found in storage; "
+                        "using synthetic inputs.",
+                        audio_asset.artifact_id,
                     )
                 except Exception as exc:
                     if not self._is_synthetic_speech_run():
                         logger.error(
-                            "Failed to download answer audio '%s' from object storage: %s",
-                            audio_asset.object_key,
+                            "Failed to download answer audio artifact '%s' from "
+                            "object storage: %s",
+                            audio_asset.artifact_id,
                             exc,
                             exc_info=True,
                         )
-                        msg = f"Failed to download media '{audio_asset.object_key}': {exc}"
+                        msg = (
+                            f"Failed to download media for artifact "
+                            f"'{audio_asset.artifact_id}': {exc}"
+                        )
                         raise ObjectStorageError(msg) from exc
                     logger.warning(
-                        "Error downloading answer audio '%s' from storage in synthetic mode: %s",
-                        audio_asset.object_key,
+                        "Error downloading answer audio artifact '%s' from storage in "
+                        "synthetic mode: %s",
+                        audio_asset.artifact_id,
                         exc,
                     )
 
@@ -492,24 +508,27 @@ class FakePipeline:
             )
 
         artifact_key = f"ai/answer/{job.answer_id}/transcript.json"
-        created_at = "2026-09-02T12:00:00Z"
-        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        ts_bytes = int(dt.timestamp() * 1000).to_bytes(6, byteorder="big")
+        assessment_artifact_key = f"ai/answer/{job.answer_id}/assessment.json"
 
-        transcript_rand_bytes = (
-            hashlib.sha256(f"{job.answer_id}:transcript".encode()).digest()[:10]
+        now_utc = datetime.now(UTC)
+        created_at = now_utc.isoformat()
+        transcript_artifact_id = generate_deterministic_ulid(
+            f"{job.answer_id}:transcript", now_utc
         )
-        transcript_artifact_id = str(ulid.from_bytes(ts_bytes + transcript_rand_bytes))
-
-        assessment_rand_bytes = (
-            hashlib.sha256(f"{job.answer_id}:assessment".encode()).digest()[:10]
+        assessment_artifact_id = generate_deterministic_ulid(
+            f"{job.answer_id}:assessment", now_utc
         )
-        assessment_artifact_id = str(ulid.from_bytes(ts_bytes + assessment_rand_bytes))
 
+        transcript_source_ids = (
+            [audio_asset.artifact_id] if audio_asset is not None else []
+        )
         artifact_payload = {
             "artifact_id": transcript_artifact_id,
             "answer_id": job.answer_id,
+            "kind": "transcript",
             "schema_version": 1,
+            "producer_version": PRODUCER_VERSION,
+            "source_artifact_ids": transcript_source_ids,
             "created_at": created_at,
             "transcript": {
                 "text": speech_res.transcript.full_text,
@@ -538,12 +557,14 @@ class FakePipeline:
             remaining_follow_ups=job.remaining_follow_ups,
         )
 
-        assessment_artifact_key = f"ai/answer/{job.answer_id}/assessment.json"
         assessment_payload = {
             "artifact_id": assessment_artifact_id,
             "answer_id": job.answer_id,
             "question_id": job.question_id,
+            "kind": "answer_assessment",
             "schema_version": 1,
+            "producer_version": PRODUCER_VERSION,
+            "source_artifact_ids": [transcript_artifact_id],
             "created_at": created_at,
             "assessment": {
                 "text": assessment_res.assessment.assessment_text,
@@ -603,4 +624,9 @@ class FakePipeline:
         )
 
 
-__all__ = ["FakePipeline", "PitchAnalysisPipeline", "combine_timed_evidence"]
+__all__ = [
+    "FakePipeline",
+    "PitchAnalysisPipeline",
+    "combine_timed_evidence",
+    "generate_deterministic_ulid",
+]

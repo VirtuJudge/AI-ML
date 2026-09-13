@@ -93,11 +93,11 @@ Allowed rubric_dimension values: "execution_and_milestones", "pitch_content_and_
 """
 
 ANSWER_ASSESSMENT_PROMPT: str = f"""You are an expert evaluator on the VirtuJudge panel.
-Your task is to evaluate a candidate's spoken answer to an interview question against a specified
+Your task is to evaluate a team member's spoken answer to a practice question against a specified
 rubric dimension.
 
 EVALUATION INSTRUCTIONS:
-1. Assess the answer: Evaluate how well and thoroughly the candidate addressed the question
+1. Assess the answer: Evaluate how well and thoroughly the team member addressed the question
    and rubric dimension.
 2. Link to evidence: Identify specific claims or statements from the answer transcript as evidence.
 3. Grounded follow-up:
@@ -112,11 +112,11 @@ EVALUATION INSTRUCTIONS:
 OUTPUT FORMAT:
 You MUST respond with a valid JSON object strictly matching this schema:
 {{
-  "assessment_text": "Detailed, objective evaluation of the candidate's answer.",
+  "assessment_text": "Detailed, objective evaluation of the team member's answer.",
   "evidence_ids": ["ev_ans_01"],
   "follow_up": {{
     "text": "Specific, grounded follow-up question",
-    "reason": "Clear justification citing specific claims or gaps in the candidate's answer",
+    "reason": "Clear justification citing specific claims or gaps in the team member's answer",
     "rubric_dimension": "specified rubric dimension",
     "evidence_ids": ["ev_ans_01"]
   }}
@@ -124,7 +124,7 @@ You MUST respond with a valid JSON object strictly matching this schema:
 
 If no follow-up is warranted or remaining_follow_ups is 0, output:
 {{
-  "assessment_text": "Detailed, objective evaluation of the candidate's answer.",
+  "assessment_text": "Detailed, objective evaluation of the team member's answer.",
   "evidence_ids": ["ev_ans_01"],
   "follow_up": null
 }}

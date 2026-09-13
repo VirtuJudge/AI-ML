@@ -141,12 +141,14 @@ class AnalyzeAnswerPayload(BaseModel):
     question_id: str
     answer_id: str
     answered_by: str
-    audio: AudioAssetInput
+    audio: AudioAssetInput | None = None
     remaining_follow_ups: int
 
     @field_validator("audio", mode="before")
     @classmethod
     def coerce_audio_asset(cls, v: Any) -> Any:
+        if v is None:
+            return None
         if isinstance(v, AssetInput) and not isinstance(v, AudioAssetInput):
             if v.duration_ms is None:
                 raise ValueError("audio must have duration_ms specified")

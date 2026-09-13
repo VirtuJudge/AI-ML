@@ -257,8 +257,6 @@ class GroqJudgeModelProvider:
             if isinstance(raw_evidence_ids, list)
             else []
         )
-        if not evidence_ids:
-            evidence_ids = ["ev_answer_001"]
 
         follow_up: FollowUpQuestion | None = None
         if remaining_follow_ups > 0:
@@ -302,24 +300,13 @@ class GroqJudgeModelProvider:
     ) -> AnswerAssessment:
         """Deterministic grounded fallback assessment on model failure."""
         assessment_text = (
-            f"The candidate addressed the question regarding '{rubric_dimension}' "
+            f"The team member addressed the question regarding '{rubric_dimension}' "
             "with relevant operational and domain context."
         )
-        follow_up: FollowUpQuestion | None = None
-        if remaining_follow_ups > 0:
-            follow_up = FollowUpQuestion(
-                text=(
-                    f"How would your approach to {rubric_dimension} change if market "
-                    "conditions or core constraints shifted?"
-                ),
-                reason=f"Probes resilience and alternative strategies for {rubric_dimension}.",
-                rubric_dimension=rubric_dimension,
-                evidence_ids=["ev_answer_001"],
-            )
         return AnswerAssessment(
             assessment_text=assessment_text,
-            evidence_ids=["ev_answer_001"],
-            follow_up=follow_up,
+            evidence_ids=[],
+            follow_up=None,
         )
 
     async def assess_answer(
@@ -330,7 +317,7 @@ class GroqJudgeModelProvider:
         *,
         remaining_follow_ups: int = 0,
     ) -> AnswerAssessment:
-        """Assess a candidate's answer against a question and rubric dimension.
+        """Assess a team member's answer against a question and rubric dimension.
 
         Tries primary model with preferred key, then fallback model with spare key,
         and finally falls back to deterministic grounded assessment to ensure 100% availability.
@@ -343,7 +330,7 @@ class GroqJudgeModelProvider:
                     f"QUESTION:\n{question_text}\n\n"
                     f"RUBRIC DIMENSION:\n{rubric_dimension}\n\n"
                     f"REMAINING FOLLOW-UPS ALLOWED:\n{remaining_follow_ups}\n\n"
-                    f"CANDIDATE ANSWER TRANSCRIPT:\n{answer_transcript}"
+                    f"TEAM MEMBER ANSWER TRANSCRIPT:\n{answer_transcript}"
                 ),
             },
         ]

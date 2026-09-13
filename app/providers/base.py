@@ -19,7 +19,7 @@ from app.providers.types import (
 
 
 class AnswerAssessment(BaseModel):
-    """Structured assessment of a candidate answer against a question and rubric."""
+    """Structured assessment of a team member's answer against a question and rubric."""
 
     assessment_text: str
     evidence_ids: list[str] = Field(default_factory=list)

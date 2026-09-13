@@ -60,16 +60,21 @@ class FakeJudgeModelProvider:
         *,
         remaining_follow_ups: int = 0,
     ) -> AnswerAssessment:
-        """Deterministic assessment of a candidate answer."""
+        """Deterministic assessment of a team member's answer."""
         assessment_text = (
-            f"The candidate's response directly addresses the question '{question_text}' "
+            f"The team member's response directly addresses the question '{question_text}' "
             f"regarding dimension '{rubric_dimension}' with substantive reasoning and "
             "operational clarity."
         )
-        evidence_ids = ["ev_answer_001"]
+        evidence_ids: list[str] = []
+
+        is_comprehensive = any(
+            term in answer_transcript.lower()
+            for term in ["comprehensive", "detailed", "thorough", "exhaustive", "complete"]
+        )
 
         follow_up: FollowUpQuestion | None = None
-        if remaining_follow_ups > 0:
+        if remaining_follow_ups > 0 and answer_transcript.strip() and not is_comprehensive:
             follow_up = FollowUpQuestion(
                 text=(
                     "Could you elaborate on the key assumptions underlying your approach "
@@ -80,7 +85,7 @@ class FakeJudgeModelProvider:
                     f"{rubric_dimension}."
                 ),
                 rubric_dimension=rubric_dimension,
-                evidence_ids=["ev_answer_001"],
+                evidence_ids=[],
             )
 
         return AnswerAssessment(
