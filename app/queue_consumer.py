@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 from datetime import UTC, datetime
+from typing import Any
 
 import redis.asyncio as aioredis
 import ulid
@@ -127,11 +128,23 @@ class RedisQueueConsumer:
             self.backend_client,
         )
 
-        # Write smoke/diagnostic correlation result to Redis
+        # Write safe correlation result metadata to Redis
+        # (redacting confidential content and payloads)
         try:
             r = await self._get_redis()
             result_key = f"{self.result_prefix}{message.job_id}"
-            await r.set(result_key, update.model_dump_json(), ex=self.result_ttl)
+            safe_payload: dict[str, Any] = {}
+            if hasattr(update.payload, "analysis_artifact") and update.payload.analysis_artifact:
+                safe_payload["artifact_id"] = update.payload.analysis_artifact.artifact_id
+            safe_update = WorkerUpdate(
+                schema_version=update.schema_version,
+                sequence=update.sequence,
+                status=update.status,
+                occurred_at=update.occurred_at,
+                trace_id=update.trace_id,
+                payload=safe_payload,
+            )
+            await r.set(result_key, safe_update.model_dump_json(), ex=self.result_ttl)
             logger.info("Saved result to Redis key: %s (status=%s)", result_key, update.status)
         except Exception as err:
             logger.warning("Failed to store result in Redis for job %s: %s", message.job_id, err)

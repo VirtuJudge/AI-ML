@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -45,8 +47,14 @@ from app.stages.questions import run_question_stage
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
 from app.storage import create_object_storage
-from app.storage.base import ObjectStorageProtocol
+from app.storage.base import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    ObjectStorageProtocol,
+)
 from app.storage.local import LocalDiskObjectStorage
+
+logger = logging.getLogger(__name__)
 
 FAKE_SESSION_ANALYSIS_ARTIFACT_ID = "01JEXAMPLE000000000000000A"
 FAKE_QUESTION_1_ID = "01JEXAMPLE000000000000001A"
@@ -233,6 +241,10 @@ class FakePipeline:
         else:
             self.object_storage = create_object_storage()
 
+    def _is_synthetic_speech_run(self) -> bool:
+        """Check whether the pipeline is executing with purely fake/synthetic speech provider."""
+        return isinstance(self.speech_provider, FakeSpeechProvider)
+
     async def analyze_session(self, job: AnalyzeSessionPayload) -> SessionAnalysisCompleted:
         input_file = Path(job.presentation.object_key)
         skip_file_check = not input_file.is_file()
@@ -246,8 +258,43 @@ class FakePipeline:
                 if temp_dest.is_file():
                     input_file = temp_dest
                     skip_file_check = False
-            except Exception:
-                pass
+                else:
+                    raise ObjectStorageError(
+                        f"Download succeeded but file not found at destination '{temp_dest}'."
+                    )
+            except ObjectNotFoundError as err:
+                if not self._is_synthetic_speech_run():
+                    logger.error(
+                        "Presentation media '%s' not found in object storage: %s",
+                        job.presentation.object_key,
+                        err,
+                        exc_info=True,
+                    )
+                    raise
+                logger.warning(
+                    "Presentation media '%s' not found in storage; using synthetic inputs.",
+                    job.presentation.object_key,
+                )
+            except Exception as exc:
+                if not self._is_synthetic_speech_run():
+                    logger.error(
+                        "Failed to download presentation media '%s' from object storage: %s",
+                        job.presentation.object_key,
+                        exc,
+                        exc_info=True,
+                    )
+                    msg = f"Failed to download media '{job.presentation.object_key}': {exc}"
+                    raise ObjectStorageError(msg) from exc
+                logger.warning(
+                    "Error downloading media '%s' from storage in synthetic mode: %s",
+                    job.presentation.object_key,
+                    exc,
+                )
+
+        if not skip_file_check and not input_file.is_file():
+            raise FileNotFoundError(
+                f"Presentation media file '{input_file}' does not exist."
+            )
 
         if not skip_file_check:
             split_res = await split_media(input_file)
@@ -289,7 +336,11 @@ class FakePipeline:
             audio_res.observations,
         )
 
-        session_id = getattr(job, "session_id", None) or job.presentation.artifact_id
+        session_id = (
+            job.practice_session_id
+            or getattr(job, "session_id", None)
+            or job.presentation.artifact_id
+        )
         doc_stage_res = await run_document_stage(
             job.supporting_documents,
             self.document_provider,
@@ -312,14 +363,18 @@ class FakePipeline:
         )
 
         artifact_key = f"ai/session/{session_id}/analysis.json"
-        hash_digest = hashlib.sha256(f"{session_id}:analysis".encode()).digest()[:16]
-        artifact_id = str(ulid.from_bytes(hash_digest))
+        created_at = "2026-09-02T12:00:00Z"
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        ts_bytes = int(dt.timestamp() * 1000).to_bytes(6, byteorder="big")
+        rand_bytes = hashlib.sha256(f"{session_id}:analysis".encode()).digest()[:10]
+        artifact_id = str(ulid.from_bytes(ts_bytes + rand_bytes))
 
         artifact_payload = {
             "artifact_id": artifact_id,
             "session_id": session_id,
+            "practice_session_id": session_id,
             "schema_version": 1,
-            "created_at": "2026-09-02T12:00:00Z",
+            "created_at": created_at,
             "transcript": {
                 "text": speech_res.transcription.full_text,
                 "segments": [s.model_dump() for s in speech_res.transcription.segments],

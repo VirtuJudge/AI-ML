@@ -7,7 +7,6 @@ from app.stages.evidence import EvidenceBundle, EvidenceItem
 from app.stages.judge_panel import (
     JUDGE_PANEL,
     create_fallback_question,
-    format_evidence_for_judge,
     format_prompt_for_judge,
     validate_judge_question,
     validate_panel_questions,
@@ -148,6 +147,13 @@ def test_validate_judge_question_rejects_emotional_claims() -> None:
             rubric_dimension="business_reasoning",
             evidence_ids=["ev_speech_001"],
         ),
+        PrimaryQuestion(
+            candidate_id="q4",
+            text="Is the founder a liar about their traction?",
+            reason="Lying suggests false metrics.",
+            rubric_dimension="business_reasoning",
+            evidence_ids=["ev_speech_001"],
+        ),
     ]
 
     for q in emotional_questions:
@@ -214,10 +220,18 @@ def test_create_fallback_question() -> None:
         assert bundle.has_evidence_id(q.evidence_ids[0])
 
 
-def test_format_evidence_for_judge() -> None:
-    """Verify format_evidence_for_judge formats evidence summary."""
+def test_create_fallback_question_empty_bundle() -> None:
+    """Verify create_fallback_question does not fabricate citations when bundle is empty."""
+    bundle = EvidenceBundle(items=[])
+    for judge in JUDGE_PANEL:
+        q = create_fallback_question(judge, bundle)
+        assert q.evidence_ids == []
+
+
+def test_format_evidence_for_prompt() -> None:
+    """Verify format_summary_for_prompt formats evidence summary."""
     bundle = _make_test_bundle()
-    text = format_evidence_for_judge(bundle, JUDGE_PANEL[0])
+    text = bundle.format_summary_for_prompt()
     assert "ev_speech_001" in text
     assert "We charge $50/mo" in text
 

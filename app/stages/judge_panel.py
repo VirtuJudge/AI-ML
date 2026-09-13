@@ -145,11 +145,8 @@ def create_fallback_question(judge: JudgeSpec, bundle: EvidenceBundle) -> Primar
                 ev_ids.append(item.evidence_id)
                 break
 
-    if not ev_ids:
-        if bundle.items:
-            ev_ids.append(bundle.items[0].evidence_id)
-        else:
-            ev_ids.append("ev_speech_001")
+    if not ev_ids and bundle.items:
+        ev_ids.append(bundle.items[0].evidence_id)
 
     return PrimaryQuestion(
         candidate_id=ulid.new().str,
@@ -264,11 +261,6 @@ def validate_judge_question(
     return validated, limitations
 
 
-def format_evidence_for_judge(bundle: EvidenceBundle, judge: JudgeSpec | None = None) -> str:
-    """Format structured evidence context for a specific judge persona."""
-    return bundle.format_summary_for_prompt()
-
-
 def validate_panel_questions(
     questions: list[PrimaryQuestion],
     bundle: EvidenceBundle,
@@ -339,7 +331,6 @@ __all__ = [
     "JudgeSpec",
     "check_for_subjective_emotional_claims",
     "create_fallback_question",
-    "format_evidence_for_judge",
     "format_prompt_for_judge",
     "validate_judge_question",
     "validate_panel_questions",

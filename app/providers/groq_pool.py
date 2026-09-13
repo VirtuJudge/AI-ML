@@ -297,38 +297,26 @@ class GroqKeyPool:
 
         return str(content).strip()
 
-    async def transcribe_audio(
+    async def post_multipart(
         self,
-        audio_bytes: bytes,
-        filename: str,
+        endpoint: str,
         *,
-        model: str = "whisper-large-v3-turbo",
-        mime_type: str = "audio/wav",
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         preferred_key_index: int | None = None,
         timeout: float | None = None,
-        response_format: str = "verbose_json",
-        timestamp_granularities: list[str] | None = None,
-        prompt: str | None = None,
-        language: str | None = None,
-        temperature: float | None = None,
     ) -> dict[str, Any]:
-        """Execute Whisper speech-to-text audio transcription with multi-key failover.
+        """Execute an arbitrary multipart POST request with multi-key failover.
 
         Args:
-            audio_bytes: Raw bytes of the audio file to transcribe.
-            filename: Original audio file name (e.g. 'presentation.wav').
-            model: Whisper model identifier on Groq (default 'whisper-large-v3-turbo').
-            mime_type: Audio MIME type (default 'audio/wav').
+            endpoint: API endpoint path (e.g. '/audio/transcriptions') or full URL.
+            data: Form fields dictionary.
+            files: Files dictionary in httpx multipart format.
             preferred_key_index: Preferred key index to try first.
             timeout: Per-request override timeout in seconds.
-            response_format: Output format ('verbose_json' for word/segment timestamps).
-            timestamp_granularities: List of granularities, e.g. ['word', 'segment'].
-            prompt: Optional transcription prompt for domain guidance.
-            language: Optional ISO-639-1 language code hint (e.g. 'en').
-            temperature: Optional sampling temperature.
 
         Returns:
-            dict containing parsed JSON response from Groq Whisper API.
+            dict containing parsed JSON response.
 
         Raises:
             GroqPoolError: On fatal non-retryable errors (e.g. HTTP 413).
@@ -336,23 +324,6 @@ class GroqKeyPool:
         """
         async with self._lock:
             attempt_indices = self._build_attempt_order(preferred_key_index)
-
-        data: dict[str, Any] = {
-            "model": model,
-            "response_format": response_format,
-        }
-        if timestamp_granularities is not None:
-            data["timestamp_granularities[]"] = timestamp_granularities
-        if prompt is not None:
-            data["prompt"] = prompt
-        if language is not None:
-            data["language"] = language
-        if temperature is not None:
-            data["temperature"] = str(temperature)
-
-        files = {
-            "file": (filename, audio_bytes, mime_type),
-        }
 
         last_error_code: int | None = None
         last_reason: str = ""
@@ -367,11 +338,12 @@ class GroqKeyPool:
 
             try:
                 is_same_base = str(client.base_url).rstrip("/") == self._base_url
-                post_url = (
-                    "/audio/transcriptions"
-                    if is_same_base
-                    else f"{self._base_url}/audio/transcriptions"
-                )
+                if endpoint.startswith("http://") or endpoint.startswith("https://"):
+                    post_url = endpoint
+                else:
+                    norm_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+                    post_url = norm_endpoint if is_same_base else f"{self._base_url}{norm_endpoint}"
+
                 response = await client.post(
                     post_url,
                     headers=headers,
@@ -382,7 +354,7 @@ class GroqKeyPool:
             except httpx.RequestError as req_err:
                 network_error_count += 1
                 logger.warning(
-                    "Groq key index %d audio network error: %s. Rotating to fallback.",
+                    "Groq key index %d multipart network error: %s. Rotating to fallback.",
                     key_idx,
                     type(req_err).__name__,
                 )
@@ -406,14 +378,14 @@ class GroqKeyPool:
             # 413: file too large, no point in rotating
             if response.status_code == 413:
                 raise GroqPoolError(
-                    f"Groq Whisper API rejected upload: audio file exceeds 25MB request limit "
+                    f"Groq API rejected upload: payload exceeds 25MB request limit "
                     f"(status 413: {last_reason})"
                 )
 
             # 429, 503, 529: rate limits or capacity
             if response.status_code in (429, 503, 529):
                 logger.warning(
-                    "Groq key index %d exhausted during audio (HTTP %d). Rotating to fallback.",
+                    "Groq key index %d exhausted during multipart (HTTP %d). Rotating to fallback.",
                     key_idx,
                     response.status_code,
                 )
@@ -430,24 +402,68 @@ class GroqKeyPool:
 
             # Other errors: rotate
             logger.warning(
-                "Groq key index %d returned status %d during transcription. Rotating.",
+                "Groq key index %d returned status %d during multipart request. Rotating.",
                 key_idx,
                 response.status_code,
             )
 
         if network_error_count == len(attempt_indices):
             raise AllKeysExhaustedError(
-                f"Groq Whisper API request failed due to network error on all "
+                f"Groq API request failed due to network error on all "
                 f"{len(self._api_keys)} keys."
             )
 
         if last_error_code is not None:
             raise AllKeysExhaustedError(
-                f"Groq Whisper API request failed with status {last_error_code}: {last_reason}"
+                f"Groq API request failed with status {last_error_code}: {last_reason}"
             )
 
         raise AllKeysExhaustedError(
-            f"All Groq API keys ({len(self._api_keys)}) failed for audio transcription."
+            f"All Groq API keys ({len(self._api_keys)}) failed for multipart request."
+        )
+
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        filename: str,
+        *,
+        model: str = "whisper-large-v3-turbo",
+        mime_type: str = "audio/wav",
+        preferred_key_index: int | None = None,
+        timeout: float | None = None,
+        response_format: str = "verbose_json",
+        timestamp_granularities: list[str] | None = None,
+        prompt: str | None = None,
+        language: str | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        """Execute Whisper speech-to-text audio transcription with multi-key failover.
+
+        Delegates to post_multipart with formatted Whisper payload.
+        """
+        data: dict[str, Any] = {
+            "model": model,
+            "response_format": response_format,
+        }
+        if timestamp_granularities is not None:
+            data["timestamp_granularities[]"] = timestamp_granularities
+        if prompt is not None:
+            data["prompt"] = prompt
+        if language is not None:
+            data["language"] = language
+        if temperature is not None:
+            data["temperature"] = str(temperature)
+
+        files = {
+            "file": (filename, audio_bytes, mime_type),
+        }
+
+        return await self.post_multipart(
+            "/audio/transcriptions",
+            data=data,
+            files=files,
+            preferred_key_index=preferred_key_index,
+            timeout=timeout,
         )
 
     async def aclose(self) -> None:

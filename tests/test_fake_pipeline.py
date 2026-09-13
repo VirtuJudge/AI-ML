@@ -2,8 +2,12 @@
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+
+from app.storage.base import ObjectNotFoundError, ObjectStorageError
+from app.storage.local import LocalDiskObjectStorage
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -342,4 +346,77 @@ async def test_analyze_session_aggregates_limitations() -> None:
     result = await pipeline.analyze_session(payload)
     limitation_codes = [lim.code for lim in result.limitations]
     assert "no_visual_observations" in limitation_codes
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_raises_on_download_error_with_real_provider() -> None:
+    """Verify download failure is not swallowed when running with a non-fake provider."""
+    mock_storage = AsyncMock()
+    mock_storage.download_file.side_effect = ObjectNotFoundError(
+        "Object 'uploads/pres.mp4' not found"
+    )
+
+    class RealDummySpeechProvider:
+        async def transcribe(self, audio_path: Path, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+    pipeline = FakePipeline(
+        speech_provider=RealDummySpeechProvider(),
+        object_storage=mock_storage,
+    )
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTEST0000000000000000001",
+            object_key="uploads/pres.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+        ),
+        supporting_documents=[],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech"],
+    )
+
+    with pytest.raises(ObjectNotFoundError, match=r"Object 'uploads/pres\.mp4' not found"):
+        await pipeline.analyze_session(payload)
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_downloads_media_when_available_in_storage(tmp_path: Path) -> None:
+    """Verify presentation media is downloaded to temp directory and used by pipeline."""
+    import wave
+
+    storage_dir = tmp_path / "storage"
+    storage = LocalDiskObjectStorage(base_dir=storage_dir)
+
+    # Upload test presentation WAV to storage
+    pres_file = tmp_path / "presentation.wav"
+    with wave.open(str(pres_file), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * (16000 * 15))
+
+    await storage.upload_file("uploads/presentation.wav", pres_file)
+
+    pipeline = FakePipeline(object_storage=storage)
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTEST0000000000000000099",
+            object_key="uploads/presentation.wav",
+            checksum="sha256:" + "a" * 64,
+            media_type="audio/wav",
+            duration_ms=15000,
+        ),
+        supporting_documents=[],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "vision", "audio", "questions"],
+    )
+
+    res = await pipeline.analyze_session(payload)
+    assert len(res.primary_questions) == 3
+
+    # Temp media should have been downloaded
+    downloaded = Path(".storage/temp_media/01JTEST0000000000000000099/presentation.wav")
+    assert downloaded.is_file()
+    assert downloaded.stat().st_size == pres_file.stat().st_size
 

@@ -7,10 +7,11 @@ and acoustic metrics) into a structured EvidenceBundle with stable evidence IDs:
 - ev_vision_*: Correlated visual observations (gaze, posture openness, movement).
 - ev_audio_*: Correlated acoustic observations (speaking rate, pauses, pitch variation).
 
-Provides `get_rag_context()` to isolate speech + document evidence for the primary
+Provides prompt formatting utilities to present speech + document evidence to primary
 question judges, while preserving the complete multimodal registry for AI-07 (Report).
 """
 
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -101,6 +102,14 @@ class EvidenceBundle(BaseModel):
     has_audio: bool = False
     limitations: list[Limitation] = Field(default_factory=list)
 
+    def add_limitation(self, limitation: Limitation) -> None:
+        """Append a single limitation to the bundle."""
+        self.limitations.append(limitation)
+
+    def add_limitations(self, limitations: Sequence[Limitation]) -> None:
+        """Extend the bundle with multiple limitations."""
+        self.limitations.extend(limitations)
+
     def get_items_for_source(self, source: str) -> list[EvidenceItem]:
         """Return all evidence items originating from the given modality."""
         return [item for item in self.items if item.source == source]
@@ -108,13 +117,6 @@ class EvidenceBundle(BaseModel):
     def get_items_for_dimension(self, dimension: str) -> list[EvidenceItem]:
         """Return all evidence items linked to the given rubric dimension."""
         return [item for item in self.items if dimension in item.rubric_dimensions]
-
-    def get_rag_context(self) -> tuple[str, list[EvidenceItem]]:
-        """Extract spoken transcript and slide chunks specifically for question generation."""
-        rag_items = [
-            item for item in self.items if item.source in ("speech", "documents")
-        ]
-        return self.transcript_full_text, rag_items
 
     def has_evidence_id(self, evidence_id: str) -> bool:
         """Check whether an evidence ID exists in the bundle."""
@@ -178,7 +180,6 @@ def build_evidence_bundle(
       - ev_audio_001...
     - Clear flags: has_documents, has_vision, has_audio.
     - Complete multi-modal registry for downstream evaluation report (AI-07).
-    - `get_rag_context()` extracts strictly speech + doc evidence for AI-05 question judges.
     - Merged limitations from all participating stages.
     """
     items: list[EvidenceItem] = []

@@ -156,28 +156,6 @@ def test_build_evidence_bundle_all_modalities() -> None:
     assert any(lim.code == "camera_distance_warning" for lim in bundle.limitations)
 
 
-def test_get_rag_context_isolates_content_for_judges() -> None:
-    """Verify get_rag_context() extracts only speech and documents for question models."""
-    speech = _make_speech_result()
-    vision = _make_vision_result()
-    audio = _make_audio_result()
-    docs = _make_document_chunks()
-
-    bundle = build_evidence_bundle(
-        speech_result=speech,
-        vision_result=vision,
-        audio_result=audio,
-        document_chunks=docs,
-    )
-
-    transcript, rag_items = bundle.get_rag_context()
-    assert "Our platform reduces customer acquisition cost" in transcript
-    assert len(rag_items) == 4  # 2 speech + 2 docs
-    for item in rag_items:
-        assert item.source in ("speech", "documents")
-        assert item.source not in ("vision", "audio")
-
-
 def test_build_evidence_bundle_presentation_only() -> None:
     """Verify presentation-only session (no documents) produces valid speech+vision+audio."""
     speech = _make_speech_result()
@@ -264,3 +242,30 @@ def test_format_summary_for_prompt() -> None:
     assert "### Supporting Document & Slide Evidence:" in summary
     assert "ev_doc_slide_01" in summary
     assert "Slide 1" in summary
+
+
+def test_evidence_bundle_add_limitations() -> None:
+    """Verify EvidenceBundle encapsulation methods for limitations."""
+    bundle = EvidenceBundle(items=[])
+    assert bundle.limitations == []
+
+    lim1 = Limitation(
+        code="lim_1",
+        scope="question_generation",
+        message="Message 1",
+        affected_dimensions=["market_and_business_model"],
+    )
+    bundle.add_limitation(lim1)
+    assert len(bundle.limitations) == 1
+    assert bundle.limitations[0].code == "lim_1"
+
+    lim2 = Limitation(
+        code="lim_2",
+        scope="question_generation",
+        message="Message 2",
+        affected_dimensions=["technology_and_moat"],
+    )
+    bundle.add_limitations([lim2])
+    assert len(bundle.limitations) == 2
+    assert [lim.code for lim in bundle.limitations] == ["lim_1", "lim_2"]
+

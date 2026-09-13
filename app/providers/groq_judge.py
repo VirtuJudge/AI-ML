@@ -120,9 +120,10 @@ class GroqJudgeModelProvider:
         self,
         judge: JudgeSpec,
         bundle: EvidenceBundle,
-    ) -> PrimaryQuestion:
+    ) -> tuple[PrimaryQuestion, list[Limitation]]:
         """Query an individual judge persona with automatic fallback retry."""
         messages = format_prompt_for_judge(judge, bundle)
+        accumulated_limitations: list[Limitation] = []
 
         # Attempt 1: Primary model + preferred key
         try:
@@ -134,9 +135,9 @@ class GroqJudgeModelProvider:
                 temperature=0.2,
             )
             valid_q, lims = self._parse_and_validate(raw_text, judge, bundle)
-            bundle.limitations.extend(lims)
+            accumulated_limitations.extend(lims)
             if valid_q is not None:
-                return valid_q
+                return valid_q, accumulated_limitations
         except (GroqPoolError, Exception) as err:
             logger.warning(
                 "Judge %s primary call failed (%s). Retrying with fallback model %s.",
@@ -155,9 +156,9 @@ class GroqJudgeModelProvider:
                 temperature=0.2,
             )
             valid_q, lims = self._parse_and_validate(raw_text, judge, bundle)
-            bundle.limitations.extend(lims)
+            accumulated_limitations.extend(lims)
             if valid_q is not None:
-                return valid_q
+                return valid_q, accumulated_limitations
         except (GroqPoolError, Exception) as err:
             logger.warning(
                 "Judge %s fallback call failed (%s). Emitting deterministic grounded fallback.",
@@ -166,7 +167,7 @@ class GroqJudgeModelProvider:
             )
 
         # Deterministic grounded fallback to maintain 100% pipeline availability
-        bundle.limitations.append(
+        accumulated_limitations.append(
             Limitation(
                 code="judge_model_fallback_used",
                 scope="question_generation",
@@ -177,7 +178,7 @@ class GroqJudgeModelProvider:
                 affected_dimensions=judge.rubric_dimensions,
             )
         )
-        return create_fallback_question(judge, bundle)
+        return create_fallback_question(judge, bundle), accumulated_limitations
 
     async def generate_questions(
         self,
@@ -208,12 +209,21 @@ class GroqJudgeModelProvider:
             )
 
         # Run all judges in parallel with dedicated preferred keys
-        judge_tasks = [self._ask_judge(judge, bundle) for judge in self.panel]
-        raw_questions = await asyncio.gather(*judge_tasks)
+        judge_results = await asyncio.gather(
+            *(self._ask_judge(judge, bundle) for judge in self.panel)
+        )
+        raw_questions = [q for q, _ in judge_results]
+        judge_limitations = [lim for _, lims in judge_results for lim in lims]
 
         # Validate and deduplicate panel questions, ensuring exactly 3
-        validated_questions, panel_lims = validate_panel_questions(list(raw_questions), bundle)
-        bundle.limitations.extend(panel_lims)
+        validated_questions, panel_lims = validate_panel_questions(raw_questions, bundle)
+        all_lims = judge_limitations + panel_lims
+
+        if hasattr(bundle, "add_limitations"):
+            bundle.add_limitations(all_lims)
+        elif hasattr(bundle, "limitations"):
+            bundle.limitations.extend(all_lims)
+
         return validated_questions
 
 

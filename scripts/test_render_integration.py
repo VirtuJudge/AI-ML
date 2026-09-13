@@ -179,14 +179,11 @@ async def run_smoke_test() -> None:
     print(f"  [OK] Update status: {update.status}")
     assert update.status == UpdateStatus.COMPLETED
 
-    payload_data = update.payload
-    if isinstance(payload_data, dict):
-        from app.contracts import SessionAnalysisCompleted
-
-        completed = SessionAnalysisCompleted.model_validate(payload_data)
-        questions = completed.primary_questions
-    else:
-        questions = payload_data.primary_questions
+    # Primary questions delivered through backend client update
+    assert backend_client.updates, "No updates received by backend client"
+    latest_update = backend_client.updates[-1]
+    completed = latest_update.payload
+    questions = completed.primary_questions
 
     print(f"  [OK] Primary questions count: {len(questions)}")
     assert len(questions) == 3

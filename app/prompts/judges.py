@@ -17,7 +17,7 @@ BANNED_SUBJECTIVE_TERMS: list[str] = [
     r"\bunconfident\b",
     r"\bdishonest(y)?\b",
     r"\bdecepti(ve|on)\b",
-    r"\bly(ing|ar)\b",
+    r"\b(lying|liar)\b",
     r"\bscared\b",
     r"\bfear(ful)?\b",
     r"\bhesita(nt|tion)\b",
@@ -51,7 +51,7 @@ unverified business assumption, unit economics vulnerability, or market risk.
 {COMMON_GUARDRAILS}
 Output JSON format:
 {{
-  "text": "The single primary question to ask the presenter",
+  "text": "The single primary question to ask the team",
   "reason": "Clear justification explaining why this question is critical based on cited evidence",
   "rubric_dimension": "market_and_business_model",
   "evidence_ids": ["ev_speech_001"]
@@ -68,7 +68,7 @@ technical defensibility, implementation bottlenecks, or architecture trade-offs.
 {COMMON_GUARDRAILS}
 Output JSON format:
 {{
-  "text": "The single primary question to ask the presenter",
+  "text": "The single primary question to ask the team",
   "reason": "Clear justification explaining why this question is critical based on cited evidence",
   "rubric_dimension": "technology_and_moat",
   "evidence_ids": ["ev_speech_002"]
@@ -84,7 +84,7 @@ milestone feasibility, validation data, or execution risks.
 {COMMON_GUARDRAILS}
 Output JSON format:
 {{
-  "text": "The single primary question to ask the presenter",
+  "text": "The single primary question to ask the team",
   "reason": "Clear justification explaining why this question is critical based on cited evidence",
   "rubric_dimension": "execution_and_milestones",
   "evidence_ids": ["ev_speech_001"]

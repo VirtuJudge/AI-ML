@@ -19,16 +19,14 @@ from botocore.config import Config
 from pydantic import BaseModel
 
 from app.contracts import ArtifactRef
+from app.storage.base import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    S3StorageConfig,
+    compute_file_sha256,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class ObjectStorageError(Exception):
-    """Base exception for object storage errors."""
-
-
-class ObjectNotFoundError(ObjectStorageError):
-    """Raised when an object key is not found in storage."""
 
 
 class S3ObjectStorage:
@@ -36,18 +34,36 @@ class S3ObjectStorage:
 
     def __init__(
         self,
-        endpoint_url: str,
-        bucket: str,
-        access_key: str,
-        secret_key: str,
+        config: S3StorageConfig | None = None,
+        *,
+        endpoint_url: str | None = None,
+        bucket: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
         region_name: str = "auto",
         client: BaseClient | None = None,
     ) -> None:
-        self.endpoint_url = endpoint_url
-        self.bucket = bucket
-        self.access_key = access_key
-        self.secret_key = secret_key
-        self.region_name = region_name
+        if config is not None:
+            self.config = config
+        elif endpoint_url and bucket and access_key and secret_key:
+            self.config = S3StorageConfig(
+                endpoint_url=endpoint_url,
+                bucket=bucket,
+                access_key=access_key,
+                secret_key=secret_key,
+                region_name=region_name,
+            )
+        else:
+            raise ValueError(
+                "Either a valid S3StorageConfig or all credentials "
+                "(endpoint_url, bucket, access_key, secret_key) must be provided."
+            )
+
+        self.endpoint_url = self.config.endpoint_url
+        self.bucket = self.config.bucket
+        self.access_key = self.config.access_key
+        self.secret_key = self.config.secret_key
+        self.region_name = self.config.region_name
         self._custom_client = client
         self._client: BaseClient | None = client
 
@@ -103,23 +119,23 @@ class S3ObjectStorage:
         if not source_path.is_file():
             raise FileNotFoundError(f"Source file '{source_path}' does not exist.")
 
-        data = source_path.read_bytes()
-        checksum = "sha256:" + hashlib.sha256(data).hexdigest()
         art_id = artifact_id or ulid.new().str
 
-        def _upload_sync() -> None:
+        def _upload_sync() -> str:
+            checksum = compute_file_sha256(source_path)
             client = self._get_client()
             try:
-                client.put_object(
-                    Bucket=self.bucket,
-                    Key=object_key,
-                    Body=data,
-                    ContentType=content_type,
+                client.upload_file(
+                    str(source_path),
+                    self.bucket,
+                    object_key,
+                    ExtraArgs={"ContentType": content_type},
                 )
             except Exception as exc:
                 raise ObjectStorageError(f"Failed to upload '{object_key}': {exc}") from exc
+            return checksum
 
-        await asyncio.to_thread(_upload_sync)
+        checksum = await asyncio.to_thread(_upload_sync)
 
         return ArtifactRef(
             artifact_id=art_id,
@@ -202,4 +218,9 @@ class S3ObjectStorage:
         await asyncio.to_thread(_delete_sync)
 
 
-__all__ = ["ObjectNotFoundError", "ObjectStorageError", "S3ObjectStorage"]
+__all__ = [
+    "ObjectNotFoundError",
+    "ObjectStorageError",
+    "S3ObjectStorage",
+    "S3StorageConfig",
+]

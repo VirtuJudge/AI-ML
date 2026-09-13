@@ -1,14 +1,19 @@
 """Object storage package initialization and factory function."""
 
-import os
 from pathlib import Path
 
-from app.storage.base import ObjectStorageProtocol
+from app.storage.base import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    ObjectStorageProtocol,
+    S3StorageConfig,
+)
 from app.storage.local import LocalDiskObjectStorage
-from app.storage.s3 import ObjectNotFoundError, ObjectStorageError, S3ObjectStorage
+from app.storage.s3 import S3ObjectStorage
 
 
 def create_object_storage(
+    config: S3StorageConfig | None = None,
     *,
     endpoint_url: str | None = None,
     bucket: str | None = None,
@@ -17,39 +22,27 @@ def create_object_storage(
     region_name: str | None = None,
     base_dir: Path | str | None = None,
 ) -> ObjectStorageProtocol:
-    """Instantiate S3ObjectStorage if credentials are provided, otherwise LocalDiskObjectStorage.
+    """Instantiate S3ObjectStorage if configured, otherwise LocalDiskObjectStorage.
 
-    Checks environment variables:
-    - OBJECT_STORAGE_ENDPOINT
-    - OBJECT_STORAGE_BUCKET
-    - OBJECT_STORAGE_ACCESS_KEY
-    - OBJECT_STORAGE_SECRET_KEY
-    - OBJECT_STORAGE_REGION
+    Accepts an explicit S3StorageConfig bundle, or explicit credentials,
+    or resolves configuration via S3StorageConfig.from_env().
     """
-    endpoint = endpoint_url or os.getenv("OBJECT_STORAGE_ENDPOINT", "").strip()
-    bkt = bucket or os.getenv("OBJECT_STORAGE_BUCKET", "").strip()
-    ak = access_key or os.getenv("OBJECT_STORAGE_ACCESS_KEY", "").strip()
-    sk = secret_key or os.getenv("OBJECT_STORAGE_SECRET_KEY", "").strip()
-    region = region_name or os.getenv("OBJECT_STORAGE_REGION", "auto").strip()
+    if config is not None:
+        return S3ObjectStorage(config=config)
 
-    is_configured = bool(
-        endpoint
-        and bkt
-        and ak
-        and sk
-        and ak != "change-me"
-        and sk != "change-me"
-        and not endpoint.startswith("http://localhost")
-    )
-
-    if is_configured:
-        return S3ObjectStorage(
-            endpoint_url=endpoint,
-            bucket=bkt,
-            access_key=ak,
-            secret_key=sk,
-            region_name=region,
+    if endpoint_url and bucket and access_key and secret_key:
+        s3_config = S3StorageConfig(
+            endpoint_url=endpoint_url,
+            bucket=bucket,
+            access_key=access_key,
+            secret_key=secret_key,
+            region_name=region_name or "auto",
         )
+        return S3ObjectStorage(config=s3_config)
+
+    env_config = S3StorageConfig.from_env()
+    if env_config is not None:
+        return S3ObjectStorage(config=env_config)
 
     return LocalDiskObjectStorage(base_dir=base_dir)
 
@@ -60,6 +53,7 @@ __all__ = [
     "ObjectStorageError",
     "ObjectStorageProtocol",
     "S3ObjectStorage",
+    "S3StorageConfig",
     "create_object_storage",
 ]
 

@@ -106,10 +106,16 @@ async def test_process_one_message_stores_result_and_updates_backend() -> None:
     assert mock_backend.updates[0].status == UpdateStatus.STARTED
     assert mock_backend.updates[1].status == UpdateStatus.COMPLETED
 
-    # Verify result key was written to Redis
+    # Verify result key was written to Redis with confidential questions redacted
     mock_redis.set.assert_called()
     called_keys = [call.args[0] for call in mock_redis.set.call_args_list]
     assert "test:result:job_abc123" in called_keys
+    stored_val = next(
+        call.args[1]
+        for call in mock_redis.set.call_args_list
+        if call.args[0] == "test:result:job_abc123"
+    )
+    assert "What are your gross margins?" not in stored_val
 
 
 @pytest.mark.asyncio

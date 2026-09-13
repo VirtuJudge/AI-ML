@@ -169,15 +169,21 @@ class GroqSpeechProvider:
         filename = audio_path.name
         mime_type = mimetypes.guess_type(filename)[0] or "audio/wav"
 
+        data: dict[str, Any] = {
+            "model": self.model,
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": ["word", "segment"],
+        }
+        files = {
+            "file": (filename, audio_bytes, mime_type),
+        }
+
         try:
-            resp_data = await self.key_pool.transcribe_audio(
-                audio_bytes=audio_bytes,
-                filename=filename,
-                model=self.model,
-                mime_type=mime_type,
+            resp_data = await self.key_pool.post_multipart(
+                "/audio/transcriptions",
+                data=data,
+                files=files,
                 timeout=self.timeout,
-                response_format="verbose_json",
-                timestamp_granularities=["word", "segment"],
             )
         except GroqPoolError as err:
             raise GroqSpeechProviderError(str(err)) from err

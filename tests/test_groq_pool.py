@@ -231,3 +231,33 @@ async def test_groq_pool_context_manager() -> None:
     """Verify async context manager protocol works."""
     async with GroqKeyPool(api_keys=["dummy_key"]) as pool:
         assert pool.key_count == 1
+
+
+@pytest.mark.asyncio
+async def test_groq_pool_post_multipart_failover() -> None:
+    """Verify post_multipart rotates keys on HTTP 429 and succeeds on backup key."""
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.base_url = httpx.URL("https://api.groq.com/openai/v1")
+
+    resp_429 = httpx.Response(
+        status_code=429,
+        text="Rate limit",
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+    resp_200 = httpx.Response(
+        status_code=200,
+        json={"text": "transcribed speech"},
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+    client.post.side_effect = [resp_429, resp_200]
+
+    pool = GroqKeyPool(api_keys=["key_primary", "key_backup"], http_client=client)
+    res = await pool.post_multipart(
+        "/audio/transcriptions",
+        data={"model": "whisper-large-v3-turbo"},
+        files={"file": ("test.wav", b"audio_bytes", "audio/wav")},
+    )
+
+    assert res == {"text": "transcribed speech"}
+    assert client.post.call_count == 2
+

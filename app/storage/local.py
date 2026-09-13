@@ -10,7 +10,7 @@ import ulid
 from pydantic import BaseModel
 
 from app.contracts import ArtifactRef
-from app.storage.s3 import ObjectNotFoundError
+from app.storage.base import ObjectNotFoundError, compute_file_sha256
 
 
 class LocalDiskObjectStorage:
@@ -22,7 +22,10 @@ class LocalDiskObjectStorage:
 
     def _resolve_path(self, object_key: str) -> Path:
         clean_key = object_key.lstrip("/\\")
-        return self.base_dir / clean_key
+        dest = (self.base_dir / clean_key).resolve()
+        if not dest.is_relative_to(self.base_dir.resolve()):
+            raise ValueError(f"Path traversal detected in object key: '{object_key}'.")
+        return dest
 
     async def download_file(self, object_key: str, destination: Path) -> Path:
         source = self._resolve_path(object_key)
@@ -47,8 +50,7 @@ class LocalDiskObjectStorage:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_path, dest)
 
-        data = dest.read_bytes()
-        checksum = "sha256:" + hashlib.sha256(data).hexdigest()
+        checksum = compute_file_sha256(dest)
         art_id = artifact_id or ulid.new().str
 
         return ArtifactRef(
