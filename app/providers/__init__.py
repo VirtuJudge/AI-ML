@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from app.providers.base import (
+    AnswerAssessment,
     AudioMetricsProvider,
     DiarizationProvider,
     DocumentProvider,
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AllKeysExhaustedError",
+    "AnswerAssessment",
     "AudioMetricsProvider",
     "AudioObservation",
     "DiarizationProvider",

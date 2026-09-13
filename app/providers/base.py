@@ -6,7 +6,9 @@ Defines structural interfaces (typing.Protocol) for swappable AI/ML adapters.
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.contracts import PrimaryQuestion
+from pydantic import BaseModel, Field
+
+from app.contracts import FollowUpQuestion, PrimaryQuestion
 from app.providers.types import (
     AudioObservation,
     DiarizationResult,
@@ -14,6 +16,14 @@ from app.providers.types import (
     TranscriptionResult,
     VisualObservation,
 )
+
+
+class AnswerAssessment(BaseModel):
+    """Structured assessment of a candidate answer against a question and rubric."""
+
+    assessment_text: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    follow_up: FollowUpQuestion | None = None
 
 
 class SpeechProvider(Protocol):
@@ -59,6 +69,15 @@ class JudgeModelProvider(Protocol):
         evidence_bundle: Any = None,
     ) -> list[PrimaryQuestion]: ...
 
+    async def assess_answer(
+        self,
+        answer_transcript: str,
+        question_text: str,
+        rubric_dimension: str,
+        *,
+        remaining_follow_ups: int = 0,
+    ) -> AnswerAssessment: ...
+
 
 class EmbeddingProvider(Protocol):
     """Protocol for text embedding generation providers."""
@@ -67,6 +86,7 @@ class EmbeddingProvider(Protocol):
 
 
 __all__ = [
+    "AnswerAssessment",
     "AudioMetricsProvider",
     "DiarizationProvider",
     "DocumentProvider",

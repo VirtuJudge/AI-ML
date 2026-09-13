@@ -1,5 +1,13 @@
 """Stages package for VirtuJudge AI-ML pipeline."""
 
+from app.stages.answer_assessment import (
+    AnswerAssessmentResult,
+    run_answer_assessment_stage,
+)
+from app.stages.answers import (
+    AnswerSpeechResult,
+    run_answer_speech_stage,
+)
 from app.stages.audio import (
     AudioStageResult,
     run_audio_stage,
@@ -47,6 +55,8 @@ from app.stages.vision import (
 __all__ = [
     "SUPPORTED_DOCUMENT_EXTENSIONS",
     "SUPPORTED_MEDIA_EXTENSIONS",
+    "AnswerAssessmentResult",
+    "AnswerSpeechResult",
     "AudioStageResult",
     "DocumentStageResult",
     "EvidenceBundle",
@@ -64,6 +74,8 @@ __all__ = [
     "create_normalization_limitation",
     "get_wav_metadata",
     "normalize_media",
+    "run_answer_assessment_stage",
+    "run_answer_speech_stage",
     "run_audio_stage",
     "run_document_stage",
     "run_question_stage",

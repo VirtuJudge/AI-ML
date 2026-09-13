@@ -1,13 +1,11 @@
 """Unit tests for FakePipeline implementation."""
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-
-from app.storage.base import ObjectNotFoundError, ObjectStorageError
-from app.storage.local import LocalDiskObjectStorage
 
 from app.contracts import (
     AnalyzeAnswerPayload,
@@ -17,17 +15,20 @@ from app.contracts import (
     AudioAssetInput,
     EraseAIDataPayload,
     GenerateReportPayload,
-    Limitation,
     RubricRef,
     SpeakerMapping,
 )
 from app.pipeline import FakePipeline, combine_timed_evidence
+from app.providers.fake_speech import FakeSpeechProvider
 from app.providers.types import (
     AudioObservation,
     DiarizationResult,
     SpeakerSegment,
+    TranscriptionResult,
     VisualObservation,
 )
+from app.storage.base import ObjectNotFoundError
+from app.storage.local import LocalDiskObjectStorage
 
 
 @pytest.mark.asyncio
@@ -107,7 +108,7 @@ async def test_analyze_session_result_is_stable(fake_pipeline: FakePipeline) -> 
 
 @pytest.mark.asyncio
 async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
-    """Test that analyze_answer returns transcript and assessment artifact IDs."""
+    """Test that analyze_answer returns real artifact IDs and follow-up when remaining > 0."""
     payload = AnalyzeAnswerPayload(
         qa_round_id="01JTEST0000000000000000010",
         question_id="01JTEST0000000000000000011",
@@ -125,9 +126,15 @@ async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
 
     result = await fake_pipeline.analyze_answer(payload)
     assert result.answer_id == payload.answer_id
-    assert result.transcript_artifact_id is not None
-    assert result.assessment_artifact_id is not None
+    assert result.transcript_artifact_id != "01JEXAMPLE000000000000002A"
+    assert len(result.transcript_artifact_id) > 0
+    assert result.assessment_artifact_id != "01JEXAMPLE000000000000002B"
+    assert len(result.assessment_artifact_id) > 0
     assert result.follow_up is not None
+    assert isinstance(result.follow_up.rubric_dimension, str)
+    assert len(result.follow_up.rubric_dimension) > 0
+    assert isinstance(result.follow_up.evidence_ids, list)
+    assert len(result.follow_up.evidence_ids) > 0
 
 
 @pytest.mark.asyncio
@@ -151,7 +158,154 @@ async def test_analyze_answer_no_followup_when_zero_remaining(
     )
 
     result = await fake_pipeline.analyze_answer(payload)
+    assert result.transcript_artifact_id != "01JEXAMPLE000000000000002A"
+    assert len(result.transcript_artifact_id) > 0
+    assert result.assessment_artifact_id != "01JEXAMPLE000000000000002B"
+    assert len(result.assessment_artifact_id) > 0
     assert result.follow_up is None
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_skipped_produces_no_invented_evidence() -> None:
+    """Verify empty transcript produces valid artifact IDs and no invented evidence."""
+
+    class EmptySpeechProvider(FakeSpeechProvider):
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            return TranscriptionResult(full_text="", segments=[])
+
+    pipeline = FakePipeline(speech_provider=EmptySpeechProvider())
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000099",
+        answered_by="01JTEST0000000000000000013",
+        audio=AudioAssetInput(
+            artifact_id="01JTEST0000000000000000014",
+            object_key="audio/answer.wav",
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        remaining_follow_ups=2,
+    )
+
+    result = await pipeline.analyze_answer(payload)
+    assert result.transcript_artifact_id != "01JEXAMPLE000000000000002A"
+    assert len(result.transcript_artifact_id) > 0
+    assert result.assessment_artifact_id != "01JEXAMPLE000000000000002B"
+    assert len(result.assessment_artifact_id) > 0
+    assert result.follow_up is None
+
+    # Verify assessment artifact uploaded to object storage has no invented evidence
+    assessment_data = await pipeline.object_storage.read_json(
+        f"ai/answer/{payload.answer_id}/assessment.json"
+    )
+    assert assessment_data["assessment"]["evidence_ids"] == []
+    assert assessment_data["assessment"]["text"] == ""
+    assert assessment_data["follow_up"] is None
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_idempotent(fake_pipeline: FakePipeline) -> None:
+    """Call analyze_answer twice with the same payload and verify results are identical."""
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000012",
+        answered_by="01JTEST0000000000000000013",
+        audio=AudioAssetInput(
+            artifact_id="01JTEST0000000000000000014",
+            object_key="audio/answer.wav",
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        remaining_follow_ups=1,
+    )
+
+    result1 = await fake_pipeline.analyze_answer(payload)
+    result2 = await fake_pipeline.analyze_answer(payload)
+
+    assert result1 == result2
+    assert result1.answer_id == result2.answer_id
+    assert result1.transcript_artifact_id == result2.transcript_artifact_id
+    assert result1.assessment_artifact_id == result2.assessment_artifact_id
+    assert result1.follow_up == result2.follow_up
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_follow_up_has_required_fields(
+    fake_pipeline: FakePipeline,
+) -> None:
+    """Verify follow_up has text, reason, dimension, and evidence_ids with quota > 0."""
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000012",
+        answered_by="01JTEST0000000000000000013",
+        audio=AudioAssetInput(
+            artifact_id="01JTEST0000000000000000014",
+            object_key="audio/answer.wav",
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        remaining_follow_ups=2,
+    )
+
+    result = await fake_pipeline.analyze_answer(payload)
+    assert result.follow_up is not None
+    assert isinstance(result.follow_up.text, str) and len(result.follow_up.text.strip()) > 0
+    assert isinstance(result.follow_up.reason, str) and len(result.follow_up.reason.strip()) > 0
+    assert (
+        isinstance(result.follow_up.rubric_dimension, str)
+        and len(result.follow_up.rubric_dimension.strip()) > 0
+    )
+    assert (
+        isinstance(result.follow_up.evidence_ids, list)
+        and len(result.follow_up.evidence_ids) > 0
+    )
+    assert all(
+        isinstance(eid, str) and len(eid.strip()) > 0
+        for eid in result.follow_up.evidence_ids
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_privacy_no_transcript_or_audio_in_logs(
+    fake_pipeline: FakePipeline, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verify private answer audio and transcript text do not appear in normal logs."""
+    sensitive_transcript = "CONFIDENTIAL_PATENT_SECRET_REVENUE_METRIC_99"
+
+    class SensitiveSpeechProvider(FakeSpeechProvider):
+        async def transcribe(self, audio_path: Path, **kwargs: Any) -> TranscriptionResult:
+            return TranscriptionResult(
+                segments=[],
+                full_text=sensitive_transcript,
+            )
+
+    pipeline = FakePipeline(speech_provider=SensitiveSpeechProvider())
+    caplog.set_level(logging.INFO)
+
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000012",
+        answered_by="01JTEST0000000000000000013",
+        audio=AudioAssetInput(
+            artifact_id="01JTEST0000000000000000014",
+            object_key="audio/answer_private.wav",
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        remaining_follow_ups=1,
+    )
+
+    result = await pipeline.analyze_answer(payload)
+    assert result.answer_id == payload.answer_id
+    assert sensitive_transcript not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -208,7 +362,7 @@ async def test_erase_data_completes(fake_pipeline: FakePipeline) -> None:
 
 
 def test_combine_timed_evidence_audio_attribution() -> None:
-    """Verify audio observations without speaker labels are attributed to the active speaker turn."""
+    """Verify audio observations without labels are attributed to active speaker turn."""
     diarization = DiarizationResult(
         segments=[
             SpeakerSegment(start_ms=0, end_ms=5000, speaker_label="SPEAKER_00"),
@@ -217,8 +371,12 @@ def test_combine_timed_evidence_audio_attribution() -> None:
         speaker_labels=["SPEAKER_00", "SPEAKER_01"],
     )
     audio_obs = [
-        AudioObservation(start_ms=0, end_ms=4000, metric="speaking_rate_wpm", value=140.0, unit="wpm"),
-        AudioObservation(start_ms=6000, end_ms=9000, metric="speaking_rate_wpm", value=130.0, unit="wpm"),
+        AudioObservation(
+            start_ms=0, end_ms=4000, metric="speaking_rate_wpm", value=140.0, unit="wpm"
+        ),
+        AudioObservation(
+            start_ms=6000, end_ms=9000, metric="speaking_rate_wpm", value=130.0, unit="wpm"
+        ),
     ]
     _, updated_audio, _, _ = combine_timed_evidence(diarization, [], audio_obs)
     assert len(updated_audio) == 2
@@ -239,21 +397,46 @@ def test_combine_timed_evidence_deduplicates_fragmented_tracks() -> None:
     visual_obs = [
         # PERSON_00 speaks during 0-10s
         VisualObservation(
-            start_ms=1000, end_ms=2000, metric="mouth_aspect_ratio", value=0.25, unit="ratio", speaker_label="PERSON_00"
+            start_ms=1000,
+            end_ms=2000,
+            metric="mouth_aspect_ratio",
+            value=0.25,
+            unit="ratio",
+            speaker_label="PERSON_00",
         ),
         VisualObservation(
-            start_ms=1000, end_ms=2000, metric="gaze_direction", value=1.0, unit="index", speaker_label="PERSON_00"
+            start_ms=1000,
+            end_ms=2000,
+            metric="gaze_direction",
+            value=1.0,
+            unit="index",
+            speaker_label="PERSON_00",
         ),
         # PERSON_01 speaks during 10-20s
         VisualObservation(
-            start_ms=11000, end_ms=12000, metric="mouth_aspect_ratio", value=0.30, unit="ratio", speaker_label="PERSON_01"
+            start_ms=11000,
+            end_ms=12000,
+            metric="mouth_aspect_ratio",
+            value=0.30,
+            unit="ratio",
+            speaker_label="PERSON_01",
         ),
         # Presenter A returns in new track PERSON_02 during SPEAKER_00's turn (20-30s)
         VisualObservation(
-            start_ms=21000, end_ms=22000, metric="mouth_aspect_ratio", value=0.28, unit="ratio", speaker_label="PERSON_02"
+            start_ms=21000,
+            end_ms=22000,
+            metric="mouth_aspect_ratio",
+            value=0.28,
+            unit="ratio",
+            speaker_label="PERSON_02",
         ),
         VisualObservation(
-            start_ms=21000, end_ms=22000, metric="gaze_direction", value=1.0, unit="index", speaker_label="PERSON_02"
+            start_ms=21000,
+            end_ms=22000,
+            metric="gaze_direction",
+            value=1.0,
+            unit="index",
+            speaker_label="PERSON_02",
         ),
     ]
 
@@ -284,17 +467,37 @@ def test_combine_timed_evidence_co_presenters_mar_disambiguation() -> None:
     visual_obs = [
         # During 0-5s: PERSON_00 has high MAR (speaking), PERSON_01 has low MAR (listening)
         VisualObservation(
-            start_ms=1000, end_ms=2000, metric="mouth_aspect_ratio", value=0.26, unit="ratio", speaker_label="PERSON_00"
+            start_ms=1000,
+            end_ms=2000,
+            metric="mouth_aspect_ratio",
+            value=0.26,
+            unit="ratio",
+            speaker_label="PERSON_00",
         ),
         VisualObservation(
-            start_ms=1000, end_ms=2000, metric="mouth_aspect_ratio", value=0.04, unit="ratio", speaker_label="PERSON_01"
+            start_ms=1000,
+            end_ms=2000,
+            metric="mouth_aspect_ratio",
+            value=0.04,
+            unit="ratio",
+            speaker_label="PERSON_01",
         ),
         # During 5-10s: PERSON_01 has high MAR (speaking), PERSON_00 has low MAR (listening)
         VisualObservation(
-            start_ms=6000, end_ms=7000, metric="mouth_aspect_ratio", value=0.05, unit="ratio", speaker_label="PERSON_00"
+            start_ms=6000,
+            end_ms=7000,
+            metric="mouth_aspect_ratio",
+            value=0.05,
+            unit="ratio",
+            speaker_label="PERSON_00",
         ),
         VisualObservation(
-            start_ms=6000, end_ms=7000, metric="mouth_aspect_ratio", value=0.29, unit="ratio", speaker_label="PERSON_01"
+            start_ms=6000,
+            end_ms=7000,
+            metric="mouth_aspect_ratio",
+            value=0.29,
+            unit="ratio",
+            speaker_label="PERSON_01",
         ),
     ]
 
@@ -315,12 +518,17 @@ def test_combine_timed_evidence_ambiguous_track_limitation() -> None:
     # PERSON_SILENT appears during 15-20s when no speech occurs
     visual_obs = [
         VisualObservation(
-            start_ms=15000, end_ms=16000, metric="gaze_direction", value=1.0, unit="index", speaker_label="PERSON_SILENT"
+            start_ms=15000,
+            end_ms=16000,
+            metric="gaze_direction",
+            value=1.0,
+            unit="index",
+            speaker_label="PERSON_SILENT",
         ),
     ]
     _, _, mapping, lims = combine_timed_evidence(diarization, visual_obs, [])
     assert "PERSON_SILENT" not in mapping
-    assert any(l.code == "ambiguous_visual_speaker_mapping" for l in lims)
+    assert any(lim.code == "ambiguous_visual_speaker_mapping" for lim in lims)
 
 
 @pytest.mark.asyncio

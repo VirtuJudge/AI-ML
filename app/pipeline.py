@@ -15,7 +15,6 @@ from app.contracts import (
     ArtifactRef,
     EraseAIDataPayload,
     ErasureCompleted,
-    FollowUpQuestion,
     GenerateReportPayload,
     Limitation,
     ReportCompleted,
@@ -40,6 +39,8 @@ from app.providers.types import (
     DiarizationResult,
     VisualObservation,
 )
+from app.stages.answer_assessment import run_answer_assessment_stage
+from app.stages.answers import run_answer_speech_stage
 from app.stages.audio import run_audio_stage
 from app.stages.documents import run_document_stage
 from app.stages.media import split_media
@@ -421,20 +422,153 @@ class FakePipeline:
         )
 
     async def analyze_answer(self, job: AnalyzeAnswerPayload) -> AnswerAnalysisCompleted:
-        follow_up: FollowUpQuestion | None = None
-        if job.remaining_follow_ups > 0:
-            follow_up = FollowUpQuestion(
-                text="Could you break down the pilot retention metrics across "
-                "your key enterprise segments?",
-                reason="Clarifies customer retention resilience mentioned in the previous answer.",
-                rubric_dimension="customer_retention",
-                evidence_ids=["evidence_answer_01"],
+        audio_asset = getattr(job, "audio", None)
+        if audio_asset is None:
+            speech_res = await run_answer_speech_stage(
+                None,
+                self.speech_provider,
+                media_duration_ms=0,
+                skip_normalization=True,
             )
+        else:
+            input_file = Path(audio_asset.object_key)
+            skip_file_check = not input_file.is_file()
+
+            # If object key is remote and not on local disk, download via object storage
+            if skip_file_check:
+                temp_dir = Path(".storage/temp_media") / audio_asset.artifact_id
+                temp_dest = temp_dir / Path(audio_asset.object_key).name
+                try:
+                    await self.object_storage.download_file(audio_asset.object_key, temp_dest)
+                    if temp_dest.is_file():
+                        input_file = temp_dest
+                        skip_file_check = False
+                    else:
+                        raise ObjectStorageError(
+                            "Download succeeded but file not found at destination "
+                            f"'{temp_dest}'."
+                        )
+                except ObjectNotFoundError as err:
+                    if not self._is_synthetic_speech_run():
+                        logger.error(
+                            "Answer audio '%s' not found in object storage: %s",
+                            audio_asset.object_key,
+                            err,
+                            exc_info=True,
+                        )
+                        raise
+                    logger.warning(
+                        "Answer audio '%s' not found in storage; using synthetic inputs.",
+                        audio_asset.object_key,
+                    )
+                except Exception as exc:
+                    if not self._is_synthetic_speech_run():
+                        logger.error(
+                            "Failed to download answer audio '%s' from object storage: %s",
+                            audio_asset.object_key,
+                            exc,
+                            exc_info=True,
+                        )
+                        msg = f"Failed to download media '{audio_asset.object_key}': {exc}"
+                        raise ObjectStorageError(msg) from exc
+                    logger.warning(
+                        "Error downloading answer audio '%s' from storage in synthetic mode: %s",
+                        audio_asset.object_key,
+                        exc,
+                    )
+
+            if not skip_file_check and not input_file.is_file():
+                raise FileNotFoundError(
+                    f"Answer audio file '{input_file}' does not exist."
+                )
+
+            duration_ms = audio_asset.duration_ms or 15000
+
+            speech_res = await run_answer_speech_stage(
+                input_file,
+                self.speech_provider,
+                media_duration_ms=duration_ms,
+                skip_normalization=skip_file_check,
+            )
+
+        artifact_key = f"ai/answer/{job.answer_id}/transcript.json"
+        created_at = "2026-09-02T12:00:00Z"
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        ts_bytes = int(dt.timestamp() * 1000).to_bytes(6, byteorder="big")
+
+        transcript_rand_bytes = (
+            hashlib.sha256(f"{job.answer_id}:transcript".encode()).digest()[:10]
+        )
+        transcript_artifact_id = str(ulid.from_bytes(ts_bytes + transcript_rand_bytes))
+
+        assessment_rand_bytes = (
+            hashlib.sha256(f"{job.answer_id}:assessment".encode()).digest()[:10]
+        )
+        assessment_artifact_id = str(ulid.from_bytes(ts_bytes + assessment_rand_bytes))
+
+        artifact_payload = {
+            "artifact_id": transcript_artifact_id,
+            "answer_id": job.answer_id,
+            "schema_version": 1,
+            "created_at": created_at,
+            "transcript": {
+                "text": speech_res.transcript.full_text,
+                "segments": [s.model_dump() for s in speech_res.transcript.segments],
+            },
+            "limitations": [lim.model_dump() for lim in speech_res.limitations],
+        }
+
+        transcript_ref = await self.object_storage.upload_json(
+            artifact_key,
+            artifact_payload,
+            artifact_id=transcript_artifact_id,
+        )
+
+        question_text = (
+            f"What specific unit economics assumptions drive your projected customer acquisition "
+            f"cost at scale for question {job.question_id}?"
+        )
+        rubric_dimension = "market_and_business_model"
+
+        assessment_res = await run_answer_assessment_stage(
+            answer_transcript=speech_res.transcript.full_text,
+            question_text=question_text,
+            rubric_dimension=rubric_dimension,
+            judge_provider=self.judge_provider,
+            remaining_follow_ups=job.remaining_follow_ups,
+        )
+
+        assessment_artifact_key = f"ai/answer/{job.answer_id}/assessment.json"
+        assessment_payload = {
+            "artifact_id": assessment_artifact_id,
+            "answer_id": job.answer_id,
+            "question_id": job.question_id,
+            "schema_version": 1,
+            "created_at": created_at,
+            "assessment": {
+                "text": assessment_res.assessment.assessment_text,
+                "evidence_ids": assessment_res.assessment.evidence_ids,
+            },
+            "follow_up": (
+                assessment_res.assessment.follow_up.model_dump()
+                if assessment_res.assessment.follow_up
+                else None
+            ),
+            "limitations": [lim.model_dump() for lim in assessment_res.limitations],
+        }
+
+        assessment_ref = await self.object_storage.upload_json(
+            assessment_artifact_key,
+            assessment_payload,
+            artifact_id=assessment_artifact_id,
+        )
+
+        follow_up = assessment_res.assessment.follow_up
 
         return AnswerAnalysisCompleted(
             answer_id=job.answer_id,
-            transcript_artifact_id=FAKE_TRANSCRIPT_ARTIFACT_ID,
-            assessment_artifact_id=FAKE_ASSESSMENT_ARTIFACT_ID,
+            transcript_artifact_id=transcript_ref.artifact_id,
+            assessment_artifact_id=assessment_ref.artifact_id,
             follow_up=follow_up,
         )
 
