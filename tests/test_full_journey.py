@@ -127,7 +127,9 @@ async def test_complete_product_journey(journey_pipeline: FakePipeline) -> None:
     report_result = await journey_pipeline.generate_report(report_job)
     assert isinstance(report_result, ReportCompleted)
     assert report_result.evaluation_artifact.schema_version == 1
+    assert report_result.evaluation_artifact.object_key.endswith("evaluation.json")
     assert report_result.report_artifact.schema_version == 1
+    assert report_result.report_artifact.object_key.endswith("report.md")
     assert "user_alice_01" in report_result.member_feedback_user_ids
     assert "user_bob_02" in report_result.member_feedback_user_ids
 

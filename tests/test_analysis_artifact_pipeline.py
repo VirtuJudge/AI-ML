@@ -48,4 +48,11 @@ async def test_analyze_session_persists_artifact_to_storage(tmp_path: Path) -> N
     assert "transcript" in stored_artifact
     assert "observations" in stored_artifact
     assert "evidence_bundle" in stored_artifact
+    assert "by_speaker" in stored_artifact
+    by_speaker = stored_artifact["by_speaker"]
+    assert "SPEAKER_00" in by_speaker
+    assert "SPEAKER_01" in by_speaker
+    assert by_speaker["SPEAKER_00"]["speaking_time_ms"] > 0
+    assert len(by_speaker["SPEAKER_00"]["intervals"]) >= 1
+    assert "formatted" in by_speaker["SPEAKER_00"]["intervals"][0]
     assert len(stored_artifact["primary_questions"]) == 3

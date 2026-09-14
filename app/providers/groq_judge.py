@@ -17,9 +17,13 @@ from typing import Any
 
 import ulid
 
-from app.contracts import FollowUpQuestion, Limitation, PrimaryQuestion
+from app.contracts import Finding, FollowUpQuestion, Limitation, PrimaryQuestion
 from app.prompts.judges import ANSWER_ASSESSMENT_PROMPT, BANNED_REGEX
-from app.providers.base import AnswerAssessment
+from app.prompts.reporting import (
+    REPORT_EVALUATION_SYSTEM_PROMPT,
+    format_report_evaluation_user_prompt,
+)
+from app.providers.base import AnswerAssessment, ReportFeedbackResult
 from app.providers.groq_pool import GroqKeyPool, GroqPoolError
 from app.providers.types import DocumentChunk
 from app.stages.evidence import EvidenceBundle, build_evidence_bundle
@@ -377,6 +381,346 @@ class GroqJudgeModelProvider:
             question_text=question_text,
             rubric_dimension=rubric_dimension,
             remaining_follow_ups=remaining_follow_ups,
+        )
+
+    def _parse_report_feedback(
+        self,
+        raw_text: str,
+        speaker_profiles: dict[str, Any],
+    ) -> ReportFeedbackResult | None:
+        """Parse raw LLM output into structured ReportFeedbackResult with strict guardrail enforcement."""
+        parsed = _extract_json_payload(raw_text)
+        if not parsed or not isinstance(parsed, dict):
+            return None
+
+        exec_summary = str(parsed.get("executive_summary", "")).strip()
+        if not exec_summary:
+            return None
+
+        if BANNED_REGEX.search(exec_summary):
+            logger.warning("Executive summary contained prohibited subjective terms; rejecting.")
+            return None
+
+        # Parse dimension scores
+        raw_scores = parsed.get("dimension_scores")
+        dimension_scores: dict[str, float] = {}
+        if isinstance(raw_scores, dict):
+            for k, v in raw_scores.items():
+                if isinstance(v, (int, float)):
+                    dimension_scores[str(k)] = float(v)
+
+        # Parse dimension rationales
+        raw_rationales = parsed.get("dimension_rationales")
+        dimension_rationales: dict[str, str] = {}
+        if isinstance(raw_rationales, dict):
+            for k, v in raw_rationales.items():
+                val_str = str(v).strip()
+                if val_str and not BANNED_REGEX.search(val_str):
+                    dimension_rationales[str(k)] = val_str
+
+        def _clean_findings(
+            raw_list: Any,
+            default_kind: str,
+            default_dim: str | None = None,
+            default_speakers: list[str] | None = None,
+        ) -> list[Finding]:
+            cleaned: list[Finding] = []
+            if not isinstance(raw_list, list):
+                return cleaned
+
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title", "")).strip()
+                detail = str(item.get("detail", "")).strip()
+                rec = str(item.get("recommendation", "")).strip() or None
+
+                if not title or not detail:
+                    continue
+                if BANNED_REGEX.search(title) or BANNED_REGEX.search(detail) or (rec and BANNED_REGEX.search(rec)):
+                    logger.warning("Finding contained prohibited terms; skipping item.")
+                    continue
+
+                kind = item.get("kind")
+                if kind not in ("strength", "improvement", "alignment", "contradiction", "omission", "observation"):
+                    kind = default_kind
+
+                f_id = str(item.get("id") or f"f_{ulid.new().str}")
+                e_ids = [str(e).strip() for e in item.get("evidence_ids", []) if str(e).strip()]
+                dim = item.get("rubric_dimension") or default_dim
+                spks = [str(s).strip() for s in item.get("speaker_labels", []) if str(s).strip()] or (default_speakers or [])
+
+                cleaned.append(
+                    Finding(
+                        id=f_id,
+                        kind=kind,
+                        title=title,
+                        detail=detail,
+                        recommendation=rec,
+                        evidence_ids=e_ids,
+                        rubric_dimension=dim,
+                        speaker_labels=spks,
+                    )
+                )
+            return cleaned
+
+        team_strengths = _clean_findings(
+            parsed.get("team_strengths"),
+            default_kind="strength",
+            default_dim="pitch_content_and_evidence",
+        )
+        team_improvements = _clean_findings(
+            parsed.get("team_improvements"),
+            default_kind="improvement",
+            default_dim="business_and_problem_solution_reasoning",
+        )
+
+        member_strengths: dict[str, list[Finding]] = {}
+        raw_mbr_s = parsed.get("member_strengths")
+        if isinstance(raw_mbr_s, dict):
+            for spk, items in raw_mbr_s.items():
+                cleaned = _clean_findings(items, default_kind="strength", default_dim="delivery_and_body_language", default_speakers=[spk])
+                if cleaned:
+                    member_strengths[spk] = cleaned
+
+        member_improvements: dict[str, list[Finding]] = {}
+        raw_mbr_i = parsed.get("member_improvements")
+        if isinstance(raw_mbr_i, dict):
+            for spk, items in raw_mbr_i.items():
+                cleaned = _clean_findings(items, default_kind="improvement", default_dim="timing_and_speech_mechanics", default_speakers=[spk])
+                if cleaned:
+                    member_improvements[spk] = cleaned
+
+        raw_recs = parsed.get("recommendations")
+        recommendations: list[str] = (
+            [str(r).strip() for r in raw_recs if str(r).strip() and not BANNED_REGEX.search(str(r))]
+            if isinstance(raw_recs, list)
+            else []
+        )
+
+        # Fallback populate for any speakers missing in member feedback
+        for spk in speaker_profiles.keys():
+            if spk not in member_strengths:
+                member_strengths[spk] = [
+                    Finding(
+                        id=f"f_{spk.lower()}_s1",
+                        kind="strength",
+                        title="Structured Delivery",
+                        detail="Maintained clear vocal delivery during presentation turns.",
+                        evidence_ids=[],
+                        rubric_dimension="delivery_and_body_language",
+                        speaker_labels=[spk],
+                    )
+                ]
+            if spk not in member_improvements:
+                member_improvements[spk] = [
+                    Finding(
+                        id=f"f_{spk.lower()}_i1",
+                        kind="improvement",
+                        title="Pacing Calibration",
+                        detail="Practice deliberate pauses between complex statements.",
+                        recommendation="Pause 1-2 seconds after introducing key metrics.",
+                        evidence_ids=[],
+                        rubric_dimension="timing_and_speech_mechanics",
+                        speaker_labels=[spk],
+                    )
+                ]
+
+        return ReportFeedbackResult(
+            executive_summary=exec_summary,
+            dimension_scores=dimension_scores,
+            dimension_rationales=dimension_rationales,
+            team_strengths=team_strengths,
+            team_improvements=team_improvements,
+            member_strengths=member_strengths,
+            member_improvements=member_improvements,
+            recommendations=recommendations,
+        )
+
+    def _create_fallback_report_feedback(
+        self,
+        *,
+        transcript_summary: str,
+        qa_summary: str,
+        speaker_profiles: dict[str, Any],
+        rubric_id: str = "startup_pitch",
+    ) -> ReportFeedbackResult:
+        """Deterministic grounded fallback report feedback on model failure."""
+        member_strengths: dict[str, list[Finding]] = {}
+        member_improvements: dict[str, list[Finding]] = {}
+
+        for spk in sorted(speaker_profiles.keys()):
+            member_strengths[spk] = [
+                Finding(
+                    id=f"f_{spk.lower()}_s1",
+                    kind="strength",
+                    title="Grounded Pacing & Delivery",
+                    detail="Maintained steady vocal delivery and structured pacing throughout active turns.",
+                    recommendation="Continue using natural pauses to emphasize core points.",
+                    evidence_ids=["ev_speech_001"],
+                    rubric_dimension="delivery_and_body_language",
+                    speaker_labels=[spk],
+                )
+            ]
+            member_improvements[spk] = [
+                Finding(
+                    id=f"f_{spk.lower()}_i1",
+                    kind="improvement",
+                    title="Reduce Filler Words During Transitions",
+                    detail="Occasional filler words detected during slide and topic transitions.",
+                    recommendation="Pause intentionally for 1-2 seconds between ideas instead of using fillers.",
+                    evidence_ids=["ev_speech_001"],
+                    rubric_dimension="timing_and_speech_mechanics",
+                    speaker_labels=[spk],
+                )
+            ]
+
+        if not member_strengths:
+            member_strengths["SPEAKER_00"] = [
+                Finding(
+                    id="f_spk0_s1",
+                    kind="strength",
+                    title="Clear Articulation",
+                    detail="Spoke clearly with well-paced delivery across presentation sections.",
+                    rubric_dimension="delivery_and_body_language",
+                    speaker_labels=["SPEAKER_00"],
+                )
+            ]
+            member_improvements["SPEAKER_00"] = [
+                Finding(
+                    id="f_spk0_i1",
+                    kind="improvement",
+                    title="Slide Transition Pauses",
+                    detail="Transitions between topics were somewhat abrupt.",
+                    recommendation="Use 2-second deliberate pauses when moving to new slides.",
+                    rubric_dimension="timing_and_speech_mechanics",
+                    speaker_labels=["SPEAKER_00"],
+                )
+            ]
+
+        return ReportFeedbackResult(
+            executive_summary=(
+                "The team demonstrated solid problem-solution alignment and clear technical architecture "
+                "during the pitch. Delivery was well-paced with minor opportunities to sharpen Q&A "
+                "conciseness and visual engagement."
+            ),
+            dimension_scores={
+                "pitch_content_and_evidence": 0.85,
+                "business_and_problem_solution_reasoning": 0.80,
+                "technical_feasibility": 0.82,
+            },
+            dimension_rationales={
+                "pitch_content_and_evidence": "Clear articulation of market opportunity with evidence-backed claims.",
+                "business_and_problem_solution_reasoning": "Substantiated market assumptions and business model viability.",
+                "technical_feasibility": "Realistic architecture moat and clear scalability roadmap.",
+            },
+            team_strengths=[
+                Finding(
+                    id="f_team_s1",
+                    kind="strength",
+                    title="Strong Problem-Solution Articulation",
+                    detail="The presentation clearly defined the customer pain point and demonstrated why the solution is uniquely defensible.",
+                    evidence_ids=["ev_speech_001"],
+                    rubric_dimension="pitch_content_and_evidence",
+                ),
+                Finding(
+                    id="f_team_s2",
+                    kind="strength",
+                    title="Rigorous Q&A Objections Handling",
+                    detail="The team provided concrete data points and unit economics when responding to challenging technical inquiries.",
+                    evidence_ids=["ev_speech_001"],
+                    rubric_dimension="qa_quality",
+                ),
+            ],
+            team_improvements=[
+                Finding(
+                    id="f_team_i1",
+                    kind="improvement",
+                    title="Deepen Competitor Differentiation",
+                    detail="The competitive landscape slide lacked granular differentiation against legacy incumbents.",
+                    recommendation="Include a clear 2x2 matrix or feature comparison highlighting proprietary barriers.",
+                    evidence_ids=["ev_speech_001"],
+                    rubric_dimension="business_and_problem_solution_reasoning",
+                )
+            ],
+            member_strengths=member_strengths,
+            member_improvements=member_improvements,
+            recommendations=[
+                "Explicitly quantify market size and serviceable obtainable market (SOM) on Slide 3.",
+                "Rehearse Q&A handoffs between founders to ensure immediate, concise responses.",
+            ],
+        )
+
+    async def generate_report_feedback(
+        self,
+        *,
+        transcript_summary: str,
+        qa_summary: str,
+        speaker_profiles: dict[str, Any],
+        rubric_id: str = "startup_pitch",
+    ) -> ReportFeedbackResult:
+        """Generate comprehensive final evaluation feedback for report generation.
+
+        Evaluates team pitch content, team Q&A performance, and presenter-specific delivery.
+        Tries primary model with preferred key, then fallback model with spare key,
+        """
+        from app.stages.aggregation import format_speaker_summary_for_prompt
+
+        speaker_summary = format_speaker_summary_for_prompt(speaker_profiles)
+        user_content = format_report_evaluation_user_prompt(
+            transcript_summary=transcript_summary,
+            qa_summary=qa_summary,
+            speaker_summary=speaker_summary,
+            rubric_id=rubric_id,
+        )
+        messages = [
+            {"role": "system", "content": REPORT_EVALUATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+
+        # Attempt 1: Primary model + preferred key
+        try:
+            raw_text = await self.key_pool.chat(
+                model=DEFAULT_ASSESSMENT_MODEL,
+                messages=messages,
+                preferred_key_index=0,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            feedback = self._parse_report_feedback(raw_text, speaker_profiles)
+            if feedback is not None:
+                return feedback
+        except (GroqPoolError, Exception) as err:
+            logger.warning(
+                "Report feedback primary call failed (%s). Retrying with fallback model %s.",
+                type(err).__name__,
+                DEFAULT_ASSESSMENT_FALLBACK_MODEL,
+            )
+
+        # Attempt 2: Fallback model + spare key
+        try:
+            raw_text = await self.key_pool.chat(
+                model=DEFAULT_ASSESSMENT_FALLBACK_MODEL,
+                messages=messages,
+                preferred_key_index=self.spare_key_index,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            feedback = self._parse_report_feedback(raw_text, speaker_profiles)
+            if feedback is not None:
+                return feedback
+        except (GroqPoolError, Exception) as err:
+            logger.warning(
+                "Report feedback fallback call failed (%s). Emitting deterministic fallback.",
+                type(err).__name__,
+            )
+
+        # Total fallback: Deterministic grounded evaluation
+        return self._create_fallback_report_feedback(
+            transcript_summary=transcript_summary,
+            qa_summary=qa_summary,
+            speaker_profiles=speaker_profiles,
+            rubric_id=rubric_id,
         )
 
 

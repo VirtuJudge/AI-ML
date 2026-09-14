@@ -107,12 +107,13 @@ except ImportError:
     pass
 
 try:
+    import app.compat  # noqa: F401
     import pyannote.audio  # noqa: F401
 
     from app.providers.pyannote_diarization import PyannoteDiarizationProvider  # noqa: F401
 
     __all__.append("PyannoteDiarizationProvider")
-except ImportError:
+except Exception:
     pass
 
 try:

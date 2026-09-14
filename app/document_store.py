@@ -305,6 +305,9 @@ async def create_document_store(database_url: str | None = None) -> DocumentStor
         clean_dsn,
         ssl=ssl_mode,
         statement_cache_size=0,
+        min_size=1,
+        max_size=3,
+        command_timeout=30.0,
     )
     store = PgVectorDocumentStore(pool)
     await store.initialize_schema()

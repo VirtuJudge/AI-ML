@@ -341,6 +341,18 @@ async def test_generate_report_completes(fake_pipeline: FakePipeline) -> None:
     assert "01JTEST0000000000000000031" in result.member_feedback_user_ids
     assert "01JTEST0000000000000000032" in result.member_feedback_user_ids
 
+    # Verify evaluation artifact uploaded to storage
+    assert result.evaluation_artifact.schema_version == 1
+    assert result.evaluation_artifact.object_key.endswith("evaluation.json")
+    eval_data = await fake_pipeline.object_storage.read_json(result.evaluation_artifact.object_key)
+    assert "overall_score" in eval_data
+    assert len(eval_data["components"]) == 6
+    assert len(eval_data["member_feedback"]) == 2
+
+    # Verify report markdown artifact uploaded to storage
+    assert result.report_artifact.schema_version == 1
+    assert result.report_artifact.object_key.endswith("report.md")
+
 
 @pytest.mark.asyncio
 async def test_erase_data_completes(fake_pipeline: FakePipeline) -> None:
@@ -736,5 +748,61 @@ async def test_analyze_answer_download_error_logs_artifact_id_not_object_key(
 
     assert secret_key not in caplog.text
     assert "01JTESTSAFEARTIFACT00000001" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_embeds_by_speaker_in_analysis_artifact(
+    tmp_path: Path,
+) -> None:
+    """Verify analysis.json includes by_speaker with speaking intervals and windowed metrics."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    pipeline = FakePipeline(object_storage=storage)
+
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTESTSESSIONSPK000000001",
+            object_key="uploads/presentation.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+        ),
+        supporting_documents=[],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "questions", "vision", "audio"],
+    )
+
+    result = await pipeline.analyze_session(payload)
+    stored = await storage.read_json(result.analysis_artifact.object_key)
+
+    assert "by_speaker" in stored
+    by_speaker = stored["by_speaker"]
+
+    # Verify both fake speakers have isolated entries
+    assert "SPEAKER_00" in by_speaker
+    assert "SPEAKER_01" in by_speaker
+
+    # Verify SPEAKER_00 profile
+    spk0 = by_speaker["SPEAKER_00"]
+    assert spk0["speaking_time_ms"] == 9200
+    assert len(spk0["intervals"]) == 1
+    assert spk0["intervals"][0]["formatted"] == "00:00 - 00:09"
+    assert spk0["intervals"][0]["start_ms"] == 0
+    assert spk0["intervals"][0]["end_ms"] == 9200
+
+    # Verify SPEAKER_00 windows contain aggregated metrics
+    assert len(spk0["windows"]) >= 1
+    w0 = spk0["windows"][0]
+    assert w0["start_ms"] == 0
+    assert w0["end_ms"] == 10000
+    assert "acoustic" in w0
+    assert "speaking_rate_wpm" in w0["acoustic"]
+    assert "pitch_mean_hz" in w0["acoustic"]
+
+    # Verify SPEAKER_01 profile
+    spk1 = by_speaker["SPEAKER_01"]
+    assert spk1["speaking_time_ms"] == 4700
+    assert len(spk1["intervals"]) == 1
+    assert spk1["intervals"][0]["formatted"] == "00:09 - 00:14"
+    assert spk1["intervals"][0]["start_ms"] == 9300
+    assert spk1["intervals"][0]["end_ms"] == 14000
 
 
