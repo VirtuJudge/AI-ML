@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import datetime
 import logging
+import time
 from typing import Any
 
-from pydantic import BaseModel, Field
 import ulid
+from pydantic import BaseModel, Field
 
 from app.contracts import (
     ArtifactRef,
@@ -22,7 +23,6 @@ from app.contracts import (
     Limitation,
     MemberFeedback,
     RubricRef,
-    ScoreComponent,
     SpeakerMapping,
     SpeakingInterval,
 )
@@ -32,7 +32,6 @@ from app.stages.aggregation import format_duration_ms
 from app.stages.report_loader import ReportEvidenceBundle, load_report_evidence
 from app.stages.report_markdown import generate_markdown_report
 from app.stages.scoring import (
-    STARTUP_PITCH_RUBRIC_V1,
     calculate_individual_delivery_scores,
     calculate_qa_score,
     evaluate_rubric,
@@ -81,29 +80,33 @@ def _format_qa_summary_text(questions: list[dict[str, Any]], answers: list[dict[
 
 
 async def run_report_stage(
-    *,
     report_id: str,
-    analysis_ref: ArtifactRef,
-    qa_ref: ArtifactRef,
-    speaker_mappings: list[SpeakerMapping] | None = None,
+    *,
+    analysis_ref: ArtifactRef | None = None,
+    qa_ref: ArtifactRef | None = None,
     storage: ObjectStorageProtocol | None = None,
     judge_provider: JudgeModelProvider | None = None,
+    speaker_mappings: list[SpeakerMapping] | None = None,
+    evidence_bundle_override: ReportEvidenceBundle | None = None,
+    session_title: str = "Startup Pitch Practice Session",
+    session_date: str | None = None,
     rubric_id: str = "startup_pitch",
     pipeline_version: str = "0.1.0",
-    session_title: str = "Startup Pitch Practice Session",
-    evidence_bundle_override: ReportEvidenceBundle | None = None,
 ) -> ReportStageResult:
     """Execute the end-to-end evaluation and report generation stage.
 
     1. Loads evidence and Q&A artifacts from object storage (or synthetic defaults).
     2. Calls JudgeModelProvider to generate grounded executive summary and feedback.
-    3. Calculates deterministic Q&A scores (20% rubric weight, skips=0.0) and individual delivery scores.
+    3. Calculates deterministic Q&A scores (20% rubric weight, skips=0.0)
+       and individual delivery scores.
     4. Evaluates startup pitch rubric, computing normalized effective weights and overall score.
     5. Maps active speaking turn intervals to each mapped presenter's MemberFeedback.
     6. Formats canonical human-readable Markdown report (report.md).
     7. Validates and returns the complete Evaluation model and report text.
     """
     judge = judge_provider or FakeJudgeModelProvider()
+    start_time = time.monotonic()
+    started_at = datetime.datetime.now(datetime.UTC).isoformat()
 
     # 1. Load evidence bundle
     if evidence_bundle_override is not None:
@@ -132,15 +135,24 @@ async def run_report_stage(
         assessments=bundle.assessments,
     )
 
-    # Calculate average delivery scores across all active speakers for the team-level rubric components
+    # Calculate average delivery scores across all active speakers for the
+    # team-level rubric components
     team_delivery_scores: list[float] = []
     team_timing_scores: list[float] = []
     for spk_prof in bundle.by_speaker.values():
         spk_comps = calculate_individual_delivery_scores(spk_prof)
         for sc in spk_comps:
-            if sc.dimension == "delivery_and_body_language" and sc.status == "scored" and sc.normalized_score is not None:
+            if (
+                sc.dimension == "delivery_and_body_language"
+                and sc.status == "scored"
+                and sc.normalized_score is not None
+            ):
                 team_delivery_scores.append(sc.normalized_score)
-            elif sc.dimension == "timing_and_speech_mechanics" and sc.status == "scored" and sc.normalized_score is not None:
+            elif (
+                sc.dimension == "timing_and_speech_mechanics"
+                and sc.status == "scored"
+                and sc.normalized_score is not None
+            ):
                 team_timing_scores.append(sc.normalized_score)
 
     team_delivery = (
@@ -156,12 +168,18 @@ async def run_report_stage(
 
     # Combine dimension scores for full rubric evaluation
     raw_dimension_scores: dict[str, float | None] = {
-        "pitch_content_and_evidence": feedback_result.dimension_scores.get("pitch_content_and_evidence", 0.80),
-        "business_and_problem_solution_reasoning": feedback_result.dimension_scores.get("business_and_problem_solution_reasoning", 0.75),
-        "technical_feasibility": feedback_result.dimension_scores.get("technical_feasibility", 0.80),
-        "delivery_and_body_language": team_delivery if team_delivery is not None else 0.75,
-        "timing_and_speech_mechanics": team_timing if team_timing is not None else 0.70,
-        "qa_quality": qa_score,
+        "pitch_content_and_evidence": feedback_result.dimension_scores.get(
+            "pitch_content_and_evidence"
+        ),
+        "business_and_problem_solution_reasoning": feedback_result.dimension_scores.get(
+            "business_and_problem_solution_reasoning"
+        ),
+        "technical_feasibility": feedback_result.dimension_scores.get(
+            "technical_feasibility"
+        ),
+        "delivery_and_body_language": team_delivery,
+        "timing_and_speech_mechanics": team_timing,
+        "qa_quality": qa_score if bundle.questions else None,
     }
 
     # Rationales
@@ -175,16 +193,28 @@ async def run_report_stage(
 
     # Evidence mapping per dimension
     evidence_by_dim: dict[str, list[str]] = {
-        "qa_quality": qa_evidence_ids,
+        "qa_quality": list(qa_evidence_ids),
     }
     for chunk in bundle.document_chunks:
         cid = chunk.get("chunk_id") or chunk.get("evidence_id")
         if cid:
             evidence_by_dim.setdefault("technical_feasibility", []).append(cid)
+            evidence_by_dim.setdefault("business_and_problem_solution_reasoning", []).append(cid)
+
     for seg in bundle.transcript_segments:
         sid = seg.get("segment_id") or seg.get("evidence_id")
         if sid:
             evidence_by_dim.setdefault("pitch_content_and_evidence", []).append(sid)
+            evidence_by_dim.setdefault("business_and_problem_solution_reasoning", []).append(sid)
+
+    for spk_label, spk_prof in bundle.by_speaker.items():
+        if spk_prof.get("windows"):
+            evidence_by_dim.setdefault("delivery_and_body_language", []).append(
+                f"ev_vision_{spk_label.lower()}"
+            )
+            evidence_by_dim.setdefault("timing_and_speech_mechanics", []).append(
+                f"ev_audio_{spk_label.lower()}"
+            )
 
     overall_score, rubric_components = evaluate_rubric(
         raw_scores=raw_dimension_scores,
@@ -227,13 +257,20 @@ async def run_report_stage(
             elif isinstance(item, dict):
                 start_ms = item.get("start_ms", 0)
                 end_ms = item.get("end_ms", 0)
-                fmt = item.get("formatted") or f"{start_ms//60000:02d}:{(start_ms%60000)//1000:02d} - {end_ms//60000:02d}:{(end_ms%60000)//1000:02d}"
+                s_min, s_sec = divmod(start_ms // 1000, 60)
+                e_min, e_sec = divmod(end_ms // 1000, 60)
+                fmt = (
+                    item.get("formatted")
+                    or f"{s_min:02d}:{s_sec:02d} - {e_min:02d}:{e_sec:02d}"
+                )
                 speaking_intervals.append(
                     SpeakingInterval(start_ms=start_ms, end_ms=end_ms, formatted=fmt)
                 )
 
         speaking_time_ms = spk_profile.get("speaking_time_ms", 0)
-        delivery_components = calculate_individual_delivery_scores(spk_profile)
+        spk_prof_with_label = dict(spk_profile)
+        spk_prof_with_label.setdefault("speaker_label", spk_label)
+        delivery_components = calculate_individual_delivery_scores(spk_prof_with_label)
 
         # Retrieve member findings from LLM feedback
         mbr_strengths = list(feedback_result.member_strengths.get(spk_label, []))
@@ -246,7 +283,10 @@ async def run_report_stage(
                     id=f"f_{spk_label.lower()}_s1",
                     kind="strength",
                     title="Engaged Vocal Presence",
-                    detail=f"{display_name} maintained clear vocal delivery throughout their presentation turns.",
+                    detail=(
+                        f"{display_name} maintained clear vocal delivery "
+                        "throughout their presentation turns."
+                    ),
                     rubric_dimension="delivery_and_body_language",
                     speaker_labels=[spk_label],
                 )
@@ -257,8 +297,12 @@ async def run_report_stage(
                     id=f"f_{spk_label.lower()}_i1",
                     kind="improvement",
                     title="Slide Transition Calibration",
-                    detail=f"{display_name} can use deliberate pauses when introducing new slides.",
-                    recommendation="Insert a 1-2 second pause before transitioning to new sections.",
+                    detail=(
+                        f"{display_name} can use deliberate pauses when introducing new slides."
+                    ),
+                    recommendation=(
+                        "Insert a 1-2 second pause before transitioning to new sections."
+                    ),
                     rubric_dimension="timing_and_speech_mechanics",
                     speaker_labels=[spk_label],
                 )
@@ -305,12 +349,51 @@ async def run_report_stage(
     session_id = bundle.session_id or report_id
     qa_round_id = bundle.metadata.get("qa_round_id") or f"{report_id}:qa_round"
 
+    completed_at = datetime.datetime.now(datetime.UTC).isoformat()
+    duration_ms = max(0, int((time.monotonic() - start_time) * 1000))
+
     reproducibility: dict[str, Any] = {
         "pipeline_version": pipeline_version,
         "rubric_id": rubric_id,
+        "rubric_version": 1,
+        "prompt_versions": {
+            "reporting": "1.0.0",
+            "scoring": "1.0.0",
+        },
+        "contract_versions": {
+            "data_contracts": "1.0.0",
+            "backend_ai": "1.0.0",
+        },
+        "input_checksums": {
+            "analysis": analysis_ref.checksum if analysis_ref else None,
+            "qa": qa_ref.checksum if qa_ref else None,
+        },
+        "stage_versions": {
+            "speech": "1.0.0",
+            "vision": "1.0.0",
+            "audio": "1.0.0",
+            "documents": "1.0.0",
+            "reporting": "1.0.0",
+        },
+        "model_runs": [
+            {
+                "capability": "evaluation_reporting",
+                "provider": type(judge).__name__,
+                "model_id": getattr(judge, "model_name", "judge_v1"),
+                "adapter_version": "1.0.0",
+                "duration_ms": duration_ms,
+            }
+        ],
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_ms": duration_ms,
+        "cost_summary": {
+            "estimated_usd": 0.0,
+            "currency": "USD",
+        },
         "scoring_engine": "startup_pitch_v1",
         "evaluator_provider": type(judge).__name__,
-        "evaluated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "evaluated_at": completed_at,
     }
 
     evaluation = Evaluation(

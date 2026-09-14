@@ -2,12 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
-try:
-    from datetime import UTC, datetime
-except ImportError:
-    from datetime import datetime, timezone
-
-    UTC = timezone.utc
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -17,7 +12,6 @@ from app.contracts import (
     AnalyzeAnswerPayload,
     AnalyzeSessionPayload,
     AnswerAnalysisCompleted,
-    ArtifactRef,
     EraseAIDataPayload,
     ErasureCompleted,
     GenerateReportPayload,

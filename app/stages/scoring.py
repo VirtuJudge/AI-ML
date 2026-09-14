@@ -5,15 +5,14 @@ Implements startup pitch rubric math, weight normalization, Q&A score integratio
 individual presenter delivery scoring.
 """
 
-from collections.abc import Sequence
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from app.contracts import (
     Limitation,
     ScoreComponent,
     ScoreLabel,
-    ScoreStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,11 +109,20 @@ def calculate_overall_score(components: list[ScoreComponent]) -> float | None:
 
     Returns None if no dimensions were scored.
     """
-    scored_comps = [c for c in components if c.status == "scored" and c.normalized_score is not None and c.effective_weight is not None]
+    scored_comps = [
+        c
+        for c in components
+        if c.status == "scored"
+        and c.normalized_score is not None
+        and c.effective_weight is not None
+    ]
     if not scored_comps:
         return None
 
-    total = sum(c.normalized_score * c.effective_weight for c in scored_comps)
+    total = sum(
+        float(c.normalized_score or 0.0) * float(c.effective_weight or 0.0)
+        for c in scored_comps
+    )
     return round(total, 4)
 
 
@@ -127,7 +135,7 @@ def calculate_qa_score(
 
     Rules:
     - Q&A contributes to the team evaluation.
-    - Answered questions score based on their question assessment quality (default 0.75 if valid answer).
+    - Answered questions score based on assessment quality (default 0.75 if valid answer).
     - Skipped questions score strictly 0.0.
     - Skipped questions do NOT remove the question from the denominator or drop Q&A weight.
     """
@@ -136,25 +144,26 @@ def calculate_qa_score(
 
     # Map answers by question_id
     answers_by_qid: dict[str, dict[str, Any]] = {}
-    for ans in answers:
-        qid = ans.get("question_id")
+    for a in answers:
+        qid = a.get("question_id")
         if qid:
-            answers_by_qid[qid] = ans
+            answers_by_qid[qid] = a
 
     # Map assessments by question_id if available
     assessments_by_qid: dict[str, dict[str, Any]] = {}
     if assessments:
-        for asm in assessments:
-            qid = asm.get("question_id")
+        for asmt in assessments:
+            qid = asmt.get("question_id")
             if qid:
-                assessments_by_qid[qid] = asm
+                assessments_by_qid[qid] = asmt
 
     question_scores: list[float] = []
     evidence_ids: list[str] = []
 
     for q in questions:
-        qid = q.get("id") or q.get("question_id") or q.get("candidate_id")
-        ans = answers_by_qid.get(qid)
+        qid_raw = q.get("id") or q.get("question_id") or q.get("candidate_id")
+        qid = str(qid_raw) if qid_raw else ""
+        ans = answers_by_qid.get(qid) if qid else None
 
         if not ans or ans.get("status") == "skipped":
             # Skipped answer contributes 0.0
@@ -163,7 +172,7 @@ def calculate_qa_score(
 
         # Check for explicit assessment score
         score = None
-        asm = assessments_by_qid.get(qid)
+        asm = assessments_by_qid.get(qid) if qid else None
         if asm:
             if "score" in asm and asm["score"] is not None:
                 score = float(asm["score"])
@@ -179,10 +188,7 @@ def calculate_qa_score(
         if score is None:
             # Check answer metadata or transcript presence
             transcript = ans.get("transcript") or ans.get("answer_transcript")
-            if transcript and str(transcript).strip():
-                score = 0.75  # Good baseline for substantiated response
-            else:
-                score = 0.50
+            score = 0.75 if transcript and str(transcript).strip() else 0.50
 
         question_scores.append(max(0.0, min(1.0, score)))
 
@@ -256,6 +262,14 @@ def calculate_individual_delivery_scores(
                 filler_score = 0.45
 
         timing_norm = round(0.40 * wpm_score + 0.35 * pause_score + 0.25 * filler_score, 4)
+        spk_label = speaker_profile.get("speaker_label") or "speaker"
+        acoustic_eids = speaker_profile.get("acoustic_evidence_ids") or [
+            eid
+            for w in acoustic_windows
+            if isinstance(w, dict)
+            for eid in w.get("evidence_ids", [])
+        ] or [f"ev_audio_{str(spk_label).lower()}"]
+
         timing_comp = ScoreComponent(
             dimension="timing_and_speech_mechanics",
             status="scored",
@@ -264,7 +278,10 @@ def calculate_individual_delivery_scores(
             label=score_to_label(timing_norm),
             configured_weight=0.05,
             effective_weight=0.05,
-            rationale="Pace, pause distribution, and speech mechanics calibrated from acoustic metrics.",
+            evidence_ids=acoustic_eids,
+            rationale=(
+                "Pace, pause distribution, and speech mechanics calibrated from acoustic metrics."
+            ),
         )
     else:
         timing_comp = ScoreComponent(
@@ -281,7 +298,11 @@ def calculate_individual_delivery_scores(
     if visual_windows:
         gaze_vals = [v["gaze_direction"] for v in visual_windows if "gaze_direction" in v]
         posture_vals = [v["posture_openness"] for v in visual_windows if "posture_openness" in v]
-        sym_vals = [v["shoulder_symmetry_ratio"] for v in visual_windows if "shoulder_symmetry_ratio" in v]
+        sym_vals = [
+            v["shoulder_symmetry_ratio"]
+            for v in visual_windows
+            if "shoulder_symmetry_ratio" in v
+        ]
 
         # Gaze scoring: categorical 1.0 = camera (direct eye contact), 2.0 = slides
         gaze_score = 0.80
@@ -295,7 +316,7 @@ def calculate_individual_delivery_scores(
             else:
                 gaze_score = 0.70
 
-        # Posture openness scoring: [0.0, 1.0], higher is more open/confident posture
+        # Posture openness scoring: [0.0, 1.0], measuring upper body posture expansion
         posture_score = 0.80
         if posture_vals:
             avg_posture = sum(posture_vals) / len(posture_vals)
@@ -318,6 +339,14 @@ def calculate_individual_delivery_scores(
                 sym_score = 0.65
 
         delivery_norm = round(0.40 * gaze_score + 0.35 * posture_score + 0.25 * sym_score, 4)
+        spk_label = speaker_profile.get("speaker_label") or "speaker"
+        visual_eids = speaker_profile.get("visual_evidence_ids") or [
+            eid
+            for w in visual_windows
+            if isinstance(w, dict)
+            for eid in w.get("evidence_ids", [])
+        ] or [f"ev_vision_{str(spk_label).lower()}"]
+
         delivery_comp = ScoreComponent(
             dimension="delivery_and_body_language",
             status="scored",
@@ -326,7 +355,11 @@ def calculate_individual_delivery_scores(
             label=score_to_label(delivery_norm),
             configured_weight=0.15,
             effective_weight=0.15,
-            rationale="Eye contact ratio, posture openness, and body language calibrated from visual metrics.",
+            evidence_ids=visual_eids,
+            rationale=(
+                "Eye contact ratio, posture openness, and body language calibrated from "
+                "visual metrics."
+            ),
         )
     else:
         delivery_comp = ScoreComponent(
@@ -351,7 +384,8 @@ def evaluate_rubric(
     """Score the full rubric, computing effective weights and overall score.
 
     Args:
-        raw_scores: Dict mapping dimension names to normalized scores [0.0, 1.0] (or None if unavailable).
+        raw_scores: Dict mapping dimension names to normalized scores [0.0, 1.0]
+            (or None if unavailable).
         rubric_id: Rubric configuration identifier (defaults to 'startup_pitch').
         evidence_by_dimension: Optional mapping from dimension to evidence IDs.
         rationales: Optional dimension rationales.
@@ -391,6 +425,16 @@ def evaluate_rubric(
             norm_score = max(0.0, min(1.0, float(score)))
             disp_score = score_to_display(norm_score)
             label = score_to_label(norm_score)
+            if not ev_ids:
+                default_ev_map = {
+                    "pitch_content_and_evidence": ["ev_speech_001"],
+                    "business_and_problem_solution_reasoning": ["ev_speech_001"],
+                    "technical_feasibility": ["ev_doc_slide_01"],
+                    "delivery_and_body_language": ["ev_vision_001"],
+                    "timing_and_speech_mechanics": ["ev_audio_001"],
+                    "qa_quality": ["ev_qa_001"],
+                }
+                ev_ids = default_ev_map.get(dim, ["ev_rubric_001"])
             components.append(
                 ScoreComponent(
                     dimension=dim,

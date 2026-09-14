@@ -5,8 +5,8 @@ windowed profiles per presenter, filtering out passive non-speaking timestamps
 and cleaning acoustic micro-gaps before any downstream evaluation or LLM invocation.
 """
 
-from collections.abc import Sequence
 import logging
+from collections.abc import Sequence
 from typing import Any, NamedTuple, TypeVar
 
 from app.providers.types import (
@@ -133,7 +133,9 @@ def clean_diarization_turns(
         merged: list[SpeakerSegment] = []
         for seg in sorted_segs:
             if not merged:
-                merged.append(SpeakerSegment(start_ms=seg.start_ms, end_ms=seg.end_ms, speaker_label=spk))
+                merged.append(
+                    SpeakerSegment(start_ms=seg.start_ms, end_ms=seg.end_ms, speaker_label=spk)
+                )
                 continue
 
             last = merged[-1]
@@ -141,7 +143,9 @@ def clean_diarization_turns(
                 # Merge / extend
                 last.end_ms = max(last.end_ms, seg.end_ms)
             else:
-                merged.append(SpeakerSegment(start_ms=seg.start_ms, end_ms=seg.end_ms, speaker_label=spk))
+                merged.append(
+                    SpeakerSegment(start_ms=seg.start_ms, end_ms=seg.end_ms, speaker_label=spk)
+                )
 
         # Prune isolated micro-segments shorter than min_duration_ms
         for m_seg in merged:
@@ -238,6 +242,87 @@ def extract_speaker_intervals(
     return SpeakerIntervalResult(intervals=intervals, speaking_time_ms=total_time_ms)
 
 
+def compute_speaker_metrics_summary(
+    profile_or_windows: dict[str, Any] | list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Compute aggregate acoustic and visual metrics summary across a speaker's windows."""
+    if not profile_or_windows:
+        return {}
+
+    if isinstance(profile_or_windows, dict):
+        if "metrics_summary" in profile_or_windows:
+            summary_val = profile_or_windows["metrics_summary"]
+            if isinstance(summary_val, dict):
+                return summary_val
+        windows = profile_or_windows.get("windows", [])
+    else:
+        windows = profile_or_windows
+
+    if not windows:
+        return {}
+
+    wpm_vals = [
+        w["acoustic"]["speaking_rate_wpm"]
+        for w in windows
+        if "acoustic" in w and "speaking_rate_wpm" in w["acoustic"]
+    ]
+    pitch_vals = [
+        w["acoustic"]["pitch_mean_hz"]
+        for w in windows
+        if "acoustic" in w and "pitch_mean_hz" in w["acoustic"]
+    ]
+    pause_durs = [
+        w["acoustic"]["pause_duration_ms"]
+        for w in windows
+        if "acoustic" in w and "pause_duration_ms" in w["acoustic"]
+    ]
+    pause_counts = [
+        w["acoustic"]["pause_count"]
+        for w in windows
+        if "acoustic" in w and "pause_count" in w["acoustic"]
+    ]
+    fillers = [
+        w["acoustic"]["filler_count"]
+        for w in windows
+        if "acoustic" in w and "filler_count" in w["acoustic"]
+    ]
+
+    gaze_vals = [
+        w["visual"]["gaze_direction"]
+        for w in windows
+        if "visual" in w and "gaze_direction" in w["visual"]
+    ]
+    posture_vals = [
+        w["visual"]["posture_openness"]
+        for w in windows
+        if "visual" in w and "posture_openness" in w["visual"]
+    ]
+    movement_vals = [
+        w["visual"]["upper_body_movement_px"]
+        for w in windows
+        if "visual" in w and "upper_body_movement_px" in w["visual"]
+    ]
+
+    summary: dict[str, Any] = {}
+    if wpm_vals:
+        summary["avg_wpm"] = round(sum(wpm_vals) / len(wpm_vals), 1)
+    if pitch_vals:
+        summary["avg_pitch_hz"] = round(sum(pitch_vals) / len(pitch_vals), 1)
+    if pause_durs:
+        summary["total_pause_ms"] = sum(pause_durs)
+        summary["total_pause_count"] = sum(pause_counts)
+    if fillers:
+        summary["total_filler_count"] = sum(fillers)
+    if gaze_vals:
+        summary["avg_gaze"] = round(sum(gaze_vals) / len(gaze_vals), 2)
+    if posture_vals:
+        summary["avg_posture"] = round(sum(posture_vals) / len(posture_vals), 2)
+    if movement_vals:
+        summary["avg_movement_px"] = round(sum(movement_vals) / len(movement_vals), 1)
+
+    return summary
+
+
 def aggregate_speaker_observations(
     visual_obs: Sequence[VisualObservation],
     audio_obs: Sequence[AudioObservation],
@@ -285,12 +370,12 @@ def aggregate_speaker_observations(
                 speaker_set.add(s)
     for seg in cleaned_segs:
         speaker_set.add(seg.speaker_label)
-    for obs in filtered_visual:
-        if obs.speaker_label:
-            speaker_set.add(obs.speaker_label)
-    for obs in filtered_audio:
-        if obs.speaker_label:
-            speaker_set.add(obs.speaker_label)
+    for v_obs in filtered_visual:
+        if v_obs.speaker_label:
+            speaker_set.add(v_obs.speaker_label)
+    for a_obs in filtered_audio:
+        if a_obs.speaker_label:
+            speaker_set.add(a_obs.speaker_label)
 
     # Index filtered observations by speaker
     visual_by_speaker: dict[str, list[VisualObservation]] = {}
@@ -349,13 +434,16 @@ def aggregate_speaker_observations(
 
                 if "pause_duration_ms" in audio_metric_values:
                     p_dur = sum(audio_metric_values["pause_duration_ms"])
-                    acoustic_dict["pause_duration_ms"] = int(p_dur) if p_dur.is_integer() else round(p_dur, 1)
+                    is_int = float(p_dur).is_integer()
+                    acoustic_dict["pause_duration_ms"] = (
+                        int(p_dur) if is_int else round(p_dur, 1)
+                    )
 
                 if "pause_count" in audio_metric_values:
-                    acoustic_dict["pause_count"] = int(round(sum(audio_metric_values["pause_count"])))
+                    acoustic_dict["pause_count"] = int(sum(audio_metric_values["pause_count"]))
 
                 if "filler_count" in audio_metric_values:
-                    acoustic_dict["filler_count"] = int(round(sum(audio_metric_values["filler_count"])))
+                    acoustic_dict["filler_count"] = int(sum(audio_metric_values["filler_count"]))
 
             # Aggregate visual metrics
             visual_dict: dict[str, Any] = {}
@@ -399,6 +487,7 @@ def aggregate_speaker_observations(
             "speaking_time_ms": spk_interval_res.speaking_time_ms,
             "intervals": spk_interval_res.intervals,
             "windows": windows,
+            "metrics_summary": compute_speaker_metrics_summary(windows),
         }
 
     return by_speaker
@@ -418,7 +507,7 @@ def _resolve_speaker_name(speaker_label: str, speaker_mappings: dict[str, Any] |
     if isinstance(val, dict):
         return val.get("display_name") or val.get("name") or speaker_label
     if hasattr(val, "display_name"):
-        return getattr(val, "display_name")
+        return str(val.display_name)
     return speaker_label
 
 
@@ -426,7 +515,7 @@ def format_speaker_summary_for_prompt(
     by_speaker: dict[str, Any],
     speaker_mappings: dict[str, Any] | None = None,
 ) -> str:
-    """Format compact, bounded text summary of each presenter's delivery metrics for AI-07 prompts."""
+    """Format compact, bounded text summary of presenter delivery metrics for prompts."""
     if not by_speaker:
         return "No presenter delivery metrics available."
 
@@ -453,26 +542,20 @@ def format_speaker_summary_for_prompt(
             continue
 
         # Compute overall delivery highlights across active windows
-        wpm_vals = [w["acoustic"]["speaking_rate_wpm"] for w in windows if "acoustic" in w and "speaking_rate_wpm" in w["acoustic"]]
-        pitch_vals = [w["acoustic"]["pitch_mean_hz"] for w in windows if "acoustic" in w and "pitch_mean_hz" in w["acoustic"]]
-        pause_durs = [w["acoustic"]["pause_duration_ms"] for w in windows if "acoustic" in w and "pause_duration_ms" in w["acoustic"]]
-        fillers = [w["acoustic"]["filler_count"] for w in windows if "acoustic" in w and "filler_count" in w["acoustic"]]
-        gaze_vals = [w["visual"]["gaze_direction"] for w in windows if "visual" in w and "gaze_direction" in w["visual"]]
-        posture_vals = [w["visual"]["posture_openness"] for w in windows if "visual" in w and "posture_openness" in w["visual"]]
-
+        summary = profile.get("metrics_summary") or compute_speaker_metrics_summary(profile)
         overview_parts: list[str] = []
-        if wpm_vals:
-            overview_parts.append(f"Avg Pace: {sum(wpm_vals)/len(wpm_vals):.1f} WPM")
-        if pitch_vals:
-            overview_parts.append(f"Avg Pitch: {sum(pitch_vals)/len(pitch_vals):.1f} Hz")
-        if pause_durs:
-            overview_parts.append(f"Total Pauses: {sum(pause_durs)} ms")
-        if fillers:
-            overview_parts.append(f"Total Fillers: {sum(fillers)}")
-        if gaze_vals:
-            overview_parts.append(f"Avg Gaze Index: {sum(gaze_vals)/len(gaze_vals):.2f}")
-        if posture_vals:
-            overview_parts.append(f"Avg Posture Openness: {sum(posture_vals)/len(posture_vals):.2f}")
+        if "avg_wpm" in summary:
+            overview_parts.append(f"Avg Pace: {summary['avg_wpm']:.1f} WPM")
+        if "avg_pitch_hz" in summary:
+            overview_parts.append(f"Avg Pitch: {summary['avg_pitch_hz']:.1f} Hz")
+        if "total_pause_ms" in summary:
+            overview_parts.append(f"Total Pauses: {summary['total_pause_ms']} ms")
+        if "total_filler_count" in summary:
+            overview_parts.append(f"Total Fillers: {summary['total_filler_count']}")
+        if "avg_gaze" in summary:
+            overview_parts.append(f"Avg Gaze Index: {summary['avg_gaze']:.2f}")
+        if "avg_posture" in summary:
+            overview_parts.append(f"Avg Posture Openness: {summary['avg_posture']:.2f}")
 
         if overview_parts:
             lines.append(f"- Delivery Highlights: {', '.join(overview_parts)}")
@@ -512,11 +595,12 @@ def format_speaker_summary_for_prompt(
 __all__ = [
     "ACOUSTIC_MEAN_METRICS",
     "ACOUSTIC_SUM_METRICS",
-    "SpeakerIntervalResult",
     "VISUAL_MEAN_METRICS",
+    "SpeakerIntervalResult",
     "aggregate_by_speaker",
     "aggregate_speaker_observations",
     "clean_diarization_turns",
+    "compute_speaker_metrics_summary",
     "extract_speaker_intervals",
     "filter_active_speaker_observations",
     "format_duration_ms",

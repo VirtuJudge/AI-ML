@@ -7,8 +7,6 @@ import pytest
 from app.contracts import (
     ArtifactRef,
     Evaluation,
-    Limitation,
-    ScoreComponent,
     SpeakerMapping,
     SpeakingInterval,
 )
@@ -59,7 +57,9 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
     assert len(eval_model.components) == 6
 
     # Verify effective weights sum to 1.0
-    eff_weights = [c.effective_weight for c in eval_model.components if c.effective_weight is not None]
+    eff_weights = [
+        c.effective_weight for c in eval_model.components if c.effective_weight is not None
+    ]
     assert pytest.approx(sum(eff_weights), rel=1e-3) == 1.0
 
     # Verify Q&A quality component
@@ -69,6 +69,28 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
     assert qa_comp.status == "scored"
     assert qa_comp.display_score is not None
 
+    # Verify every scored component has at least one evidence_id (Data-Contracts.md:330)
+    scored_comps = [c for c in eval_model.components if c.status == "scored"]
+    assert all(len(c.evidence_ids) >= 1 for c in scored_comps)
+
+    # Verify reproducibility metadata has all required contract fields (Data-Contracts.md:506)
+    required_repro_fields = [
+        "pipeline_version",
+        "rubric_id",
+        "rubric_version",
+        "prompt_versions",
+        "contract_versions",
+        "input_checksums",
+        "stage_versions",
+        "model_runs",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "cost_summary",
+    ]
+    for rf in required_repro_fields:
+        assert rf in eval_model.reproducibility
+
     # Verify member feedback
     assert len(eval_model.member_feedback) >= 1
     for mf in eval_model.member_feedback:
@@ -77,6 +99,9 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
         assert len(mf.speaker_labels) >= 1
         assert mf.speaking_time_ms >= 0
         assert len(mf.delivery_components) == 2
+        for dc in mf.delivery_components:
+            if dc.status == "scored":
+                assert len(dc.evidence_ids) >= 1
         assert len(mf.strengths) >= 1
         assert len(mf.improvements) >= 1
         for inv in mf.speaking_intervals:
@@ -230,3 +255,68 @@ async def test_run_report_stage_with_mock_storage() -> None:
 
     assert result.evaluation.analysis_attempt_id == "storage_sess_01"
     assert mock_storage.read_json.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_missing_modalities_produce_not_evaluated() -> None:
+    """Verify missing audio/visual observations produce not_evaluated, not invented scores."""
+    bundle = ReportEvidenceBundle(
+        session_id="session_missing_modalities",
+        transcript_full_text="Founder pitch without video or audio observations.",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 30000,
+                "intervals": [{"start_ms": 0, "end_ms": 30000, "formatted": "00:00 - 00:30"}],
+                "windows": [],
+            }
+        },
+        questions=[],
+        answers=[],
+        assessments=[],
+    )
+
+    analysis_ref = ArtifactRef(
+        artifact_id="01JMISSING0000000000000001",
+        object_key="artifacts/analysis.json",
+        checksum=FAKE_SHA256,
+    )
+    qa_ref = ArtifactRef(
+        artifact_id="01JMISSING0000000000000002",
+        object_key="artifacts/qa.json",
+        checksum=FAKE_SHA256,
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_MISSING_01",
+        analysis_ref=analysis_ref,
+        qa_ref=qa_ref,
+        evidence_bundle_override=bundle,
+        judge_provider=FakeJudgeModelProvider(),
+    )
+
+    eval_model = result.evaluation
+    deliv_comp = next(
+        c for c in eval_model.components if c.dimension == "delivery_and_body_language"
+    )
+    timing_comp = next(
+        c for c in eval_model.components if c.dimension == "timing_and_speech_mechanics"
+    )
+    qa_comp = next(c for c in eval_model.components if c.dimension == "qa_quality")
+
+    assert deliv_comp.status == "not_evaluated"
+    assert deliv_comp.normalized_score is None
+    assert deliv_comp.effective_weight is None
+
+    assert timing_comp.status == "not_evaluated"
+    assert timing_comp.normalized_score is None
+    assert timing_comp.effective_weight is None
+
+    assert qa_comp.status == "not_evaluated"
+    assert qa_comp.normalized_score is None
+    assert qa_comp.effective_weight is None
+
+    # Remaining scored dimensions are normalized to sum to 1.0
+    scored_comps = [c for c in eval_model.components if c.status == "scored"]
+    assert len(scored_comps) == 3
+    eff_sum = sum(c.effective_weight for c in scored_comps if c.effective_weight is not None)
+    assert pytest.approx(eff_sum, rel=1e-3) == 1.0

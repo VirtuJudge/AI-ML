@@ -9,8 +9,8 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
-from app.contracts import Evaluation, MemberFeedback, ScoreComponent
-from app.stages.aggregation import format_duration_ms
+from app.contracts import Evaluation
+from app.stages.aggregation import compute_speaker_metrics_summary, format_duration_ms
 from app.stages.scoring import score_to_display, score_to_label
 
 DIMENSION_DISPLAY_NAMES: dict[str, str] = {
@@ -43,88 +43,44 @@ def _label_title(label: str | None) -> str:
 
 
 def format_speaker_metrics_highlight(profile: dict[str, Any] | None) -> list[str]:
-    """Compute and format vocal and visual metric highlights from a speaker's 10s windows."""
+    """Compute and format vocal and visual metric highlights from a speaker profile."""
     if not profile:
         return ["*No active delivery metrics recorded for this presenter.*"]
 
     windows = profile.get("windows", [])
-    if not windows:
+    if not windows and "metrics_summary" not in profile:
         return ["*No windowed observations recorded during active turns.*"]
 
-    wpm_vals = [
-        w["acoustic"]["speaking_rate_wpm"]
-        for w in windows
-        if "acoustic" in w and "speaking_rate_wpm" in w["acoustic"]
-    ]
-    pitch_vals = [
-        w["acoustic"]["pitch_mean_hz"]
-        for w in windows
-        if "acoustic" in w and "pitch_mean_hz" in w["acoustic"]
-    ]
-    pause_durs = [
-        w["acoustic"]["pause_duration_ms"]
-        for w in windows
-        if "acoustic" in w and "pause_duration_ms" in w["acoustic"]
-    ]
-    pause_counts = [
-        w["acoustic"]["pause_count"]
-        for w in windows
-        if "acoustic" in w and "pause_count" in w["acoustic"]
-    ]
-    fillers = [
-        w["acoustic"]["filler_count"]
-        for w in windows
-        if "acoustic" in w and "filler_count" in w["acoustic"]
-    ]
-
-    gaze_vals = [
-        w["visual"]["gaze_direction"]
-        for w in windows
-        if "visual" in w and "gaze_direction" in w["visual"]
-    ]
-    posture_vals = [
-        w["visual"]["posture_openness"]
-        for w in windows
-        if "visual" in w and "posture_openness" in w["visual"]
-    ]
-    movement_vals = [
-        w["visual"]["upper_body_movement_px"]
-        for w in windows
-        if "visual" in w and "upper_body_movement_px" in w["visual"]
-    ]
+    summary = profile.get("metrics_summary") or compute_speaker_metrics_summary(profile)
+    if not summary:
+        return ["*Observations recorded without aggregated metric features.*"]
 
     lines: list[str] = []
 
     # Acoustic highlights
     acoustic_parts: list[str] = []
-    if wpm_vals:
-        avg_wpm = sum(wpm_vals) / len(wpm_vals)
-        acoustic_parts.append(f"**Pace:** {avg_wpm:.1f} WPM")
-    if pitch_vals:
-        avg_pitch = sum(pitch_vals) / len(pitch_vals)
-        acoustic_parts.append(f"**Pitch:** {avg_pitch:.1f} Hz")
-    if pause_durs:
-        total_pause_ms = sum(pause_durs)
-        total_pauses = sum(pause_counts)
+    if "avg_wpm" in summary:
+        acoustic_parts.append(f"**Pace:** {summary['avg_wpm']:.1f} WPM")
+    if "avg_pitch_hz" in summary:
+        acoustic_parts.append(f"**Pitch:** {summary['avg_pitch_hz']:.1f} Hz")
+    if "total_pause_ms" in summary:
+        total_pause_ms = summary["total_pause_ms"]
+        total_pauses = summary.get("total_pause_count", 0)
         acoustic_parts.append(f"**Pauses:** {total_pause_ms} ms ({total_pauses} count)")
-    if fillers:
-        total_fillers = sum(fillers)
-        acoustic_parts.append(f"**Fillers:** {total_fillers}")
+    if "total_filler_count" in summary:
+        acoustic_parts.append(f"**Fillers:** {summary['total_filler_count']}")
 
     if acoustic_parts:
         lines.append("- 🎙️ **Acoustic & Pacing:** " + " | ".join(acoustic_parts))
 
     # Visual highlights
     visual_parts: list[str] = []
-    if gaze_vals:
-        avg_gaze = sum(gaze_vals) / len(gaze_vals)
-        visual_parts.append(f"**Gaze Alignment:** {avg_gaze:.2f}")
-    if posture_vals:
-        avg_posture = sum(posture_vals) / len(posture_vals)
-        visual_parts.append(f"**Posture Openness:** {avg_posture:.2f}")
-    if movement_vals:
-        avg_mov = sum(movement_vals) / len(movement_vals)
-        visual_parts.append(f"**Upper Body Movement:** {avg_mov:.1f} px")
+    if "avg_gaze" in summary:
+        visual_parts.append(f"**Gaze Alignment:** {summary['avg_gaze']:.2f}")
+    if "avg_posture" in summary:
+        visual_parts.append(f"**Posture Openness:** {summary['avg_posture']:.2f}")
+    if "avg_movement_px" in summary:
+        visual_parts.append(f"**Upper Body Movement:** {summary['avg_movement_px']:.1f} px")
 
     if visual_parts:
         lines.append("- 👁️ **Visual & Body Language:** " + " | ".join(visual_parts))
@@ -175,7 +131,10 @@ def generate_markdown_report(
     # 2. Rubric Score Breakdown Table
     out.append("## Rubric Score Breakdown")
     out.append("")
-    out.append("| Rubric Dimension | Configured Weight | Effective Weight | Score | Rating | Status |")
+    out.append(
+        "| Rubric Dimension | Configured Weight | Effective Weight | "
+        "Score | Rating | Status |"
+    )
     out.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
 
     for comp in evaluation.components:
@@ -184,7 +143,9 @@ def generate_markdown_report(
         eff_wt = f"{comp.effective_weight * 100:.0f}%" if comp.effective_weight is not None else "-"
         score_str = f"{comp.display_score} / 100" if comp.display_score is not None else "-"
         label_disp = _label_title(comp.label) if comp.label else "-"
-        out.append(f"| {dim_name} | {cfg_wt} | {eff_wt} | {score_str} | {label_disp} | `{comp.status}` |")
+        out.append(
+            f"| {dim_name} | {cfg_wt} | {eff_wt} | {score_str} | {label_disp} | `{comp.status}` |"
+        )
 
     out.append("")
 
@@ -240,7 +201,10 @@ def generate_markdown_report(
             turn_strs = [inv.formatted for inv in member.speaking_intervals]
             turns_disp = ", ".join(turn_strs) if turn_strs else "None recorded"
             total_dur = format_duration_ms(member.speaking_time_ms)
-            out.append(f"> ⏱️ **Active Speaking Turns:** {turns_disp} | **Total Speaking Time:** {total_dur}")
+            out.append(
+                f"> ⏱️ **Active Speaking Turns:** {turns_disp} | "
+                f"**Total Speaking Time:** {total_dur}"
+            )
             out.append("")
 
             if member.summary:
@@ -301,19 +265,25 @@ def generate_markdown_report(
     out.append("")
     if qa_data and qa_data.get("questions"):
         questions = qa_data.get("questions", [])
-        answers_map: dict[str, dict[str, Any]] = {
-            a.get("question_id", ""): a for a in qa_data.get("answers", [])
-        }
-        assessments_map: dict[str, dict[str, Any]] = {
-            ass.get("question_id", ""): ass for ass in qa_data.get("assessments", [])
-        }
+        answers_map: dict[str, dict[str, Any]] = {}
+        for a in qa_data.get("answers", []):
+            aid = a.get("question_id") or a.get("id") or a.get("candidate_id")
+            if aid:
+                answers_map[str(aid)] = a
+
+        assessments_map: dict[str, dict[str, Any]] = {}
+        for ass in qa_data.get("assessments", []):
+            assid = ass.get("question_id") or ass.get("id") or ass.get("candidate_id")
+            if assid:
+                assessments_map[str(assid)] = ass
 
         for idx, q in enumerate(questions, start=1):
-            q_id = q.get("id", "")
-            q_text = q.get("text", "")
+            q_id_raw = q.get("id") or q.get("question_id") or q.get("candidate_id")
+            q_id = str(q_id_raw) if q_id_raw else ""
+            q_text = q.get("text") or q.get("question_text", "")
             q_dim = _dim_title(q.get("rubric_dimension", ""))
-            ans = answers_map.get(q_id, {})
-            ass = assessments_map.get(q_id, {})
+            ans = answers_map.get(q_id, {}) if q_id else {}
+            ass = assessments_map.get(q_id, {}) if q_id else {}
 
             out.append(f"### Question {idx}: {q_text}")
             out.append("")

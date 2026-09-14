@@ -543,3 +543,63 @@ def test_generate_markdown_report_speaker_boundary_isolation() -> None:
     assert "00:00 - 02:15" not in alex_section
     assert "Vocal Projection & Pacing" not in alex_section
 
+
+def test_generate_markdown_report_question_id_candidate_id_lookup() -> None:
+    """Verify lookup succeeds when questions, answers, or assessments use
+    question_id or candidate_id.
+    """
+    evaluation = _make_sample_evaluation()
+    qa_data = {
+        "questions": [
+            {
+                "question_id": "qid_via_key",
+                "text": "How do you defend against fast followers?",
+                "rubric_dimension": "technology_and_moat",
+            },
+            {
+                "candidate_id": "cid_via_key",
+                "question_text": "What is your gross margin profile?",
+                "rubric_dimension": "market_and_business_model",
+            },
+        ],
+        "answers": [
+            {
+                "question_id": "qid_via_key",
+                "answered_by": "Jane Founder",
+                "status": "submitted",
+                "transcript": "We patent our feature extraction and model orchestration pipelines.",
+            },
+            {
+                "candidate_id": "cid_via_key",
+                "answered_by": "Alex CTO",
+                "status": "submitted",
+                "transcript": "Our gross margin is 82% at current cloud volume.",
+            },
+        ],
+        "assessments": [
+            {
+                "question_id": "qid_via_key",
+                "score": 0.88,
+                "assessment_text": "Convincing IP protection and defensibility moat.",
+            },
+            {
+                "candidate_id": "cid_via_key",
+                "score": 0.84,
+                "assessment_text": "Clear software-like margin economics.",
+            },
+        ],
+    }
+
+    md = generate_markdown_report(evaluation, qa_data=qa_data)
+
+    assert "### Question 1: How do you defend against fast followers?" in md
+    assert "Jane Founder" in md
+    assert "We patent our feature extraction" in md
+    assert "Convincing IP protection and defensibility moat." in md
+
+    assert "### Question 2: What is your gross margin profile?" in md
+    assert "Alex CTO" in md
+    assert "Our gross margin is 82% at current cloud volume." in md
+    assert "Clear software-like margin economics." in md
+
+

@@ -128,15 +128,6 @@ try:
     except Exception:
         pass
 
-    # Fallback: monkey-patch torch.load to default weights_only=False
-    # for any remaining globals that aren't allowlisted.
-    _orig_torch_load = torch.load
-
-    def _compat_torch_load(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
-        return _orig_torch_load(*args, **kwargs)
-
-    torch.load = _compat_torch_load
 except Exception:
     pass
 

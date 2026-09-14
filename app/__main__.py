@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 
+from app.backend_client import BackendClient
 from app.document_store import FakeDocumentStore, create_document_store
 from app.pipeline import FakePipeline
 from app.storage import create_object_storage
