@@ -11,11 +11,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import boto3
-import botocore.exceptions
+import boto3  # type: ignore[import-untyped]
+import botocore.exceptions  # type: ignore[import-untyped]
 import ulid
-from botocore.client import BaseClient
-from botocore.config import Config
+from botocore.client import BaseClient  # type: ignore[import-untyped]
+from botocore.config import Config  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from app.contracts import ArtifactRef
@@ -199,7 +199,8 @@ class S3ObjectStorage:
                 raise ObjectStorageError(f"Failed to read '{object_key}': {exc}") from exc
 
         raw_bytes = await asyncio.to_thread(_read_sync)
-        return json.loads(raw_bytes.decode("utf-8"))
+        data: dict[str, Any] = json.loads(raw_bytes.decode("utf-8"))
+        return data
 
     async def delete_object(self, object_key: str) -> None:
         """Delete an object from S3/R2."""
@@ -217,6 +218,79 @@ class S3ObjectStorage:
 
         await asyncio.to_thread(_delete_sync)
 
+    async def delete_prefix(
+        self, prefix: str, exclude_suffixes: list[str] | None = None
+    ) -> int:
+        """Delete all objects matching prefix except those ending with any exclude_suffixes.
+
+        Uses delete_objects batch API (up to 1000 keys per batch) and returns deleted count.
+        """
+        keys = await self.list_objects(prefix)
+        suffixes = exclude_suffixes or []
+        keys_to_delete = [
+            k for k in keys if not any(k.endswith(suffix) for suffix in suffixes)
+        ]
+        if not keys_to_delete:
+            return 0
+
+        def _delete_all_sync() -> int:
+            client = self._get_client()
+            chunk_size = 1000
+            deleted_count = 0
+            for i in range(0, len(keys_to_delete), chunk_size):
+                batch = keys_to_delete[i : i + chunk_size]
+                delete_dict = {
+                    "Objects": [{"Key": k} for k in batch],
+                    "Quiet": True,
+                }
+                try:
+                    res = client.delete_objects(Bucket=self.bucket, Delete=delete_dict)
+                    if isinstance(res, dict) and res.get("Errors"):
+                        raise ObjectStorageError(
+                            f"Failed to delete some objects in S3: {res['Errors']}"
+                        )
+                    deleted_count += len(batch)
+                except botocore.exceptions.ClientError as err:
+                    raise ObjectStorageError(
+                        f"Failed to delete batch for prefix '{prefix}': {err}"
+                    ) from err
+                except ObjectStorageError:
+                    raise
+                except Exception as exc:
+                    raise ObjectStorageError(
+                        f"Failed to delete batch for prefix '{prefix}': {exc}"
+                    ) from exc
+            return deleted_count
+
+        return await asyncio.to_thread(_delete_all_sync)
+
+    async def list_objects(self, prefix: str) -> list[str]:
+        """List all object keys matching the given prefix using list_objects_v2 paginator."""
+        clean_prefix = prefix.lstrip("/")
+
+        def _list_sync() -> list[str]:
+            client = self._get_client()
+            keys: list[str] = []
+            try:
+                paginator = client.get_paginator("list_objects_v2")
+                for page in paginator.paginate(Bucket=self.bucket, Prefix=clean_prefix):
+                    contents = page.get("Contents") or []
+                    for obj in contents:
+                        key = obj.get("Key")
+                        if key:
+                            keys.append(key)
+            except botocore.exceptions.ClientError as err:
+                raise ObjectStorageError(
+                    f"Failed to list objects with prefix '{prefix}': {err}"
+                ) from err
+            except Exception as exc:
+                raise ObjectStorageError(
+                    f"Failed to list objects with prefix '{prefix}': {exc}"
+                ) from exc
+            return sorted(keys)
+
+        return await asyncio.to_thread(_list_sync)
+
 
 __all__ = [
     "ObjectNotFoundError",
@@ -224,3 +298,4 @@ __all__ = [
     "S3ObjectStorage",
     "S3StorageConfig",
 ]
+

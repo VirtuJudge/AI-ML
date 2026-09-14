@@ -143,6 +143,7 @@ class AnalyzeAnswerPayload(BaseModel):
     answered_by: str
     audio: AudioAssetInput | None = None
     remaining_follow_ups: int
+    practice_session_id: str | None = None
 
     @field_validator("audio", mode="before")
     @classmethod
@@ -177,6 +178,8 @@ class EraseAIDataPayload(BaseModel):
     erasure_request_id: str
     scope: Literal["asset", "practice_session", "project", "team"]
     scope_id: str
+    practice_session_ids: list[str] = Field(default_factory=list)
+    answer_ids: list[str] = Field(default_factory=list)
 
 
 class SessionAnalysisCompleted(BaseModel):
@@ -345,6 +348,28 @@ class FailedPayload(BaseModel):
     message: str
 
 
+class CancelledPayload(BaseModel):
+    """Payload emitted when a job is cancelled."""
+
+    stage: str
+    message: str = "Analysis cancelled by user request."
+
+
+class JobCancelledError(Exception):
+    """Raised when a job is cancelled by user request during pipeline execution."""
+
+    def __init__(
+        self,
+        job_id: str,
+        stage: str,
+        message: str = "Analysis cancelled by user request.",
+    ) -> None:
+        super().__init__(message)
+        self.job_id = job_id
+        self.stage = stage
+        self.message = message
+
+
 class QueueMessage(BaseModel):
     """Incoming queue message envelope."""
 
@@ -376,6 +401,7 @@ __all__ = [
     "ArtifactRef",
     "AssetInput",
     "AudioAssetInput",
+    "CancelledPayload",
     "EraseAIDataPayload",
     "ErasureCompleted",
     "ErrorCode",
@@ -386,6 +412,7 @@ __all__ = [
     "FindingKind",
     "FollowUpQuestion",
     "GenerateReportPayload",
+    "JobCancelledError",
     "JobType",
     "Limitation",
     "MemberFeedback",

@@ -180,6 +180,7 @@ async def test_analyze_answer_skipped_produces_no_invented_evidence() -> None:
         question_id="01JTEST0000000000000000011",
         answer_id="01JTEST0000000000000000099",
         answered_by="01JTEST0000000000000000013",
+        practice_session_id="01JTEST0000000000000000009",
         audio=AudioAssetInput(
             artifact_id="01JTEST0000000000000000014",
             object_key="audio/answer.wav",
@@ -199,7 +200,7 @@ async def test_analyze_answer_skipped_produces_no_invented_evidence() -> None:
 
     # Verify assessment artifact uploaded to object storage has no invented evidence
     assessment_data = await pipeline.object_storage.read_json(
-        f"ai/answer/{payload.answer_id}/assessment.json"
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
     )
     assert assessment_data["assessment"]["evidence_ids"] == []
     assert assessment_data["assessment"]["text"] == ""
@@ -655,6 +656,7 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
         question_id="01JTEST0000000000000000011",
         answer_id="01JTEST0000000000000000098",
         answered_by="01JTEST0000000000000000013",
+        practice_session_id="01JTEST0000000000000000009",
         audio=None,
         remaining_follow_ups=1,
     )
@@ -666,7 +668,7 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
 
     # Verify DerivedArtifact fields in stored artifacts
     transcript_data = await fake_pipeline.object_storage.read_json(
-        f"ai/answer/{payload.answer_id}/transcript.json"
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/transcript.json"
     )
     assert transcript_data["kind"] == "transcript"
     assert transcript_data["producer_version"] == "ai-ml/0.1.0"
@@ -674,7 +676,7 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
     assert transcript_data["created_at"] != "2026-09-02T12:00:00Z"
 
     assessment_data = await fake_pipeline.object_storage.read_json(
-        f"ai/answer/{payload.answer_id}/assessment.json"
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
     )
     assert assessment_data["kind"] == "answer_assessment"
     assert assessment_data["producer_version"] == "ai-ml/0.1.0"
@@ -690,6 +692,7 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
         question_id="01JTEST0000000000000000011",
         answer_id="01JTEST0000000000000000077",
         answered_by="01JTEST0000000000000000013",
+        practice_session_id="01JTEST0000000000000000009",
         audio=AudioAssetInput(
             artifact_id="01JTESTAUDIO00000000000001",
             object_key="audio/answer.wav",
@@ -702,7 +705,7 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
     result = await fake_pipeline.analyze_answer(payload)
 
     transcript_data = await fake_pipeline.object_storage.read_json(
-        f"ai/answer/{payload.answer_id}/transcript.json"
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/transcript.json"
     )
     assert transcript_data["kind"] == "transcript"
     assert transcript_data["producer_version"] == "ai-ml/0.1.0"
@@ -710,7 +713,7 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
     assert transcript_data["created_at"] != "2026-09-02T12:00:00Z"
 
     assessment_data = await fake_pipeline.object_storage.read_json(
-        f"ai/answer/{payload.answer_id}/assessment.json"
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
     )
     assert assessment_data["kind"] == "answer_assessment"
     assert assessment_data["producer_version"] == "ai-ml/0.1.0"
@@ -804,5 +807,4 @@ async def test_analyze_session_embeds_by_speaker_in_analysis_artifact(
     assert spk1["intervals"][0]["formatted"] == "00:09 - 00:14"
     assert spk1["intervals"][0]["start_ms"] == 9300
     assert spk1["intervals"][0]["end_ms"] == 14000
-
 

@@ -55,6 +55,21 @@ class ObjectStorageProtocol(Protocol):
         """Delete an object from storage."""
         ...
 
+    async def delete_prefix(
+        self, prefix: str, exclude_suffixes: list[str] | None = None
+    ) -> int:
+        """Delete all objects matching prefix except those ending with any exclude_suffixes.
+
+        Return count of deleted objects.
+        """
+        ...
+
+
+    async def list_objects(self, prefix: str) -> list[str]:
+        """List all object keys matching the given prefix."""
+        ...
+
+
 
 class S3StorageConfig(BaseModel):
     """Configuration bundle for S3-compatible object storage (Cloudflare R2, AWS S3, MinIO)."""

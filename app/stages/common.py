@@ -1,11 +1,22 @@
 """Shared utilities and validators for VirtuJudge AI-ML pipeline stages."""
 
+import asyncio
+import logging
+import random
+from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from app.contracts import Limitation
 from app.providers.types import AudioObservation, VisualObservation
 
+logger = logging.getLogger(__name__)
+
 T = TypeVar("T", VisualObservation, AudioObservation)
+R = TypeVar("R")
+
+
+class StageTransientError(Exception):
+    """Raised when an external provider or I/O operation experiences a transient failure."""
 
 
 def validate_observation_timestamps(
@@ -88,4 +99,53 @@ def validate_observation_timestamps(
     return valid, limitations
 
 
-__all__ = ["validate_observation_timestamps"]
+async def with_transient_retries(
+    operation: Callable[[], Coroutine[Any, Any, R]],
+    *,
+    stage_name: str,
+    max_attempts: int = 3,
+    base_delay: float = 0.5,
+    retryable_exceptions: tuple[type[BaseException], ...] = (
+        StageTransientError,
+        TimeoutError,
+        ConnectionError,
+    ),
+) -> R:
+    """Execute an async operation with exponential backoff and jitter on retryable exceptions.
+
+    Performs up to max_attempts attempts. On catch of retryable_exceptions:
+    if attempt < max_attempts, sleeps (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.1)
+    and retries. If attempt == max_attempts, re-raises the exception.
+    Non-retryable exceptions are raised immediately without delay.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await operation()
+        except retryable_exceptions as exc:
+            if attempt >= max_attempts:
+                logger.warning(
+                    "Stage '%s' exhausted all %d retry attempts (%s)",
+                    stage_name,
+                    max_attempts,
+                    type(exc).__name__,
+                )
+                raise
+            delay = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.1)
+            logger.info(
+                "Stage '%s' transient error on attempt %d/%d (%s); retrying in %.2fs",
+                stage_name,
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
+
+
+__all__ = [
+    "StageTransientError",
+    "validate_observation_timestamps",
+    "with_transient_retries",
+]
