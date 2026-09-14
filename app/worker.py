@@ -1,6 +1,8 @@
 """Worker dispatcher for VirtuJudge AI-ML pipeline jobs."""
 
+import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -9,10 +11,12 @@ from app.backend_client import BackendClientProtocol
 from app.contracts import (
     AnalyzeAnswerPayload,
     AnalyzeSessionPayload,
+    CancelledPayload,
     EraseAIDataPayload,
     ErrorCode,
     FailedPayload,
     GenerateReportPayload,
+    JobCancelledError,
     JobType,
     QueueMessage,
     StartedPayload,
@@ -20,6 +24,7 @@ from app.contracts import (
     WorkerUpdate,
 )
 from app.pipeline import PitchAnalysisPipeline
+from app.stages.common import StageTransientError
 
 
 def _map_validation_error(exc: ValidationError) -> tuple[ErrorCode, str]:
@@ -84,16 +89,35 @@ async def process_job(
             if "practice_session_id" not in payload_dict and message.practice_session_id:
                 payload_dict["practice_session_id"] = message.practice_session_id
             session_payload = AnalyzeSessionPayload.model_validate(payload_dict)
-            result = await pipeline.analyze_session(session_payload)
+            result = await pipeline.analyze_session(
+                session_payload,
+                job_id=message.job_id,
+                backend_client=backend_client,
+                attempt=message.analysis_attempt,
+            )
         elif message.job_type == JobType.ANALYZE_ANSWER:
             answer_payload = AnalyzeAnswerPayload.model_validate(message.payload)
-            result = await pipeline.analyze_answer(answer_payload)
+            result = await pipeline.analyze_answer(
+                answer_payload,
+                job_id=message.job_id,
+                backend_client=backend_client,
+                attempt=message.analysis_attempt,
+            )
         elif message.job_type == JobType.GENERATE_REPORT:
             report_payload = GenerateReportPayload.model_validate(message.payload)
-            result = await pipeline.generate_report(report_payload)
+            result = await pipeline.generate_report(
+                report_payload,
+                job_id=message.job_id,
+                backend_client=backend_client,
+                attempt=message.analysis_attempt,
+            )
         elif message.job_type == JobType.ERASE_AI_DATA:
             erase_payload = EraseAIDataPayload.model_validate(message.payload)
-            result = await pipeline.erase_data(erase_payload)
+            result = await pipeline.erase_data(
+                erase_payload,
+                job_id=message.job_id,
+                backend_client=backend_client,
+            )
         else:
             terminal_update = WorkerUpdate(
                 schema_version=1,
@@ -121,6 +145,22 @@ async def process_job(
             trace_id=message.trace_id,
             payload=result,
         )
+    except JobCancelledError as exc:
+        if message.practice_session_id:
+            temp_dir = Path(".storage/temp_media") / message.practice_session_id
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        terminal_update = WorkerUpdate(
+            schema_version=1,
+            sequence=2,
+            status=UpdateStatus.CANCELLED,
+            occurred_at=datetime.now(UTC),
+            trace_id=message.trace_id,
+            payload=CancelledPayload(
+                stage=exc.stage,
+                message=exc.message,
+            ),
+        )
     except ValidationError as exc:
         code, safe_message = _map_validation_error(exc)
         terminal_update = WorkerUpdate(
@@ -135,6 +175,21 @@ async def process_job(
                 retryable=False,
                 attempts=message.analysis_attempt,
                 message=safe_message,
+            ),
+        )
+    except StageTransientError as exc:
+        terminal_update = WorkerUpdate(
+            schema_version=1,
+            sequence=2,
+            status=UpdateStatus.FAILED,
+            occurred_at=datetime.now(UTC),
+            trace_id=message.trace_id,
+            payload=FailedPayload(
+                stage=getattr(exc, "stage", "speech"),
+                code=ErrorCode.PROVIDER_ERROR,
+                retryable=True,
+                attempts=message.analysis_attempt,
+                message="A transient external provider error occurred.",
             ),
         )
     except Exception:
