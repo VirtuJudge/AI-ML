@@ -345,6 +345,28 @@ class FailedPayload(BaseModel):
     message: str
 
 
+class CancelledPayload(BaseModel):
+    """Payload emitted when a job is cancelled."""
+
+    stage: str
+    message: str = "Analysis cancelled by user request."
+
+
+class JobCancelledError(Exception):
+    """Raised when a job is cancelled by user request during pipeline execution."""
+
+    def __init__(
+        self,
+        job_id: str,
+        stage: str,
+        message: str = "Analysis cancelled by user request.",
+    ) -> None:
+        super().__init__(message)
+        self.job_id = job_id
+        self.stage = stage
+        self.message = message
+
+
 class QueueMessage(BaseModel):
     """Incoming queue message envelope."""
 
@@ -376,6 +398,7 @@ __all__ = [
     "ArtifactRef",
     "AssetInput",
     "AudioAssetInput",
+    "CancelledPayload",
     "EraseAIDataPayload",
     "ErasureCompleted",
     "ErrorCode",
@@ -386,6 +409,7 @@ __all__ = [
     "FindingKind",
     "FollowUpQuestion",
     "GenerateReportPayload",
+    "JobCancelledError",
     "JobType",
     "Limitation",
     "MemberFeedback",
@@ -405,3 +429,4 @@ __all__ = [
     "UpdateStatus",
     "WorkerUpdate",
 ]
+

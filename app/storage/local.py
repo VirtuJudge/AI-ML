@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -90,12 +91,68 @@ class LocalDiskObjectStorage:
         path = self._resolve_path(object_key)
         if not path.is_file():
             raise ObjectNotFoundError(f"Local object '{object_key}' not found at {path}.")
-        return json.loads(path.read_text(encoding="utf-8"))
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return data
 
     async def delete_object(self, object_key: str) -> None:
         path = self._resolve_path(object_key)
         if path.is_file():
             path.unlink()
+
+    async def delete_prefix(
+        self, prefix: str, exclude_suffixes: list[str] | None = None
+    ) -> int:
+        """Delete all objects matching prefix except those ending with any exclude_suffixes.
+
+        Cleans up empty directories and returns count of deleted objects.
+        """
+
+        keys = await self.list_objects(prefix)
+        suffixes = exclude_suffixes or []
+        to_delete = [
+            k for k in keys if not any(k.endswith(suffix) for suffix in suffixes)
+        ]
+
+        deleted_count = 0
+        for key in to_delete:
+            path = self._resolve_path(key)
+            if path.is_file():
+                path.unlink()
+                deleted_count += 1
+
+        # Clean up empty directories bottom-up, stopping before base_dir
+        if self.base_dir.exists():
+            for dirpath, _, _ in os.walk(self.base_dir, topdown=False):
+                d = Path(dirpath)
+                if d == self.base_dir:
+                    continue
+                try:
+                    if not any(d.iterdir()):
+                        d.rmdir()
+                except OSError:
+                    pass
+
+        return deleted_count
+
+    async def list_objects(self, prefix: str) -> list[str]:
+        """List all object keys matching the given prefix."""
+        clean_prefix = prefix.lstrip("/\\")
+        resolved = (self.base_dir / clean_prefix).resolve()
+        if not resolved.is_relative_to(self.base_dir.resolve()):
+            raise ValueError(f"Path traversal detected in prefix: '{prefix}'.")
+
+        if not self.base_dir.exists():
+            return []
+
+        matched: list[str] = []
+        for path in self.base_dir.rglob("*"):
+            if path.is_file():
+                key = path.relative_to(self.base_dir).as_posix()
+                if key.startswith(clean_prefix):
+                    matched.append(key)
+
+        return sorted(matched)
+
 
 
 __all__ = ["LocalDiskObjectStorage"]

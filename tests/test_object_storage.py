@@ -178,3 +178,153 @@ def test_s3_storage_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.region_name == "auto"
 
 
+@pytest.mark.asyncio
+async def test_local_disk_storage_list_and_delete_prefix(tmp_path: Path) -> None:
+    """Verify list_objects and delete_prefix with exclusion filter on LocalDiskObjectStorage."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "storage_root")
+
+    # Create test objects under ai/session/01JTEST/
+    await storage.upload_json("ai/session/01JTEST/analysis.json", {"type": "analysis"})
+    await storage.upload_json("ai/session/01JTEST/checkpoints/speech_abc.json", {"type": "ckpt"})
+    await storage.upload_json("ai/session/01JTEST/evaluation.json", {"type": "eval"})
+    await storage.upload_json("ai/session/01JTEST/report.md", {"type": "report"})
+    await storage.upload_json("ai/session/OTHER_SESSION/analysis.json", {"type": "other"})
+
+    # Test list_objects
+    keys = await storage.list_objects("ai/session/01JTEST")
+    assert len(keys) == 4
+    assert "ai/session/01JTEST/analysis.json" in keys
+    assert "ai/session/01JTEST/evaluation.json" in keys
+    assert "ai/session/01JTEST/report.md" in keys
+
+    # Delete with exclude_suffixes
+    deleted_count = await storage.delete_prefix(
+        "ai/session/01JTEST",
+        exclude_suffixes=["report.md", "evaluation.json"],
+    )
+    assert deleted_count == 2
+
+    # Verify preserved
+    remaining = await storage.list_objects("ai/session/01JTEST")
+    assert remaining == [
+        "ai/session/01JTEST/evaluation.json",
+        "ai/session/01JTEST/report.md",
+    ]
+    # Verify other session untouched
+    other = await storage.list_objects("ai/session/OTHER_SESSION")
+    assert other == ["ai/session/OTHER_SESSION/analysis.json"]
+
+    # Delete without exclude_suffixes deletes everything under prefix
+    del_all = await storage.delete_prefix("ai/session/01JTEST")
+    assert del_all == 2
+    assert await storage.list_objects("ai/session/01JTEST") == []
+
+
+@pytest.mark.asyncio
+async def test_s3_storage_list_and_delete_prefix() -> None:
+    """Verify list_objects and delete_prefix with exclusion on S3ObjectStorage."""
+    mock_boto_client = MagicMock()
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = [
+        {
+            "Contents": [
+                {"Key": "ai/session/01J/analysis.json"},
+                {"Key": "ai/session/01J/evaluation.json"},
+                {"Key": "ai/session/01J/report.md"},
+            ]
+        }
+    ]
+    mock_boto_client.get_paginator.return_value = mock_paginator
+
+    mock_boto_client.delete_objects.return_value = {
+        "Deleted": [{"Key": "ai/session/01J/analysis.json"}]
+    }
+
+    storage = S3ObjectStorage(
+        endpoint_url="https://mock.r2.cloudflarestorage.com",
+        bucket="test-bucket",
+        access_key="mock-key",
+        secret_key="mock-secret",
+        client=mock_boto_client,
+    )
+
+    keys = await storage.list_objects("ai/session/01J")
+    assert len(keys) == 3
+
+    deleted = await storage.delete_prefix(
+        "ai/session/01J",
+        exclude_suffixes=["report.md", "evaluation.json"],
+    )
+    assert deleted == 1
+    mock_boto_client.delete_objects.assert_called_once_with(
+        Bucket="test-bucket",
+        Delete={"Objects": [{"Key": "ai/session/01J/analysis.json"}], "Quiet": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_disk_storage_directory_cleanup(tmp_path: Path) -> None:
+    """Verify delete_prefix cleans up empty directories and preserves base_dir."""
+    storage_root = tmp_path / "cleanup_test"
+    storage = LocalDiskObjectStorage(base_dir=storage_root)
+
+    await storage.upload_json("sess1/nested/deep/temp.json", {"k": "v"})
+    await storage.upload_json("sess1/report.md", {"k": "v"})
+
+    deep_dir = storage_root / "sess1" / "nested" / "deep"
+    assert deep_dir.is_dir()
+
+    # Delete with exclude_suffixes leaving report.md
+    deleted = await storage.delete_prefix("sess1", exclude_suffixes=["report.md"])
+    assert deleted == 1
+    assert not deep_dir.exists()
+    assert not (storage_root / "sess1" / "nested").exists()
+    assert (storage_root / "sess1").is_dir()
+    assert (storage_root / "sess1" / "report.md").is_file()
+
+    # Now delete report.md too
+    deleted_all = await storage.delete_prefix("sess1")
+    assert deleted_all == 1
+    assert not (storage_root / "sess1").exists()
+    assert storage_root.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_local_disk_storage_path_traversal_prefix(tmp_path: Path) -> None:
+    """Verify list_objects rejects path traversal in prefix."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "storage")
+    with pytest.raises(ValueError, match="Path traversal detected"):
+        await storage.list_objects("../../escape")
+
+
+@pytest.mark.asyncio
+async def test_local_disk_storage_delete_prefix_nonexistent(tmp_path: Path) -> None:
+    """Verify delete_prefix on nonexistent prefix returns 0 without error."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "storage")
+    deleted = await storage.delete_prefix("nonexistent/prefix")
+    assert deleted == 0
+
+
+@pytest.mark.asyncio
+async def test_s3_storage_delete_prefix_chunking() -> None:
+    """Verify delete_prefix batches requests exceeding 1000 items in S3ObjectStorage."""
+    mock_boto_client = MagicMock()
+    mock_paginator = MagicMock()
+    keys = [{"Key": f"logs/item_{i:04d}.log"} for i in range(1500)]
+    mock_paginator.paginate.return_value = [{"Contents": keys}]
+    mock_boto_client.get_paginator.return_value = mock_paginator
+
+    storage = S3ObjectStorage(
+        endpoint_url="https://mock.r2.cloudflarestorage.com",
+        bucket="test-bucket",
+        access_key="mock-key",
+        secret_key="mock-secret",
+        client=mock_boto_client,
+    )
+
+    deleted = await storage.delete_prefix("logs/")
+    assert deleted == 1500
+    assert mock_boto_client.delete_objects.call_count == 2
+
+
+
