@@ -143,6 +143,7 @@ class AnalyzeAnswerPayload(BaseModel):
     answered_by: str
     audio: AudioAssetInput | None = None
     remaining_follow_ups: int
+    practice_session_id: str | None = None
 
     @field_validator("audio", mode="before")
     @classmethod
@@ -177,6 +178,8 @@ class EraseAIDataPayload(BaseModel):
     erasure_request_id: str
     scope: Literal["asset", "practice_session", "project", "team"]
     scope_id: str
+    practice_session_ids: list[str] = Field(default_factory=list)
+    answer_ids: list[str] = Field(default_factory=list)
 
 
 class SessionAnalysisCompleted(BaseModel):
@@ -429,4 +432,3 @@ __all__ = [
     "UpdateStatus",
     "WorkerUpdate",
 ]
-

@@ -96,7 +96,10 @@ async def process_job(
                 attempt=message.analysis_attempt,
             )
         elif message.job_type == JobType.ANALYZE_ANSWER:
-            answer_payload = AnalyzeAnswerPayload.model_validate(message.payload)
+            payload_dict = dict(message.payload)
+            if "practice_session_id" not in payload_dict and message.practice_session_id:
+                payload_dict["practice_session_id"] = message.practice_session_id
+            answer_payload = AnalyzeAnswerPayload.model_validate(payload_dict)
             result = await pipeline.analyze_answer(
                 answer_payload,
                 job_id=message.job_id,
@@ -148,6 +151,17 @@ async def process_job(
     except JobCancelledError as exc:
         if message.practice_session_id:
             temp_dir = Path(".storage/temp_media") / message.practice_session_id
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        asset_ids: list[str] = []
+        presentation = message.payload.get("presentation", {})
+        audio = message.payload.get("audio", {})
+        if isinstance(presentation, dict) and presentation.get("artifact_id"):
+            asset_ids.append(str(presentation["artifact_id"]))
+        if isinstance(audio, dict) and audio.get("artifact_id"):
+            asset_ids.append(str(audio["artifact_id"]))
+        for asset_id in asset_ids:
+            temp_dir = Path(".storage/temp_media") / asset_id
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
         terminal_update = WorkerUpdate(
@@ -215,4 +229,3 @@ async def process_job(
 
 
 __all__ = ["create_started_update", "process_job"]
-

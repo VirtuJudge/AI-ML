@@ -124,21 +124,19 @@ async def with_transient_retries(
         except retryable_exceptions as exc:
             if attempt >= max_attempts:
                 logger.warning(
-                    "Stage '%s' exhausted all %d retry attempts; re-raising %s: %s",
+                    "Stage '%s' exhausted all %d retry attempts (%s)",
                     stage_name,
                     max_attempts,
                     type(exc).__name__,
-                    exc,
                 )
                 raise
             delay = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.1)
             logger.info(
-                "Stage '%s' transient error on attempt %d/%d (%s: %s); retrying in %.2fs",
+                "Stage '%s' transient error on attempt %d/%d (%s); retrying in %.2fs",
                 stage_name,
                 attempt,
                 max_attempts,
                 type(exc).__name__,
-                exc,
                 delay,
             )
             await asyncio.sleep(delay)

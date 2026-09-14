@@ -46,6 +46,7 @@ from app.stages.answer_assessment import run_answer_assessment_stage
 from app.stages.answers import run_answer_speech_stage
 from app.stages.audio import AudioStageResult, run_audio_stage
 from app.stages.checkpoint import get_stage_checkpoint, save_stage_checkpoint
+from app.stages.common import with_transient_retries
 from app.stages.documents import run_document_stage
 from app.stages.media import split_media
 from app.stages.questions import run_question_stage
@@ -393,13 +394,10 @@ class FakePipeline:
         async def _run_speech() -> SpeechStageResult:
             if speech_cached is not None:
                 return SpeechStageResult.model_validate(speech_cached)
-            res = await run_speech_stage(
-                target_audio,
-                self.speech_provider,
-                self.diarization_provider,
-                media_duration_ms=duration_ms,
-                skip_normalization=True,
-                strict_timestamps=False,
+            res = await with_transient_retries(
+                lambda: run_speech_stage(target_audio, self.speech_provider, self.diarization_provider,
+                    media_duration_ms=duration_ms, skip_normalization=True, strict_timestamps=False),
+                stage_name="speech",
             )
             await save_stage_checkpoint(
                 self.object_storage, session_id, "speech", job.presentation.checksum, res
@@ -409,12 +407,10 @@ class FakePipeline:
         async def _run_vision() -> VisionStageResult:
             if vision_cached is not None:
                 return VisionStageResult.model_validate(vision_cached)
-            res = await run_vision_stage(
-                video_path,
-                self.vision_provider,
-                media_duration_ms=duration_ms,
-                source_artifact_id=job.presentation.artifact_id,
-                skip_file_check=skip_file_check,
+            res = await with_transient_retries(
+                lambda: run_vision_stage(video_path, self.vision_provider, media_duration_ms=duration_ms,
+                    source_artifact_id=job.presentation.artifact_id, skip_file_check=skip_file_check),
+                stage_name="vision",
             )
             await save_stage_checkpoint(
                 self.object_storage, session_id, "vision", job.presentation.checksum, res
@@ -424,12 +420,10 @@ class FakePipeline:
         async def _run_audio() -> AudioStageResult:
             if audio_cached is not None:
                 return AudioStageResult.model_validate(audio_cached)
-            res = await run_audio_stage(
-                audio_path,
-                self.audio_provider,
-                media_duration_ms=duration_ms,
-                source_artifact_id=job.presentation.artifact_id,
-                skip_file_check=skip_file_check,
+            res = await with_transient_retries(
+                lambda: run_audio_stage(audio_path, self.audio_provider, media_duration_ms=duration_ms,
+                    source_artifact_id=job.presentation.artifact_id, skip_file_check=skip_file_check),
+                stage_name="audio",
             )
             await save_stage_checkpoint(
                 self.object_storage, session_id, "audio", job.presentation.checksum, res
@@ -628,16 +622,20 @@ class FakePipeline:
 
             duration_ms = audio_asset.duration_ms or 15000
 
-            speech_res = await run_answer_speech_stage(
-                input_file,
-                self.speech_provider,
-                media_duration_ms=duration_ms,
-                skip_normalization=skip_file_check,
-                strict_timestamps=False,
+            speech_res = await with_transient_retries(
+                lambda: run_answer_speech_stage(input_file, self.speech_provider,
+                    media_duration_ms=duration_ms, skip_normalization=skip_file_check,
+                    strict_timestamps=False),
+                stage_name="speech",
             )
 
-        artifact_key = f"ai/answer/{job.answer_id}/transcript.json"
-        assessment_artifact_key = f"ai/answer/{job.answer_id}/assessment.json"
+        answer_prefix = (
+            f"ai/session/{job.practice_session_id}/answers/{job.answer_id}"
+            if job.practice_session_id
+            else f"ai/answer/{job.answer_id}"
+        )
+        artifact_key = f"{answer_prefix}/transcript.json"
+        assessment_artifact_key = f"{answer_prefix}/assessment.json"
 
         now_utc = datetime.now(UTC)
         created_at = now_utc.isoformat()
@@ -654,6 +652,7 @@ class FakePipeline:
         artifact_payload = {
             "artifact_id": transcript_artifact_id,
             "answer_id": job.answer_id,
+            "practice_session_id": job.practice_session_id,
             "kind": "transcript",
             "schema_version": 1,
             "producer_version": PRODUCER_VERSION,
@@ -681,17 +680,21 @@ class FakePipeline:
         )
         rubric_dimension = "market_and_business_model"
 
-        assessment_res = await run_answer_assessment_stage(
-            answer_transcript=speech_res.transcript.full_text,
-            question_text=question_text,
-            rubric_dimension=rubric_dimension,
-            judge_provider=self.judge_provider,
-            remaining_follow_ups=job.remaining_follow_ups,
+        assessment_res = await with_transient_retries(
+            lambda: run_answer_assessment_stage(
+                answer_transcript=speech_res.transcript.full_text,
+                question_text=question_text,
+                rubric_dimension=rubric_dimension,
+                judge_provider=self.judge_provider,
+                remaining_follow_ups=job.remaining_follow_ups,
+            ),
+            stage_name="assessment",
         )
 
         assessment_payload = {
             "artifact_id": assessment_artifact_id,
             "answer_id": job.answer_id,
+            "practice_session_id": job.practice_session_id,
             "question_id": job.question_id,
             "kind": "answer_assessment",
             "schema_version": 1,
@@ -818,6 +821,10 @@ class FakePipeline:
             exclude = ["report.md", "evaluation.json"]
             objs = await self.object_storage.delete_prefix(prefix, exclude_suffixes=exclude)
             deleted_objects += objs
+            for answer_id in job.answer_ids:
+                deleted_objects += await self.object_storage.delete_prefix(
+                    f"ai/answer/{answer_id}/", exclude_suffixes=None
+                )
 
             # Also clean scratch temp media directory
             temp_media_dir = Path(".storage/temp_media") / job.scope_id
@@ -832,14 +839,22 @@ class FakePipeline:
                     deleted_objects = 6
 
         elif job.scope in ("project", "team"):
-            # Full purge: remove all objects including evaluation.json and report.md
-            prefix = f"ai/session/{job.scope_id}/"
-            objs = await self.object_storage.delete_prefix(prefix, exclude_suffixes=None)
-            deleted_objects += objs
+            if job.practice_session_ids:
+                for session_id in job.practice_session_ids:
+                    deleted_objects += await self.object_storage.delete_prefix(
+                        f"ai/session/{session_id}/", exclude_suffixes=None
+                    )
+                    if self.document_store is not None:
+                        deleted_records += await self.document_store.delete_by_session(session_id)
+            else:
+                # Full purge: remove all objects including evaluation.json and report.md
+                prefix = f"ai/session/{job.scope_id}/"
+                objs = await self.object_storage.delete_prefix(prefix, exclude_suffixes=None)
+                deleted_objects += objs
 
-            if self.document_store is not None:
-                deleted_docs = await self.document_store.delete_by_session(job.scope_id)
-                deleted_records += deleted_docs
+                if self.document_store is not None:
+                    deleted_docs = await self.document_store.delete_by_session(job.scope_id)
+                    deleted_records += deleted_docs
 
             if self._is_synthetic_speech_run():
                 deleted_records += 14
