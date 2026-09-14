@@ -1,5 +1,17 @@
 """Stages package for VirtuJudge AI-ML pipeline."""
 
+from app.stages.aggregation import (
+    SpeakerIntervalResult,
+    aggregate_by_speaker,
+    aggregate_speaker_observations,
+    clean_diarization_turns,
+    extract_speaker_intervals,
+    filter_active_speaker_observations,
+    format_duration_ms,
+    format_interval,
+    format_speaker_summary_for_prompt,
+    format_timestamp_ms,
+)
 from app.stages.answer_assessment import (
     AnswerAssessmentResult,
     run_answer_assessment_stage,
@@ -40,6 +52,30 @@ from app.stages.questions import (
     QuestionStageResult,
     run_question_stage,
 )
+from app.stages.report_loader import (
+    ReportEvidenceBundle,
+    build_synthetic_analysis_data,
+    build_synthetic_qa_data,
+    load_report_evidence,
+)
+from app.stages.report_markdown import (
+    format_speaker_metrics_highlight,
+    generate_markdown_report,
+)
+from app.stages.reporting import (
+    ReportStageResult,
+    run_report_stage,
+)
+from app.stages.scoring import (
+    STARTUP_PITCH_RUBRIC_V1,
+    calculate_individual_delivery_scores,
+    calculate_overall_score,
+    calculate_qa_score,
+    evaluate_rubric,
+    normalize_effective_weights,
+    score_to_display,
+    score_to_label,
+)
 from app.stages.speech import (
     SpeechStageResult,
     run_speech_stage,
@@ -67,11 +103,36 @@ __all__ = [
     "MediaNormalizationResult",
     "MediaSplitResult",
     "QuestionStageResult",
+    "ReportEvidenceBundle",
+    "ReportStageResult",
+    "STARTUP_PITCH_RUBRIC_V1",
+    "SpeakerIntervalResult",
     "SpeechStageResult",
     "VisionStageResult",
+    "aggregate_by_speaker",
+    "aggregate_speaker_observations",
     "build_evidence_bundle",
+    "build_synthetic_analysis_data",
+    "build_synthetic_qa_data",
+    "calculate_individual_delivery_scores",
+    "calculate_overall_score",
+    "calculate_qa_score",
     "check_coverage_limitations",
+    "clean_diarization_turns",
     "create_normalization_limitation",
+    "evaluate_rubric",
+    "extract_speaker_intervals",
+    "filter_active_speaker_observations",
+    "format_duration_ms",
+    "format_interval",
+    "format_speaker_metrics_highlight",
+    "format_speaker_summary_for_prompt",
+    "format_timestamp_ms",
+    "generate_markdown_report",
+    "load_report_evidence",
+    "normalize_effective_weights",
+    "score_to_display",
+    "score_to_label",
     "get_wav_metadata",
     "normalize_media",
     "run_answer_assessment_stage",
@@ -79,6 +140,7 @@ __all__ = [
     "run_audio_stage",
     "run_document_stage",
     "run_question_stage",
+    "run_report_stage",
     "run_speech_stage",
     "run_vision_stage",
     "split_media",

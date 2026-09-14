@@ -1,6 +1,11 @@
 """Worker dispatcher for VirtuJudge AI-ML pipeline jobs."""
 
-from datetime import UTC, datetime
+try:
+    from datetime import UTC, datetime
+except ImportError:
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
 from typing import Any
 
 from pydantic import ValidationError

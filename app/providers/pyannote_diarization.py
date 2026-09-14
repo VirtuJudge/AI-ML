@@ -15,9 +15,9 @@ from app.providers.types import DiarizationResult, SpeakerSegment
 
 
 class PyannoteDiarizationProvider:
-    """Speaker diarization adapter powered by pyannote.audio Community-1 / 3.1."""
+    """Speaker diarization adapter powered by pyannote.audio 3.1."""
 
-    DEFAULT_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote-community-1")
+    DEFAULT_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 
     def __init__(
         self,
@@ -72,8 +72,8 @@ class PyannoteDiarizationProvider:
                 ) from err
 
             hf_model = (
-                "pyannote/speaker-diarization-community-1"
-                if self.model_name == "pyannote-community-1"
+                "pyannote/speaker-diarization-3.1"
+                if self.model_name in ("pyannote-community-1", "community-1", "pyannote/speaker-diarization-community-1")
                 else self.model_name
             )
 

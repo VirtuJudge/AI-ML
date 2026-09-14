@@ -2,7 +2,13 @@
 
 import re
 from datetime import datetime
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -93,7 +99,7 @@ class SpeakerMapping(BaseModel):
 
     speaker_label: str
     user_id: str
-    display_name: str
+    display_name: str | None = None
 
 
 class PrimaryQuestion(BaseModel):
@@ -215,6 +221,95 @@ class ReportCompleted(BaseModel):
     limitations: list[Limitation] = Field(default_factory=list)
 
 
+ScoreStatus = Literal["scored", "not_evaluated"]
+ScoreLabel = Literal["needs_work", "developing", "good", "strong"]
+FindingKind = Literal[
+    "strength",
+    "improvement",
+    "alignment",
+    "contradiction",
+    "omission",
+    "observation",
+]
+
+
+class ScoreComponent(BaseModel):
+    """A scored or un-evaluated dimension component in the rubric."""
+
+    dimension: str
+    status: ScoreStatus
+    normalized_score: float | None = None
+    display_score: int | None = None
+    label: ScoreLabel | None = None
+    configured_weight: float
+    effective_weight: float | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    limitation_code: str | None = None
+
+
+class Finding(BaseModel):
+    """Concrete feedback observation or finding tied to evidence."""
+
+    id: str
+    kind: FindingKind
+    title: str
+    detail: str
+    recommendation: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    rubric_dimension: str | None = None
+    speaker_labels: list[str] = Field(default_factory=list)
+
+
+class SpeakingInterval(BaseModel):
+    """Exact presentation turn interval with millisecond timing and formatted timestamp."""
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    formatted: str
+
+
+class FeedbackSection(BaseModel):
+    """Feedback container for team or member assessments."""
+
+    summary: str
+    strengths: list[Finding] = Field(default_factory=list)
+    improvements: list[Finding] = Field(default_factory=list)
+    score_components: list[ScoreComponent] = Field(default_factory=list)
+    limitations: list[Limitation] = Field(default_factory=list)
+
+
+class MemberFeedback(BaseModel):
+    """Individual presenter feedback with exact presentation turn timestamps."""
+
+    user_id: str
+    display_name: str
+    speaker_labels: list[str] = Field(default_factory=list)
+    speaking_intervals: list[SpeakingInterval] = Field(default_factory=list)
+    speaking_time_ms: int = 0
+    summary: str
+    strengths: list[Finding] = Field(default_factory=list)
+    improvements: list[Finding] = Field(default_factory=list)
+    delivery_components: list[ScoreComponent] = Field(default_factory=list)
+
+
+class Evaluation(BaseModel):
+    """Structured evaluation artifact combining session analysis and Q&A rubric scoring."""
+
+    id: str
+    schema_version: int = 1
+    analysis_attempt_id: str
+    qa_round_id: str
+    rubric: RubricRef
+    overall_score: float | None = None
+    components: list[ScoreComponent] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
+    team_feedback: FeedbackSection
+    member_feedback: list[MemberFeedback] = Field(default_factory=list)
+    limitations: list[Limitation] = Field(default_factory=list)
+    reproducibility: dict[str, Any] = Field(default_factory=dict)
+
+
 class ErasureCompleted(BaseModel):
     """Completed payload for AI data erasure."""
 
@@ -290,19 +385,28 @@ __all__ = [
     "EraseAIDataPayload",
     "ErasureCompleted",
     "ErrorCode",
+    "Evaluation",
     "FailedPayload",
+    "FeedbackSection",
+    "Finding",
+    "FindingKind",
     "FollowUpQuestion",
     "GenerateReportPayload",
     "JobType",
     "Limitation",
+    "MemberFeedback",
     "PrimaryQuestion",
     "ProgressPayload",
     "QueueMessage",
     "ReportCompleted",
     "RubricRef",
     "SafeFailure",
+    "ScoreComponent",
+    "ScoreLabel",
+    "ScoreStatus",
     "SessionAnalysisCompleted",
     "SpeakerMapping",
+    "SpeakingInterval",
     "StartedPayload",
     "UpdateStatus",
     "WorkerUpdate",

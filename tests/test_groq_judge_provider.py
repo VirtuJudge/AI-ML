@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.contracts import PrimaryQuestion
-from app.providers.base import JudgeModelProvider
+from app.providers.base import JudgeModelProvider, ReportFeedbackResult
+from app.providers.fake_judge import FakeJudgeModelProvider
 from app.providers.groq_judge import GroqJudgeModelProvider
 from app.providers.groq_pool import GroqKeyPool, GroqPoolError
 from app.providers.types import DocumentChunk
@@ -321,6 +322,179 @@ def test_groq_judge_parse_assessment_empty_evidence_ids() -> None:
     assert res is not None
     assert res.evidence_ids == []
     assert res.follow_up is None
+
+
+def test_judge_provider_protocol_includes_report_feedback() -> None:
+    """Verify both Fake and Groq providers satisfy protocol with generate_report_feedback."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    groq_provider = GroqJudgeModelProvider(key_pool=mock_pool)
+    fake_provider = FakeJudgeModelProvider()
+
+    for p in (groq_provider, fake_provider):
+        judge_protocol: JudgeModelProvider = p
+        assert hasattr(judge_protocol, "generate_report_feedback")
+        assert callable(judge_protocol.generate_report_feedback)
+
+
+@pytest.mark.asyncio
+async def test_fake_judge_generate_report_feedback() -> None:
+    """Verify FakeJudgeModelProvider generates deterministic report feedback per speaker."""
+    fake_provider = FakeJudgeModelProvider()
+    speaker_profiles = {
+        "SPEAKER_00": {"speaking_time_ms": 120000, "intervals": []},
+        "SPEAKER_01": {"speaking_time_ms": 60000, "intervals": []},
+    }
+
+    res = await fake_provider.generate_report_feedback(
+        transcript_summary="Pitch summary text.",
+        qa_summary="Q&A summary text.",
+        speaker_profiles=speaker_profiles,
+        rubric_id="startup_pitch",
+    )
+
+    assert isinstance(res, ReportFeedbackResult)
+    assert len(res.executive_summary) > 20
+    assert "SPEAKER_00" in res.member_strengths
+    assert "SPEAKER_01" in res.member_strengths
+    assert "SPEAKER_00" in res.member_improvements
+    assert "SPEAKER_01" in res.member_improvements
+    assert len(res.team_strengths) >= 1
+    assert len(res.team_improvements) >= 1
+    assert len(res.recommendations) >= 1
+
+
+@pytest.mark.asyncio
+async def test_groq_judge_generate_report_feedback_happy_path() -> None:
+    """Verify GroqJudgeModelProvider parses valid LLM JSON into ReportFeedbackResult."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    mock_pool.chat.return_value = """{
+        "executive_summary": "The team presented a well-structured pitch with strong defensibility.",
+        "dimension_scores": {
+            "pitch_content_and_evidence": 0.88,
+            "business_and_problem_solution_reasoning": 0.82,
+            "technical_feasibility": 0.90
+        },
+        "dimension_rationales": {
+            "pitch_content_and_evidence": "Clear proof points cited."
+        },
+        "team_strengths": [
+            {
+                "id": "f_team_s1",
+                "kind": "strength",
+                "title": "Clear Market Need",
+                "detail": "Customer interviews validated $100M TAM.",
+                "evidence_ids": ["ev_speech_001"],
+                "rubric_dimension": "pitch_content_and_evidence"
+            }
+        ],
+        "team_improvements": [
+            {
+                "id": "f_team_i1",
+                "kind": "improvement",
+                "title": "Clarify Unit Economics",
+                "detail": "CAC was not broken down by acquisition channel.",
+                "recommendation": "Add CAC per channel to Slide 5.",
+                "evidence_ids": ["ev_speech_002"],
+                "rubric_dimension": "business_and_problem_solution_reasoning"
+            }
+        ],
+        "member_strengths": {
+            "SPEAKER_00": [
+                {
+                    "id": "f_spk0_s1",
+                    "kind": "strength",
+                    "title": "Pacing & Articulation",
+                    "detail": "Spoke at an even pace during opening remarks.",
+                    "evidence_ids": ["ev_speech_001"],
+                    "rubric_dimension": "delivery_and_body_language"
+                }
+            ]
+        },
+        "member_improvements": {
+            "SPEAKER_00": [
+                {
+                    "id": "f_spk0_i1",
+                    "kind": "improvement",
+                    "title": "Slide Transition Pauses",
+                    "detail": "Rushed between slides 2 and 3.",
+                    "recommendation": "Insert a 2-second pause before changing slides.",
+                    "evidence_ids": ["ev_speech_001"],
+                    "rubric_dimension": "timing_and_speech_mechanics"
+                }
+            ]
+        },
+        "recommendations": ["Rehearse slide transitions."]
+    }"""
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+    speaker_profiles = {"SPEAKER_00": {"speaking_time_ms": 90000, "intervals": []}}
+
+    res = await provider.generate_report_feedback(
+        transcript_summary="Pitch summary.",
+        qa_summary="Q&A summary.",
+        speaker_profiles=speaker_profiles,
+        rubric_id="startup_pitch",
+    )
+
+    assert isinstance(res, ReportFeedbackResult)
+    assert "well-structured pitch" in res.executive_summary
+    assert res.dimension_scores["pitch_content_and_evidence"] == 0.88
+    assert len(res.team_strengths) == 1
+    assert res.team_strengths[0].title == "Clear Market Need"
+    assert "SPEAKER_00" in res.member_strengths
+    assert res.member_strengths["SPEAKER_00"][0].title == "Pacing & Articulation"
+
+
+@pytest.mark.asyncio
+async def test_groq_judge_generate_report_feedback_banned_terms_triggers_fallback() -> None:
+    """Verify prohibited subjective terms in executive summary trigger safe fallback."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    # Output contains banned term "nervous" in executive summary
+    mock_pool.chat.return_value = """{
+        "executive_summary": "The speaker appeared nervous throughout the delivery.",
+        "team_strengths": [],
+        "team_improvements": []
+    }"""
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+    speaker_profiles = {"SPEAKER_00": {"speaking_time_ms": 90000, "intervals": []}}
+
+    res = await provider.generate_report_feedback(
+        transcript_summary="Pitch summary.",
+        qa_summary="Q&A summary.",
+        speaker_profiles=speaker_profiles,
+    )
+
+    # Should fall back to safe grounded feedback with NO banned terms
+    assert isinstance(res, ReportFeedbackResult)
+    assert "nervous" not in res.executive_summary.lower()
+    assert len(res.team_strengths) >= 1
+
+
+@pytest.mark.asyncio
+async def test_groq_judge_generate_report_feedback_failure_emits_grounded_fallback() -> None:
+    """Verify total provider failure returns deterministic grounded fallback."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    mock_pool.chat.side_effect = GroqPoolError("Connection reset")
+
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+    speaker_profiles = {
+        "SPEAKER_00": {"speaking_time_ms": 60000, "intervals": []},
+        "SPEAKER_01": {"speaking_time_ms": 45000, "intervals": []},
+    }
+
+    res = await provider.generate_report_feedback(
+        transcript_summary="Pitch summary.",
+        qa_summary="Q&A summary.",
+        speaker_profiles=speaker_profiles,
+    )
+
+    assert isinstance(res, ReportFeedbackResult)
+    assert "SPEAKER_00" in res.member_strengths
+    assert "SPEAKER_01" in res.member_strengths
+    assert "SPEAKER_00" in res.member_improvements
+    assert "SPEAKER_01" in res.member_improvements
+    assert len(res.team_strengths) >= 1
+    assert len(res.team_improvements) >= 1
+
 
 
 

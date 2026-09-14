@@ -11,7 +11,12 @@ import json
 import logging
 import os
 import signal
-from datetime import UTC, datetime
+try:
+    from datetime import UTC, datetime
+except ImportError:
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -81,6 +86,8 @@ class RedisQueueConsumer:
             self._redis = aioredis.from_url(
                 self._redis_url,
                 decode_responses=True,
+                health_check_interval=300,  # Ping every 5 minutes to keep socket warm
+                socket_keepalive=True,
             )
         return self._redis
 
@@ -178,8 +185,14 @@ class RedisQueueConsumer:
                 except Exception as err:
                     if self._stopping:
                         break
-                    logger.warning("Redis blpop error: %s. Retrying...", err)
-                    await asyncio.sleep(1)
+                    err_str = str(err)
+                    if "timeout reading" in err_str.lower():
+                        logger.debug("Redis idle socket timeout. Re-polling...")
+                        await asyncio.sleep(0.5)
+                        continue
+                    backoff = 10 if "allowlist" in err_str.lower() else 1
+                    logger.warning("Redis blpop error: %s. Retrying in %ds...", err, backoff)
+                    await asyncio.sleep(backoff)
                     continue
 
                 if item is None:

@@ -5,9 +5,9 @@ import logging
 import os
 from pathlib import Path
 
-from app.backend_client import BackendClient
-from app.document_store import FakeDocumentStore
+from app.document_store import FakeDocumentStore, create_document_store
 from app.pipeline import FakePipeline
+from app.storage import create_object_storage
 from app.providers.fake_audio import FakeAudioMetricsProvider
 from app.providers.fake_documents import FakeDocumentProvider
 from app.providers.fake_judge import FakeJudgeModelProvider
@@ -35,7 +35,7 @@ def _load_env() -> None:
                 os.environ.setdefault(key.strip(), val.strip())
 
 
-def build_pipeline() -> FakePipeline:
+async def build_pipeline() -> FakePipeline:
     """Compose PitchAnalysisPipeline using configured environment providers."""
     provider_mode = os.getenv("AI_PROVIDER_MODE", "fake").lower()
 
@@ -46,32 +46,51 @@ def build_pipeline() -> FakePipeline:
             from app.providers.pyannote_diarization import PyannoteDiarizationProvider
 
             diarization_provider = PyannoteDiarizationProvider()
-        except Exception:
+        except Exception as exc:
+            logger.warning("PyAnnote diarization failed in %s mode (%s). Falling back to FakeDiarizationProvider.", provider_mode, exc)
             diarization_provider = FakeDiarizationProvider()
 
         try:
             from app.providers.mediapipe_vision import MediaPipeVisionProvider
 
             vision_provider = MediaPipeVisionProvider()
-        except Exception:
+        except Exception as exc:
+            if provider_mode == "live":
+                logger.error("FATAL: Failed to initialize MediaPipe vision in live mode: %s", exc)
+                raise RuntimeError(f"MediaPipe vision failed in live mode: {exc}") from exc
+            logger.warning("MediaPipe vision fallback to fake: %s", exc)
             vision_provider = FakeVisionProvider()
 
         try:
             from app.providers.librosa_audio import LibrosaAudioProvider
 
             audio_provider = LibrosaAudioProvider()
-        except Exception:
+        except Exception as exc:
+            if provider_mode == "live":
+                logger.error("FATAL: Failed to initialize Librosa audio in live mode: %s", exc)
+                raise RuntimeError(f"Librosa audio failed in live mode: {exc}") from exc
+            logger.warning("Librosa audio fallback to fake: %s", exc)
             audio_provider = FakeAudioMetricsProvider()
 
         try:
             from app.providers.pymupdf_documents import PyMuPDFDocumentProvider
 
             doc_provider = PyMuPDFDocumentProvider()
-        except Exception:
+        except Exception as exc:
+            if provider_mode == "live":
+                logger.error("FATAL: Failed to initialize PyMuPDF in live mode: %s", exc)
+                raise RuntimeError(f"PyMuPDF document provider failed in live mode: {exc}") from exc
+            logger.warning("PyMuPDF fallback to fake: %s", exc)
             doc_provider = FakeDocumentProvider()
 
         judge_provider = GroqJudgeModelProvider()
-        doc_store = FakeDocumentStore()
+        try:
+            doc_store = await create_document_store()
+        except Exception as exc:
+            logger.warning("Failed to initialize live pgvector document store (%s). Falling back to FakeDocumentStore.", exc)
+            doc_store = FakeDocumentStore()
+
+        object_storage = create_object_storage()
     else:
         logger.info(
             "Initializing pipeline with stage providers (AI_PROVIDER_MODE=%s)...",
@@ -88,6 +107,7 @@ def build_pipeline() -> FakePipeline:
             else FakeJudgeModelProvider()
         )
         doc_store = FakeDocumentStore()
+        object_storage = create_object_storage()
 
     return FakePipeline(
         speech_provider=speech_provider,
@@ -97,13 +117,14 @@ def build_pipeline() -> FakePipeline:
         document_provider=doc_provider,
         judge_provider=judge_provider,
         document_store=doc_store,
+        object_storage=object_storage,
     )
 
 
 async def main() -> None:
     """Initialize pipeline, backend client, and start queue consumer."""
     _load_env()
-    pipeline = build_pipeline()
+    pipeline = await build_pipeline()
     backend_client = BackendClient()
     consumer = RedisQueueConsumer(
         pipeline=pipeline,

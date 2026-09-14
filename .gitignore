@@ -1,4 +1,5 @@
 AGENTS.md
+DEPLOYMENT.md
 
 # Python
 __pycache__/
@@ -11,6 +12,9 @@ __pycache__/
 htmlcov/
 build/
 dist/
+dist_space/
+hf_space/
+my_space/
 .venv/
 venv/
 

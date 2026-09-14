@@ -2,7 +2,12 @@ import asyncio
 import hashlib
 import logging
 import os
-from datetime import UTC, datetime
+try:
+    from datetime import UTC, datetime
+except ImportError:
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
 from pathlib import Path
 from typing import Protocol
 
@@ -39,12 +44,14 @@ from app.providers.types import (
     DiarizationResult,
     VisualObservation,
 )
+from app.stages.aggregation import aggregate_speaker_observations
 from app.stages.answer_assessment import run_answer_assessment_stage
 from app.stages.answers import run_answer_speech_stage
 from app.stages.audio import run_audio_stage
 from app.stages.documents import run_document_stage
 from app.stages.media import split_media
 from app.stages.questions import run_question_stage
+from app.stages.reporting import run_report_stage
 from app.stages.speech import run_speech_stage
 from app.stages.vision import run_vision_stage
 from app.storage import create_object_storage
@@ -70,18 +77,6 @@ def generate_deterministic_ulid(seed_key: str, dt: datetime | str | None = None)
     rand_bytes = hashlib.sha256(seed_key.encode()).digest()[:10]
     return str(ulid.from_bytes(ts_bytes + rand_bytes))
 
-FAKE_SESSION_ANALYSIS_ARTIFACT_ID = "01JEXAMPLE000000000000000A"
-FAKE_QUESTION_1_ID = "01JEXAMPLE000000000000001A"
-FAKE_QUESTION_2_ID = "01JEXAMPLE000000000000001B"
-FAKE_QUESTION_3_ID = "01JEXAMPLE000000000000001C"
-FAKE_TRANSCRIPT_ARTIFACT_ID = "01JEXAMPLE000000000000002A"
-FAKE_ASSESSMENT_ARTIFACT_ID = "01JEXAMPLE000000000000002B"
-FAKE_EVALUATION_ARTIFACT_ID = "01JEXAMPLE000000000000003A"
-FAKE_REPORT_ARTIFACT_ID = "01JEXAMPLE000000000000003B"
-
-FAKE_SHA256_A = "sha256:" + "a" * 64
-FAKE_SHA256_B = "sha256:" + "b" * 64
-FAKE_SHA256_C = "sha256:" + "c" * 64
 
 
 def combine_timed_evidence(
@@ -327,6 +322,7 @@ class FakePipeline:
                 self.diarization_provider,
                 media_duration_ms=duration_ms,
                 skip_normalization=True,
+                strict_timestamps=False,
             ),
             run_vision_stage(
                 video_path,
@@ -348,6 +344,12 @@ class FakePipeline:
             speech_res.diarization,
             vision_res.observations,
             audio_res.observations,
+        )
+
+        by_speaker = aggregate_speaker_observations(
+            updated_visual,
+            updated_audio,
+            speech_res.diarization,
         )
 
         session_id = (
@@ -375,9 +377,11 @@ class FakePipeline:
             rubric_id=job.rubric.rubric_id,
             extra_limitations=corr_limitations + doc_stage_res.limitations,
         )
-
         artifact_key = f"ai/session/{session_id}/analysis.json"
-        created_at = "2026-09-02T12:00:00Z"
+        if os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
+            created_at = "2026-09-02T12:00:00Z"
+        else:
+            created_at = datetime.now(UTC).isoformat()
         artifact_id = generate_deterministic_ulid(f"{session_id}:analysis", created_at)
 
         artifact_payload = {
@@ -397,6 +401,7 @@ class FakePipeline:
                     {"visual": k, "audio": v} for k, v in speaker_mapping.items()
                 ],
             },
+            "by_speaker": by_speaker,
             "evidence_bundle": {
                 "items": [
                     item.model_dump()
@@ -505,6 +510,7 @@ class FakePipeline:
                 self.speech_provider,
                 media_duration_ms=duration_ms,
                 skip_normalization=skip_file_check,
+                strict_timestamps=False,
             )
 
         artifact_key = f"ai/answer/{job.answer_id}/transcript.json"
@@ -594,21 +600,57 @@ class FakePipeline:
         )
 
     async def generate_report(self, job: GenerateReportPayload) -> ReportCompleted:
+        # 1. Run the report stage
+        stage_res = await run_report_stage(
+            report_id=job.report_id,
+            analysis_ref=job.analysis_artifact,
+            qa_ref=job.qa_artifact,
+            speaker_mappings=job.speaker_mappings,
+            storage=self.object_storage,
+            judge_provider=self.judge_provider,
+            pipeline_version=PRODUCER_VERSION,
+        )
+
+        created_at = datetime.now(UTC).isoformat()
+        evaluation_artifact_id = generate_deterministic_ulid(
+            f"{job.report_id}:evaluation",
+            created_at,
+        )
+        evaluation_artifact_key = f"ai/session/{job.report_id}/evaluation.json"
+
+        # Serialize evaluation model to JSON and upload
+        evaluation_ref = await self.object_storage.upload_json(
+            evaluation_artifact_key,
+            stage_res.evaluation,
+            artifact_id=evaluation_artifact_id,
+        )
+
+        report_artifact_id = generate_deterministic_ulid(
+            f"{job.report_id}:report",
+            created_at,
+        )
+        report_artifact_key = f"ai/session/{job.report_id}/report.md"
+
+        # Write markdown report to temporary file and upload
+        temp_dir = Path(".storage/temp_reports")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_md_path = temp_dir / f"{report_artifact_id}.md"
+        try:
+            temp_md_path.write_text(stage_res.report_markdown, encoding="utf-8")
+            report_ref = await self.object_storage.upload_file(
+                object_key=report_artifact_key,
+                source_path=temp_md_path,
+                content_type="text/markdown",
+                artifact_id=report_artifact_id,
+            )
+        finally:
+            temp_md_path.unlink(missing_ok=True)
+
         return ReportCompleted(
-            evaluation_artifact=ArtifactRef(
-                artifact_id=FAKE_EVALUATION_ARTIFACT_ID,
-                object_key="artifacts/evaluation.json",
-                checksum=FAKE_SHA256_B,
-                schema_version=1,
-            ),
-            report_artifact=ArtifactRef(
-                artifact_id=FAKE_REPORT_ARTIFACT_ID,
-                object_key="artifacts/report.json",
-                checksum=FAKE_SHA256_C,
-                schema_version=1,
-            ),
-            member_feedback_user_ids=[mapping.user_id for mapping in job.speaker_mappings],
-            limitations=[],
+            evaluation_artifact=evaluation_ref,
+            report_artifact=report_ref,
+            member_feedback_user_ids=stage_res.member_feedback_user_ids,
+            limitations=stage_res.limitations,
         )
 
     async def erase_data(self, job: EraseAIDataPayload) -> ErasureCompleted:
@@ -624,9 +666,14 @@ class FakePipeline:
         )
 
 
+# Production alias for swappable adapter pipeline implementation
+PitchAnalysisPipelineImpl = FakePipeline
+
 __all__ = [
     "FakePipeline",
     "PitchAnalysisPipeline",
+    "PitchAnalysisPipelineImpl",
+    "aggregate_speaker_observations",
     "combine_timed_evidence",
     "generate_deterministic_ulid",
 ]
