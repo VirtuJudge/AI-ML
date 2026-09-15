@@ -71,6 +71,9 @@ async def test_complete_product_journey(journey_pipeline: FakePipeline) -> None:
                 media_type="audio/wav",
                 duration_ms=45000,
             ),
+            question_text=question.text,
+            rubric_dimension=question.rubric_dimension,
+            question_evidence_ids=question.evidence_ids,
             remaining_follow_ups=1,
         )
         answer_result = await journey_pipeline.analyze_answer(answer_job)

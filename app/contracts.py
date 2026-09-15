@@ -148,6 +148,9 @@ class AnalyzeAnswerPayload(BaseModel):
     answer_id: str
     answered_by: str
     audio: AudioAssetInput | None = None
+    question_text: str = ""
+    rubric_dimension: str = ""
+    question_evidence_ids: list[str] = Field(default_factory=list)
     remaining_follow_ups: int
     practice_session_id: str | None = None
 

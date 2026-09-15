@@ -802,11 +802,8 @@ class FakePipeline:
         # Inspection point 2: Before Groq LLM answer assessment & follow-up question generation
         await self._check_cancellation(job_id, backend_client, stage="assessment")
 
-        question_text = (
-            f"What specific unit economics assumptions drive your projected customer acquisition "
-            f"cost at scale for question {job.question_id}?"
-        )
-        rubric_dimension = "market_and_business_model"
+        question_text = job.question_text or f"Question {job.question_id}"
+        rubric_dimension = job.rubric_dimension or "unmapped"
 
         assessment_res = await with_transient_retries(
             lambda: run_answer_assessment_stage(
@@ -818,6 +815,15 @@ class FakePipeline:
             ),
             stage_name="assessment",
         )
+
+        follow_up = assessment_res.assessment.follow_up
+        if follow_up is not None:
+            if job.question_evidence_ids:
+                follow_up = follow_up.model_copy(
+                    update={"evidence_ids": list(job.question_evidence_ids)}
+                )
+            else:
+                follow_up = None
 
         assessment_payload = {
             "artifact_id": assessment_artifact_id,
@@ -834,8 +840,8 @@ class FakePipeline:
                 "evidence_ids": assessment_res.assessment.evidence_ids,
             },
             "follow_up": (
-                assessment_res.assessment.follow_up.model_dump()
-                if assessment_res.assessment.follow_up
+                follow_up.model_dump()
+                if follow_up
                 else None
             ),
             "limitations": [lim.model_dump() for lim in assessment_res.limitations],
@@ -846,8 +852,6 @@ class FakePipeline:
             assessment_payload,
             artifact_id=assessment_artifact_id,
         )
-
-        follow_up = assessment_res.assessment.follow_up
 
         return AnswerAnalysisCompleted(
             answer_id=job.answer_id,

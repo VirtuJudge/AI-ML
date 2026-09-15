@@ -167,6 +167,9 @@ async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
             media_type="audio/wav",
             duration_ms=25000,
         ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
         remaining_follow_ups=1,
     )
 
@@ -180,7 +183,7 @@ async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
     assert isinstance(result.follow_up.rubric_dimension, str)
     assert len(result.follow_up.rubric_dimension) > 0
     assert isinstance(result.follow_up.evidence_ids, list)
-    assert result.follow_up.evidence_ids == []
+    assert result.follow_up.evidence_ids == ["ev_speech_001"]
 
 
 @pytest.mark.asyncio
@@ -233,6 +236,9 @@ async def test_analyze_answer_skipped_produces_no_invented_evidence() -> None:
             media_type="audio/wav",
             duration_ms=25000,
         ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
         remaining_follow_ups=2,
     )
 
@@ -298,6 +304,9 @@ async def test_analyze_answer_follow_up_has_required_fields(
             media_type="audio/wav",
             duration_ms=25000,
         ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
         remaining_follow_ups=2,
     )
 
@@ -310,7 +319,7 @@ async def test_analyze_answer_follow_up_has_required_fields(
         and len(result.follow_up.rubric_dimension.strip()) > 0
     )
     assert isinstance(result.follow_up.evidence_ids, list)
-    assert result.follow_up.evidence_ids == []
+    assert result.follow_up.evidence_ids == ["ev_speech_001"]
 
 
 @pytest.mark.asyncio
