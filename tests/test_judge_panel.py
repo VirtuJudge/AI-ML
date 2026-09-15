@@ -8,6 +8,7 @@ from app.stages.judge_panel import (
     JUDGE_PANEL,
     create_fallback_question,
     format_prompt_for_judge,
+    strip_evidence_ids_from_question_text,
     validate_judge_question,
     validate_panel_questions,
 )
@@ -89,6 +90,25 @@ def test_validate_judge_question_valid() -> None:
     assert validated.evidence_ids == ["ev_speech_001"]
     assert len(lims) == 0
     assert validated.candidate_id == q.candidate_id
+
+
+def test_validate_judge_question_strips_evidence_ids_from_candidate_text() -> None:
+    """Evidence references remain structured metadata, never part of the question wording."""
+    bundle = _make_test_bundle()
+    q = PrimaryQuestion(
+        candidate_id="q-1",
+        text="How is the CAC payback measured? (ev_speech_001)",
+        reason="Tests whether the claim is measurable.",
+        rubric_dimension="market_and_business_model",
+        evidence_ids=["ev_speech_001"],
+    )
+
+    validated, _ = validate_judge_question(q, JUDGE_PANEL[0], bundle)
+
+    assert validated is not None
+    assert validated.text == "How is the CAC payback measured?"
+    assert validated.evidence_ids == ["ev_speech_001"]
+    assert strip_evidence_ids_from_question_text("Evidence ID: ev_speech_001") == ""
 
 
 def test_validate_judge_question_preserves_custom_candidate_ids() -> None:
@@ -249,5 +269,3 @@ def test_validate_panel_questions_with_judges_argument() -> None:
     # Call with canonical signature and explicit judges argument
     final_questions, _ = validate_panel_questions([q], bundle, judges=JUDGE_PANEL)
     assert len(final_questions) == 3
-
-

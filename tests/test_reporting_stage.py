@@ -118,7 +118,7 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
     assert "## Team Pitch Assessment" in md
     assert "## Individual Presenter Delivery Feedback" in md
     assert "## Q&A Session Deep Dive" in md
-    assert "## Appendix" in md
+    assert "## Appendix" not in md
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,7 @@ class AnswerAssessment(BaseModel):
     """Structured assessment of a team member's answer against a question and rubric."""
 
     assessment_text: str
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
     follow_up: FollowUpQuestion | None = None
 

@@ -43,7 +43,7 @@ def _label_title(label: str | None) -> str:
 
 
 def format_speaker_metrics_highlight(profile: dict[str, Any] | None) -> list[str]:
-    """Compute and format vocal and visual metric highlights from a speaker profile."""
+    """Turn delivery observations into concise, human-readable coaching."""
     if not profile:
         return ["*No active delivery metrics recorded for this presenter.*"]
 
@@ -57,33 +57,67 @@ def format_speaker_metrics_highlight(profile: dict[str, Any] | None) -> list[str
 
     lines: list[str] = []
 
-    # Acoustic highlights
-    acoustic_parts: list[str] = []
+    # Speak in coaching terms rather than exposing detector values. The thresholds
+    # intentionally identify clear patterns, not personality or emotional state.
     if "avg_wpm" in summary:
-        acoustic_parts.append(f"**Pace:** {summary['avg_wpm']:.1f} WPM")
-    if "avg_pitch_hz" in summary:
-        acoustic_parts.append(f"**Pitch:** {summary['avg_pitch_hz']:.1f} Hz")
-    if "total_pause_ms" in summary:
-        total_pause_ms = summary["total_pause_ms"]
-        total_pauses = summary.get("total_pause_count", 0)
-        acoustic_parts.append(f"**Pauses:** {total_pause_ms} ms ({total_pauses} count)")
-    if "total_filler_count" in summary:
-        acoustic_parts.append(f"**Fillers:** {summary['total_filler_count']}")
+        pace = float(summary["avg_wpm"])
+        if pace < 130:
+            lines.append(
+                "- 🎙️ **Pacing:** The delivery was slow enough to lose momentum. "
+                "Rehearse transitions so key points connect without long gaps."
+            )
+        elif pace > 165:
+            lines.append(
+                "- 🎙️ **Pacing:** The delivery moved quickly. Slow down around claims, "
+                "numbers, and transitions so the audience can absorb them."
+            )
+        else:
+            lines.append(
+                "- 🎙️ **Pacing:** The overall pace was easy to follow. Keep using short "
+                "pauses to separate important ideas."
+            )
 
-    if acoustic_parts:
-        lines.append("- 🎙️ **Acoustic & Pacing:** " + " | ".join(acoustic_parts))
+    speaking_time_ms = float(profile.get("speaking_time_ms", 0) or 0)
+    pause_ms = float(summary.get("total_pause_ms", 0) or 0)
+    pause_count = int(summary.get("total_pause_count", 0) or 0)
+    filler_count = int(summary.get("total_filler_count", 0) or 0)
+    pause_ratio = pause_ms / speaking_time_ms if speaking_time_ms > 0 else 0.0
+    if filler_count >= 5 or pause_ratio >= 0.12 or pause_count >= 6:
+        lines.append(
+            "- 🎙️ **Fluency:** Repeated pauses or filler words interrupted the flow. "
+            "Replace fillers with a brief silent pause and practice the transitions that caused them."
+        )
+    elif filler_count or pause_count:
+        lines.append(
+            "- 🎙️ **Fluency:** Pauses and filler words were limited. Continue preparing "
+            "the transition into each key point."
+        )
 
-    # Visual highlights
-    visual_parts: list[str] = []
-    if "avg_gaze" in summary:
-        visual_parts.append(f"**Gaze Alignment:** {summary['avg_gaze']:.2f}")
-    if "avg_posture" in summary:
-        visual_parts.append(f"**Posture Openness:** {summary['avg_posture']:.2f}")
-    if "avg_movement_px" in summary:
-        visual_parts.append(f"**Upper Body Movement:** {summary['avg_movement_px']:.1f} px")
+    gaze = summary.get("avg_gaze")
+    if gaze is not None:
+        if float(gaze) >= 1.5:
+            lines.append(
+                "- 👁️ **Audience connection:** Attention appeared to stay on slides for long "
+                "stretches. Return your gaze to the audience after checking each visual."
+            )
+        else:
+            lines.append(
+                "- 👁️ **Audience connection:** Eye contact was generally maintained. Keep "
+                "checking the audience rather than speaking only to the slides."
+            )
 
-    if visual_parts:
-        lines.append("- 👁️ **Visual & Body Language:** " + " | ".join(visual_parts))
+    posture = summary.get("avg_posture")
+    movement = summary.get("avg_movement_px")
+    if movement is not None and float(movement) <= 0.5:
+        lines.append(
+            "- 🧍 **Physical delivery:** Very little upper-body movement was observed. "
+            "Use a few deliberate gestures to emphasize the problem, proof, and ask."
+        )
+    elif posture is not None and float(posture) < 0.6:
+        lines.append(
+            "- 🧍 **Physical delivery:** The upper body appeared closed for much of the turn. "
+            "Stand squarely and use open, purposeful gestures when explaining key points."
+        )
 
     return lines or ["*Observations recorded without aggregated metric features.*"]
 
@@ -224,10 +258,10 @@ def generate_markdown_report(
                     out.append(f"| {d_name} | {d_score} | {d_label} |")
                 out.append("")
 
-            # Windowed metrics highlight
+            # Reader-facing delivery coaching, derived from windowed observations.
             spk_profile = (by_speaker or {}).get(spk_label)
             metric_lines = format_speaker_metrics_highlight(spk_profile)
-            out.append("#### Delivery Metrics Highlight")
+            out.append("#### Delivery Coaching")
             out.append("")
             for ml in metric_lines:
                 out.append(ml)
@@ -313,28 +347,6 @@ def generate_markdown_report(
     else:
         out.append("*No Q&A exchange records available for this session.*")
         out.append("")
-
-    # 6. Appendix: System Limitations & Reproducibility Metadata
-    out.append("## Appendix")
-    out.append("")
-    out.append("### Pipeline Limitations & Boundaries")
-    out.append("")
-    if evaluation.limitations:
-        for lim in evaluation.limitations:
-            out.append(f"- **[{lim.code}]** *({lim.scope})*: {lim.message}")
-    else:
-        out.append("- *No systemic pipeline limitations recorded during evaluation.*")
-    out.append("")
-
-    out.append("### Reproducibility & Model Metadata")
-    out.append("")
-    if evaluation.reproducibility:
-        for k, v in sorted(evaluation.reproducibility.items()):
-            k_disp = k.replace("_", " ").title()
-            out.append(f"- **{k_disp}:** `{v}`")
-    else:
-        out.append("- *No reproducibility metadata provided.*")
-    out.append("")
 
     return "\n".join(out).strip() + "\n"
 

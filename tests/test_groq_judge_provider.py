@@ -301,7 +301,8 @@ def test_groq_judge_fallback_assessment_has_no_followup_and_empty_evidence() -> 
     )
     assert fallback.follow_up is None
     assert fallback.evidence_ids == []
-    assert "team member" in fallback.assessment_text
+    assert fallback.score == 0.0
+    assert "could not be reliably assessed" in fallback.assessment_text
 
 
 def test_groq_judge_parse_assessment_empty_evidence_ids() -> None:
@@ -312,7 +313,7 @@ def test_groq_judge_parse_assessment_empty_evidence_ids() -> None:
     # Payload with empty evidence_ids
     raw_text = (
         '{"assessment_text": "Good answer on unit economics.", '
-        '"evidence_ids": [], "follow_up": null}'
+        '"score": 0.55, "evidence_ids": [], "follow_up": null}'
     )
     res = provider._parse_assessment(
         raw_text=raw_text,
@@ -320,8 +321,20 @@ def test_groq_judge_parse_assessment_empty_evidence_ids() -> None:
         remaining_follow_ups=0,
     )
     assert res is not None
+    assert res.score == 0.55
     assert res.evidence_ids == []
     assert res.follow_up is None
+
+
+def test_groq_judge_parse_assessment_rejects_missing_score() -> None:
+    """Malformed assessment output cannot gain an implicit score."""
+    provider = GroqJudgeModelProvider(key_pool=AsyncMock(spec=GroqKeyPool))
+
+    assert provider._parse_assessment(
+        raw_text='{"assessment_text": "Generic response.", "evidence_ids": []}',
+        rubric_dimension="market_and_business_model",
+        remaining_follow_ups=0,
+    ) is None
 
 
 def test_judge_provider_protocol_includes_report_feedback() -> None:
@@ -494,7 +507,6 @@ async def test_groq_judge_generate_report_feedback_failure_emits_grounded_fallba
     assert "SPEAKER_01" in res.member_improvements
     assert len(res.team_strengths) >= 1
     assert len(res.team_improvements) >= 1
-
 
 
 

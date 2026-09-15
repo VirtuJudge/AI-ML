@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.contracts import Limitation
 from app.providers.base import AnswerAssessment, JudgeModelProvider
+from app.prompts.judges import JUDGE_DIRECTED_INSULT_REGEX
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class AnswerAssessmentResult(BaseModel):
     assessment: AnswerAssessment = Field(
         default_factory=lambda: AnswerAssessment(
             assessment_text="",
+            score=0.0,
             evidence_ids=[],
             follow_up=None,
         )
@@ -55,6 +57,7 @@ async def run_answer_assessment_stage(
         return AnswerAssessmentResult(
             assessment=AnswerAssessment(
                 assessment_text="",
+                score=0.0,
                 evidence_ids=[],
                 follow_up=None,
             ),
@@ -63,6 +66,25 @@ async def run_answer_assessment_stage(
                 "stage": "answer_assessment",
                 "skipped": True,
                 "rubric_dimension": rubric_dimension,
+            },
+        )
+
+    if JUDGE_DIRECTED_INSULT_REGEX.search(answer_transcript):
+        return AnswerAssessmentResult(
+            assessment=AnswerAssessment(
+                assessment_text=(
+                    "The response contains direct abusive language aimed at the judge or "
+                    "the question, so it receives 0/100."
+                ),
+                score=0.0,
+                evidence_ids=[],
+                follow_up=None,
+            ),
+            limitations=[],
+            metadata={
+                "stage": "answer_assessment",
+                "rubric_dimension": rubric_dimension,
+                "disqualified_for_judge_directed_abuse": True,
             },
         )
 
