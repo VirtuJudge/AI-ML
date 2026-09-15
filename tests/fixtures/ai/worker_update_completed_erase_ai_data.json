@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "completed",
+  "occurred_at": "2026-09-10T12:16:00Z",
+  "trace_id": "trc_test_004",
+  "payload": {
+    "erasure_request_id": "era_001",
+    "deleted_records": 14,
+    "deleted_objects": 6
+  }
+}

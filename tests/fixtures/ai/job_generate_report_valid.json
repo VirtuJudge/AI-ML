@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "job_id": "01JEXAMPLE0000000000000021",
+  "job_type": "generate_report",
+  "practice_session_id": "01JEXAMPLE0000000000000002",
+  "analysis_attempt": 1,
+  "created_at": "2026-09-10T12:10:00Z",
+  "trace_id": "trc_test_003",
+  "payload": {
+    "report_id": "rep_001",
+    "analysis_artifact": {
+      "artifact_id": "01JEXAMPLE0000000000000022",
+      "object_key": "artifacts/analysis_001.json",
+      "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1
+    },
+    "qa_artifact": {
+      "artifact_id": "01JEXAMPLE0000000000000023",
+      "object_key": "artifacts/qa_001.json",
+      "checksum": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "schema_version": 1
+    },
+    "speaker_mappings": [
+      {
+        "speaker_label": "SPEAKER_00",
+        "user_id": "user_founder_01",
+        "display_name": "Jane Founder"
+      }
+    ]
+  }
+}

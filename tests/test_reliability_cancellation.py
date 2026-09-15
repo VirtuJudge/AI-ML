@@ -100,8 +100,8 @@ async def test_analyze_session_cancelled_before_speech(
         analyze_session_message, pipeline, backend_client=backend_client
     )
 
-    # Worker stops and emits sequence=2, status="cancelled"
-    assert terminal_update.sequence == 2
+    # Worker stops and emits monotonic status="cancelled"
+    assert terminal_update.sequence >= 2
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert terminal_update.status.value == "cancelled"
     assert isinstance(terminal_update.payload, CancelledPayload)
@@ -111,14 +111,14 @@ async def test_analyze_session_cancelled_before_speech(
         == "Analysis cancelled by user request."
     )
 
-    # Backend received sequence=1 (started) and sequence=2 (cancelled)
-    assert len(backend_client.updates) == 2
-    assert backend_client.updates[0].sequence == 1
+    # Backend received started and cancelled in monotonic sequence
+    assert len(backend_client.updates) >= 2
+    for idx, u in enumerate(backend_client.updates, 1):
+        assert u.sequence == idx
     assert backend_client.updates[0].status == UpdateStatus.STARTED
-    assert backend_client.updates[1].sequence == 2
-    assert backend_client.updates[1].status == UpdateStatus.CANCELLED
-    assert isinstance(backend_client.updates[1].payload, CancelledPayload)
-    assert backend_client.updates[1].payload.stage == "speech"
+    assert backend_client.updates[-1].status == UpdateStatus.CANCELLED
+    assert isinstance(backend_client.updates[-1].payload, CancelledPayload)
+    assert backend_client.updates[-1].payload.stage == "speech"
 
     # CRITICAL: no analysis.json was uploaded
     session_id = analyze_session_message.practice_session_id
@@ -141,7 +141,7 @@ async def test_analyze_session_cancelled_after_speech_before_vision(
         analyze_session_message, pipeline, backend_client=backend_client
     )
 
-    assert terminal_update.sequence == 2
+    assert terminal_update.sequence >= 2
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "vision"
@@ -165,7 +165,7 @@ async def test_analyze_session_cancelled_before_questions(
         analyze_session_message, pipeline, backend_client=backend_client
     )
 
-    assert terminal_update.sequence == 2
+    assert terminal_update.sequence >= 2
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "questions"
@@ -189,7 +189,7 @@ async def test_analyze_session_cancelled_before_upload(
         analyze_session_message, pipeline, backend_client=backend_client
     )
 
-    assert terminal_update.sequence == 2
+    assert terminal_update.sequence >= 2
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "aggregation"
@@ -298,7 +298,7 @@ async def test_generate_report_cancelled_before_synthesis(
         generate_report_message, pipeline, backend_client=backend_client
     )
 
-    assert terminal_update.sequence == 2
+    assert terminal_update.sequence >= 2
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "reporting"

@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
     "redis[hiredis]",
+    "celery>=5.3.0",
     "httpx",
     "ulid-py",
     "boto3>=1.34.0",

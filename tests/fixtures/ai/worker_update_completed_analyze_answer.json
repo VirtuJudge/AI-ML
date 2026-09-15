@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "completed",
+  "occurred_at": "2026-09-10T12:06:00Z",
+  "trace_id": "trc_test_002",
+  "payload": {
+    "answer_id": "ans_001",
+    "transcript_artifact_id": "01JEXAMPLE0000000000000061",
+    "assessment_artifact_id": "01JEXAMPLE0000000000000062",
+    "follow_up": {
+      "text": "Can you provide the breakdown of churn between SMB and enterprise segments?",
+      "reason": "Validates retention trends mentioned in previous response",
+      "rubric_dimension": "customer_retention",
+      "evidence_ids": [
+        "ev_answer_001"
+      ]
+    }
+  }
+}

@@ -1,0 +1,359 @@
+{
+  "manifest_version": 1,
+  "description": "Authoritative golden fixture manifest for VirtuJudge AI Job and Worker Update contracts",
+  "fixtures": [
+    {
+      "id": "job_analyze_session_valid",
+      "path": "contracts/fixtures/ai/job_analyze_session_valid.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "valid_job",
+      "job_type": "analyze_session",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid analyze_session job dispatch with presentation asset, rubric, and capabilities"
+    },
+    {
+      "id": "job_analyze_answer_valid",
+      "path": "contracts/fixtures/ai/job_analyze_answer_valid.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "valid_job",
+      "job_type": "analyze_answer",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid analyze_answer job dispatch with AudioAssetInput including duration_ms"
+    },
+    {
+      "id": "job_generate_report_valid",
+      "path": "contracts/fixtures/ai/job_generate_report_valid.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "valid_job",
+      "job_type": "generate_report",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid generate_report job dispatch with analysis and QA artifact refs and speaker mappings"
+    },
+    {
+      "id": "job_erase_ai_data_valid",
+      "path": "contracts/fixtures/ai/job_erase_ai_data_valid.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "valid_job",
+      "job_type": "erase_ai_data",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid erase_ai_data job dispatch with practice_session scope"
+    },
+    {
+      "id": "worker_update_completed_analyze_session",
+      "path": "contracts/fixtures/ai/worker_update_completed_analyze_session.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_completed_update",
+      "result_type": "analyze_session",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid completed update for analyze_session with analysis artifact, 3 grounded primary questions, speaker labels, and limitations"
+    },
+    {
+      "id": "worker_update_completed_analyze_answer",
+      "path": "contracts/fixtures/ai/worker_update_completed_analyze_answer.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_completed_update",
+      "result_type": "analyze_answer",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid completed update for analyze_answer with answer ID, artifact IDs, and follow-up question"
+    },
+    {
+      "id": "worker_update_completed_generate_report",
+      "path": "contracts/fixtures/ai/worker_update_completed_generate_report.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_completed_update",
+      "result_type": "generate_report",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid completed update for generate_report with evaluation artifact, report artifact, and feedback IDs"
+    },
+    {
+      "id": "worker_update_completed_erase_ai_data",
+      "path": "contracts/fixtures/ai/worker_update_completed_erase_ai_data.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_completed_update",
+      "result_type": "erase_ai_data",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid completed update for erase_ai_data with non-negative deletion counts"
+    },
+    {
+      "id": "worker_update_started_valid",
+      "path": "contracts/fixtures/ai/worker_update_started_valid.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_lifecycle_update",
+      "status": "started",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid worker started update with required pipeline_version"
+    },
+    {
+      "id": "worker_update_progress_valid",
+      "path": "contracts/fixtures/ai/worker_update_progress_valid.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_lifecycle_update",
+      "status": "progress",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid worker progress update with stage, progress fraction, and message"
+    },
+    {
+      "id": "worker_update_failed_valid",
+      "path": "contracts/fixtures/ai/worker_update_failed_valid.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_lifecycle_update",
+      "status": "failed",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid worker failed update with stage, error code, retryable flag, attempts, and message"
+    },
+    {
+      "id": "worker_update_cancelled_valid",
+      "path": "contracts/fixtures/ai/worker_update_cancelled_valid.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "valid_lifecycle_update",
+      "status": "cancelled",
+      "valid": true,
+      "validation_level": "schema",
+      "description": "Valid worker cancelled update with empty payload"
+    },
+    {
+      "id": "job_missing_required",
+      "path": "contracts/fixtures/ai/job_missing_required.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "missing_required",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "analyze_session job missing required rubric field",
+      "expected_error": {
+        "path": "/payload",
+        "message": "'rubric' is a required property"
+      }
+    },
+    {
+      "id": "job_unknown_enum",
+      "path": "contracts/fixtures/ai/job_unknown_enum.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "unknown_enum",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Job dispatch with unknown job_type enum value",
+      "expected_error": {
+        "path": "/job_type",
+        "message": "is not one of"
+      }
+    },
+    {
+      "id": "job_erase_ai_data_unknown_scope",
+      "path": "contracts/fixtures/ai/job_erase_ai_data_unknown_scope.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "unknown_enum",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "erase_ai_data job with unsupported scope value",
+      "expected_error": {
+        "path": "/payload/scope",
+        "message": "is not one of"
+      }
+    },
+    {
+      "id": "job_audio_missing_duration",
+      "path": "contracts/fixtures/ai/job_audio_missing_duration.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "semantic_invariant",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "analyze_answer job audio asset missing required duration_ms",
+      "expected_error": {
+        "path": "/payload/audio",
+        "message": "'duration_ms' is a required property"
+      }
+    },
+    {
+      "id": "job_invalid_checksum",
+      "path": "contracts/fixtures/ai/job_invalid_checksum.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "invalid_resource",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Job dispatch asset with malformed checksum not matching sha256 hex regex",
+      "expected_error": {
+        "path": "/payload/presentation/checksum",
+        "message": "does not match"
+      }
+    },
+    {
+      "id": "job_ancestry_mismatch",
+      "path": "contracts/fixtures/ai/job_ancestry_mismatch.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "ancestry_mismatch",
+      "valid": false,
+      "validation_level": "contextual",
+      "description": "Job dispatch session identifier does not match lineage context",
+      "context": {
+        "expected_practice_session_id": "01JEXAMPLE_EXPECTED_SESSION"
+      },
+      "expected_error": {
+        "path": "/practice_session_id",
+        "message": "practice_session_id does not match expected session ancestry"
+      }
+    },
+    {
+      "id": "job_stale_attempt",
+      "path": "contracts/fixtures/ai/job_stale_attempt.json",
+      "schema": "contracts/schemas/ai_job.schema.json",
+      "category": "stale_attempt",
+      "valid": false,
+      "validation_level": "contextual",
+      "description": "Job dispatch with stale attempt number lower than current attempt",
+      "context": {
+        "current_attempt": 2
+      },
+      "expected_error": {
+        "path": "/analysis_attempt",
+        "message": "is stale"
+      }
+    },
+    {
+      "id": "worker_update_missing_required",
+      "path": "contracts/fixtures/ai/worker_update_missing_required.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "missing_required",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Worker started update missing required pipeline_version field",
+      "expected_error": {
+        "path": "/payload",
+        "message": "'pipeline_version' is a required property"
+      }
+    },
+    {
+      "id": "worker_update_unknown_enum",
+      "path": "contracts/fixtures/ai/worker_update_unknown_enum.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "unknown_enum",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Worker update with invalid status enum value",
+      "expected_error": {
+        "path": "/status",
+        "message": "is not one of"
+      }
+    },
+    {
+      "id": "worker_update_progress_out_of_range",
+      "path": "contracts/fixtures/ai/worker_update_progress_out_of_range.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "semantic_invariant",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Worker progress update with progress value > 1.0",
+      "expected_error": {
+        "path": "/payload/progress",
+        "message": "is greater than the maximum"
+      }
+    },
+    {
+      "id": "worker_update_invalid_checksum",
+      "path": "contracts/fixtures/ai/worker_update_invalid_checksum.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "invalid_resource",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Worker completed update with malformed artifact checksum",
+      "expected_error": {
+        "path": "/payload/analysis_artifact/checksum",
+        "message": "does not match"
+      }
+    },
+    {
+      "id": "worker_update_empty_evidence",
+      "path": "contracts/fixtures/ai/worker_update_empty_evidence.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "empty_evidence",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Session analysis primary question without grounding evidence",
+      "expected_error": {
+        "path": "/payload/primary_questions/0/evidence_ids",
+        "message": "should be non-empty"
+      }
+    },
+    {
+      "id": "worker_update_question_count_under",
+      "path": "contracts/fixtures/ai/worker_update_question_count_under.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "question_count",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Session analysis completed update with fewer than 3 primary questions",
+      "expected_error": {
+        "path": "/payload/primary_questions",
+        "message": "too short"
+      }
+    },
+    {
+      "id": "worker_update_question_count_over",
+      "path": "contracts/fixtures/ai/worker_update_question_count_over.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "question_count",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Session analysis completed update with more than 3 primary questions",
+      "expected_error": {
+        "path": "/payload/primary_questions",
+        "message": "too long"
+      }
+    },
+    {
+      "id": "worker_update_negative_deleted_records",
+      "path": "contracts/fixtures/ai/worker_update_negative_deleted_records.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "semantic_invariant",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "erase_ai_data completed update with negative deleted_records count",
+      "expected_error": {
+        "path": "/payload/deleted_records",
+        "message": "is less than the minimum of 0"
+      }
+    },
+    {
+      "id": "worker_update_duplicate_sequence",
+      "path": "contracts/fixtures/ai/worker_update_duplicate_sequence.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "duplicate_sequence",
+      "valid": false,
+      "validation_level": "contextual",
+      "description": "Worker update sequence number already acknowledged in stream context",
+      "context": {
+        "current_sequence": 1
+      },
+      "expected_error": {
+        "path": "/sequence",
+        "message": "is not greater than currently processed sequence"
+      }
+    },
+    {
+      "id": "worker_update_trace_mismatch",
+      "path": "contracts/fixtures/ai/worker_update_trace_mismatch.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "trace_mismatch",
+      "valid": false,
+      "validation_level": "contextual",
+      "description": "Worker update trace ID does not correlate with dispatched job trace",
+      "context": {
+        "expected_trace_id": "trc_dispatched_job_001"
+      },
+      "expected_error": {
+        "path": "/trace_id",
+        "message": "trace_id does not correlate with dispatched job trace_id"
+      }
+    }
+  ]
+}

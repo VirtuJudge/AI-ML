@@ -1,6 +1,17 @@
 """compat.py: Compatibility shims for Python 3.10 and PyTorch / TorchAudio / HuggingFace."""
 
+import datetime
+import enum
 import types
+
+# 0. Python 3.10 compatibility polyfills
+if not hasattr(enum, "StrEnum"):
+    class StrEnum(str, enum.Enum):
+        pass
+    enum.StrEnum = StrEnum
+
+if not hasattr(datetime, "UTC"):
+    datetime.UTC = datetime.timezone.utc
 
 # 1. torchaudio legacy compatibility shims for pyannote.audio 3.x & speechbrain
 try:
@@ -128,6 +139,15 @@ try:
     except Exception:
         pass
 
+    # Fallback: monkey-patch torch.load to default weights_only=False
+    # for any remaining globals that aren't allowlisted.
+    _orig_torch_load = torch.load
+
+    def _compat_torch_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig_torch_load(*args, **kwargs)
+
+    torch.load = _compat_torch_load
 except Exception:
     pass
 

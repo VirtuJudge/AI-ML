@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "completed",
+  "occurred_at": "2026-09-10T12:12:00Z",
+  "trace_id": "trc_test_003",
+  "payload": {
+    "evaluation_artifact": {
+      "artifact_id": "01JEXAMPLE0000000000000071",
+      "object_key": "artifacts/evaluation.json",
+      "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1
+    },
+    "report_artifact": {
+      "artifact_id": "01JEXAMPLE0000000000000072",
+      "object_key": "artifacts/report.json",
+      "checksum": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "schema_version": 1
+    },
+    "member_feedback_user_ids": [
+      "user_founder_01"
+    ],
+    "limitations": []
+  }
+}

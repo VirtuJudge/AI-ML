@@ -11,7 +11,7 @@ except ImportError:
         pass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SHA256_HEX_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 
@@ -54,7 +54,7 @@ class ArtifactRef(BaseModel):
     artifact_id: str
     object_key: str
     checksum: str
-    schema_version: int | None = None
+    schema_version: int = 1
 
     @field_validator("checksum")
     @classmethod
@@ -203,6 +203,9 @@ class SessionAnalysisCompleted(BaseModel):
     ) -> list[PrimaryQuestion]:
         if len(v) != 3:
             raise ValueError(f"primary_questions must contain exactly 3 items, got {len(v)}")
+        for idx, q in enumerate(v):
+            if not q.evidence_ids:
+                raise ValueError(f"primary_questions[{idx}].evidence_ids should be non-empty")
         return v
 
 
@@ -357,7 +360,7 @@ class FailedPayload(BaseModel):
 class CancelledPayload(BaseModel):
     """Payload emitted when a job is cancelled."""
 
-    stage: str
+    stage: str | None = None
     message: str = "Analysis cancelled by user request."
 
 

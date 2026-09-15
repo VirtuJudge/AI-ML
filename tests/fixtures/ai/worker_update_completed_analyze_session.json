@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "completed",
+  "occurred_at": "2026-09-10T12:02:00Z",
+  "trace_id": "trc_test_001",
+  "payload": {
+    "analysis_artifact": {
+      "artifact_id": "01JEXAMPLE0000000000000051",
+      "object_key": "artifacts/session_analysis.json",
+      "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1
+    },
+    "primary_questions": [
+      {
+        "candidate_id": "cand_001",
+        "text": "How do you calculate your customer acquisition cost?",
+        "reason": "Clarifies unit economics model",
+        "rubric_dimension": "market_and_business_model",
+        "evidence_ids": [
+          "ev_speech_01",
+          "ev_slide_03"
+        ]
+      },
+      {
+        "candidate_id": "cand_002",
+        "text": "What is the technical moat protecting your algorithms?",
+        "reason": "Evaluates defensive IP claims",
+        "rubric_dimension": "technology_and_moat",
+        "evidence_ids": [
+          "ev_slide_06"
+        ]
+      },
+      {
+        "candidate_id": "cand_003",
+        "text": "What milestones will prove enterprise pilot conversion?",
+        "reason": "Assesses go-to-market execution timeline",
+        "rubric_dimension": "execution_and_milestones",
+        "evidence_ids": [
+          "ev_slide_09",
+          "ev_speech_04"
+        ]
+      }
+    ],
+    "speaker_labels": [
+      "SPEAKER_00",
+      "SPEAKER_01"
+    ],
+    "limitations": [
+      {
+        "code": "AUD_NOISE_01",
+        "scope": "audio_transcript",
+        "message": "Background noise observed",
+        "affected_dimensions": [
+          "presentation_clarity"
+        ]
+      }
+    ]
+  }
+}

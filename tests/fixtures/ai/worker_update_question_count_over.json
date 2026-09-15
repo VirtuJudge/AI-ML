@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "completed",
+  "occurred_at": "2026-09-10T12:02:00Z",
+  "trace_id": "trc_test_001",
+  "payload": {
+    "analysis_artifact": {
+      "artifact_id": "01JEXAMPLE0000000000000051",
+      "object_key": "artifacts/session_analysis.json",
+      "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1
+    },
+    "primary_questions": [
+      {
+        "candidate_id": "cand_001",
+        "text": "Question 1",
+        "reason": "Reason 1",
+        "rubric_dimension": "dim1",
+        "evidence_ids": [
+          "ev1"
+        ]
+      },
+      {
+        "candidate_id": "cand_002",
+        "text": "Question 2",
+        "reason": "Reason 2",
+        "rubric_dimension": "dim2",
+        "evidence_ids": [
+          "ev2"
+        ]
+      },
+      {
+        "candidate_id": "cand_003",
+        "text": "Question 3",
+        "reason": "Reason 3",
+        "rubric_dimension": "dim3",
+        "evidence_ids": [
+          "ev3"
+        ]
+      },
+      {
+        "candidate_id": "cand_004",
+        "text": "Question 4",
+        "reason": "Reason 4",
+        "rubric_dimension": "dim4",
+        "evidence_ids": [
+          "ev4"
+        ]
+      }
+    ]
+  }
+}
