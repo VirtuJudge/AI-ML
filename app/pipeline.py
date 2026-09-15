@@ -24,8 +24,11 @@ from app.contracts import (
     GenerateReportPayload,
     JobCancelledError,
     Limitation,
+    ProgressPayload,
     ReportCompleted,
     SessionAnalysisCompleted,
+    UpdateStatus,
+    WorkerUpdate,
 )
 from app.document_store import DocumentStore, FakeDocumentStore
 from app.providers.base import (
@@ -242,6 +245,7 @@ class PitchAnalysisPipeline(Protocol):
         job_id: str | None = None,
         backend_client: BackendClientProtocol | None = None,
         attempt: int = 1,
+        practice_session_id: str | None = None,
     ) -> ReportCompleted: ...
 
     async def erase_data(
@@ -295,6 +299,38 @@ class FakePipeline:
         if job_id and backend_client and await backend_client.check_cancellation(job_id):
             raise JobCancelledError(job_id=job_id, stage=stage)
 
+    async def _emit_progress(
+        self,
+        backend_client: BackendClientProtocol | None,
+        job_id: str | None,
+        stage: str,
+        progress: float,
+        message: str,
+    ) -> None:
+        """Emit observable stage progress without exposing confidential data."""
+        if backend_client is None or not job_id:
+            return
+        if hasattr(backend_client, "send_progress"):
+            try:
+                await backend_client.send_progress(job_id, stage, progress, message)
+            except Exception as exc:
+                logger.debug("Failed to emit progress update via send_progress: %s", exc)
+        elif hasattr(backend_client, "send_update"):
+            seq = getattr(backend_client, "next_sequence", 2)
+            trc = getattr(backend_client, "trace_id", "trc_progress")
+            prog_update = WorkerUpdate(
+                schema_version=1,
+                sequence=seq,
+                status=UpdateStatus.PROGRESS,
+                occurred_at=datetime.now(UTC),
+                trace_id=trc,
+                payload=ProgressPayload(stage=stage, progress=progress, message=message),
+            )
+            try:
+                await backend_client.send_update(job_id, prog_update)
+            except Exception as exc:
+                logger.debug("Failed to emit progress update: %s", exc)
+
     async def analyze_session(
         self,
         job: AnalyzeSessionPayload,
@@ -308,6 +344,10 @@ class FakePipeline:
             or getattr(job, "session_id", None)
             or job.presentation.artifact_id
         )
+        await self._emit_progress(
+            backend_client, job_id, "ingestion", 0.05, "Ingesting presentation and validating inputs..."
+        )
+
         input_file = Path(job.presentation.object_key)
         skip_file_check = not input_file.is_file()
 
@@ -370,6 +410,9 @@ class FakePipeline:
 
         # Inspection point 1: After asset verification, before speech transcription & diarization
         await self._check_cancellation(job_id, backend_client, stage="speech")
+        await self._emit_progress(
+            backend_client, job_id, "speech", 0.20, "Transcribing presentation speech..."
+        )
 
         target_audio: Path = audio_path if audio_path is not None else input_file
 
@@ -436,14 +479,26 @@ class FakePipeline:
             return res
 
         speech_res = await _run_speech()
+        await self._emit_progress(
+            backend_client, job_id, "diarization", 0.35, "Identifying presentation speakers..."
+        )
 
         # Inspection point 2: After speech transcription, before vision
         await self._check_cancellation(job_id, backend_client, stage="vision")
+        await self._emit_progress(
+            backend_client, job_id, "vision", 0.50, "Extracting visual cues and slide structure..."
+        )
+        await self._emit_progress(
+            backend_client, job_id, "audio_features", 0.60, "Measuring acoustic delivery features..."
+        )
 
         vision_res, audio_res = await asyncio.gather(_run_vision(), _run_audio())
 
         # Inspection point 3: After visual/acoustic extraction, before Supabase pgvector retrieval
         await self._check_cancellation(job_id, backend_client, stage="documents")
+        await self._emit_progress(
+            backend_client, job_id, "documents", 0.70, "Processing supporting documentation..."
+        )
 
         updated_visual, updated_audio, speaker_mapping, corr_limitations = combine_timed_evidence(
             speech_res.diarization,
@@ -471,8 +526,18 @@ class FakePipeline:
         if doc_stage_res.chunks and self.document_store is not None:
             await self.document_store.store_chunks(session_id, doc_stage_res.chunks)
 
+        await self._emit_progress(
+            backend_client, job_id, "aggregation", 0.80, "Aggregating multimodal evidence..."
+        )
+        await self._emit_progress(
+            backend_client, job_id, "grounding", 0.85, "Grounding evidence against rubric dimensions..."
+        )
+
         # Inspection point 4: After document retrieval, before calling Groq 3-Judge LLM panel
         await self._check_cancellation(job_id, backend_client, stage="questions")
+        await self._emit_progress(
+            backend_client, job_id, "questions", 0.95, "Generating primary evaluation questions..."
+        )
 
         question_stage_res = await run_question_stage(
             self.judge_provider,
@@ -740,12 +805,31 @@ class FakePipeline:
         job_id: str | None = None,
         backend_client: BackendClientProtocol | None = None,
         attempt: int = 1,
+        practice_session_id: str | None = None,
     ) -> ReportCompleted:
+        # Resolve practice session id from param, job payload, or analysis artifact object key
+        session_id = (
+            practice_session_id
+            or getattr(job, "practice_session_id", None)
+            or (
+                job.analysis_artifact.object_key.split("/")[2]
+                if job.analysis_artifact.object_key.startswith("ai/session/")
+                else None
+            )
+            or job.report_id
+        )
+
         # Inspection point 1: Before loading analysis.json and qa.json
         await self._check_cancellation(job_id, backend_client, stage="ingestion")
+        await self._emit_progress(
+            backend_client, job_id, "ingestion", 0.20, "Loading session analysis and Q&A artifacts..."
+        )
 
         # Inspection point 2: Before Groq LLM team/member feedback synthesis
         await self._check_cancellation(job_id, backend_client, stage="reporting")
+        await self._emit_progress(
+            backend_client, job_id, "reporting", 0.60, "Synthesizing team and member performance evaluations..."
+        )
 
         # 1. Run the report stage
         stage_res = await run_report_stage(
@@ -760,13 +844,16 @@ class FakePipeline:
 
         # Inspection point 3: Before final report.md / evaluation.json upload
         await self._check_cancellation(job_id, backend_client, stage="reporting")
+        await self._emit_progress(
+            backend_client, job_id, "synthesis", 0.90, "Uploading evaluation artifact and markdown report..."
+        )
 
         created_at = datetime.now(UTC).isoformat()
         evaluation_artifact_id = generate_deterministic_ulid(
             f"{job.report_id}:evaluation",
             created_at,
         )
-        evaluation_artifact_key = f"ai/session/{job.report_id}/evaluation.json"
+        evaluation_artifact_key = f"ai/session/{session_id}/evaluation.json"
 
         # Serialize evaluation model to JSON and upload
         evaluation_ref = await self.object_storage.upload_json(
@@ -779,7 +866,7 @@ class FakePipeline:
             f"{job.report_id}:report",
             created_at,
         )
-        report_artifact_key = f"ai/session/{job.report_id}/report.md"
+        report_artifact_key = f"ai/session/{session_id}/report.md"
 
         # Write markdown report to temporary file and upload
         temp_dir = Path(".storage/temp_reports")

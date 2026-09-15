@@ -193,16 +193,19 @@ async def test_process_job_e2e_with_backend_client(
     update = await process_job(message, pipeline, backend_client)
 
     assert update.status == UpdateStatus.COMPLETED
-    assert update.sequence == 2
+    assert update.sequence >= 2
     assert isinstance(update.payload, SessionAnalysisCompleted)
     assert len(update.payload.primary_questions) == 3
 
-    # Verify backend client received sequence=1 (STARTED) and sequence=2 (COMPLETED)
-    assert len(backend_client.updates) == 2
+    # Verify backend client received sequence=1 (STARTED) and monotonic progress/completed updates
+    assert len(backend_client.updates) >= 2
     assert backend_client.updates[0].status == UpdateStatus.STARTED
     assert backend_client.updates[0].sequence == 1
-    assert backend_client.updates[1].status == UpdateStatus.COMPLETED
-    assert backend_client.updates[1].sequence == 2
+    assert backend_client.updates[-1].status == UpdateStatus.COMPLETED
+    assert backend_client.updates[-1].sequence == update.sequence
+    sequences = [u.sequence for u in backend_client.updates]
+    assert sequences == sorted(sequences)
+    assert len(set(sequences)) == len(sequences)
 
 
 @pytest.mark.asyncio

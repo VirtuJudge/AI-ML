@@ -122,20 +122,20 @@ async def build_pipeline() -> FakePipeline:
     )
 
 
-async def main() -> None:
-    """Initialize pipeline, backend client, and start queue consumer."""
+def main() -> None:
+    """Initialize environment and start Celery worker on queue ai_jobs."""
     _load_env()
-    pipeline = await build_pipeline()
-    backend_client = BackendClient()
-    consumer = RedisQueueConsumer(
-        pipeline=pipeline,
-        backend_client=backend_client,
-    )
-    consumer.attach_signal_handlers()
+    logger.info("Starting VirtuJudge AI Celery Worker on queue 'ai_jobs'...")
+    from app.celery_app import celery_app
 
-    logger.info("Starting Redis Queue Consumer on queues %s...", consumer.queue_names)
-    await consumer.run()
+    worker = celery_app.Worker(
+        queues=["ai_jobs"],
+        concurrency=int(os.getenv("CELERY_CONCURRENCY", "1")),
+        pool=os.getenv("CELERY_POOL", "solo"),
+        loglevel=os.getenv("CELERY_LOGLEVEL", "INFO"),
+    )
+    worker.start()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

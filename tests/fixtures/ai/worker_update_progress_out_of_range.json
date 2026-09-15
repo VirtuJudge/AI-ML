@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "progress",
+  "occurred_at": "2026-09-10T12:01:00Z",
+  "trace_id": "trc_test_001",
+  "payload": {
+    "stage": "transcription",
+    "progress": 1.5,
+    "message": "Out of range progress"
+  }
+}
