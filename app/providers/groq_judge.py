@@ -251,6 +251,11 @@ class GroqJudgeModelProvider:
         if not assessment_text:
             return None
 
+        raw_score = parsed.get("score")
+        if not isinstance(raw_score, (int, float)):
+            return None
+        score = max(0.0, min(1.0, float(raw_score)))
+
         if BANNED_REGEX.search(assessment_text):
             logger.warning("Assessment text contained prohibited subjective terms; rejecting.")
             return None
@@ -292,6 +297,7 @@ class GroqJudgeModelProvider:
 
         return AnswerAssessment(
             assessment_text=assessment_text,
+            score=score,
             evidence_ids=evidence_ids,
             follow_up=follow_up,
         )
@@ -304,11 +310,12 @@ class GroqJudgeModelProvider:
     ) -> AnswerAssessment:
         """Deterministic grounded fallback assessment on model failure."""
         assessment_text = (
-            f"The team member addressed the question regarding '{rubric_dimension}' "
-            "with relevant operational and domain context."
+            "The answer could not be reliably assessed because the evaluation model did not "
+            "return a valid structured result. No Q&A points were awarded."
         )
         return AnswerAssessment(
             assessment_text=assessment_text,
+            score=0.0,
             evidence_ids=[],
             follow_up=None,
         )

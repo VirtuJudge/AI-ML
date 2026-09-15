@@ -58,21 +58,21 @@ def score_to_label(normalized_score: float | None) -> ScoreLabel | None:
     """Map normalized score to qualitative rubric label.
 
     Boundaries on display scale [0, 100]:
-    - [0, 40): needs_work
-    - [40, 60): developing
-    - [60, 80): good
-    - [80, 100]: strong
+    - [0, 45): needs_work
+    - [45, 65): developing
+    - [65, 85): good
+    - [85, 100]: strong (reserved for exceptional, well-substantiated work)
     """
     if normalized_score is None:
         return None
     display = score_to_display(normalized_score)
     if display is None:
         return None
-    if display < 40:
+    if display < 45:
         return "needs_work"
-    if display < 60:
+    if display < 65:
         return "developing"
-    if display < 80:
+    if display < 85:
         return "good"
     return "strong"
 
@@ -135,7 +135,7 @@ def calculate_qa_score(
 
     Rules:
     - Q&A contributes to the team evaluation.
-    - Answered questions score based on assessment quality (default 0.75 if valid answer).
+    - Answered questions score only from an explicit structured assessment score.
     - Skipped questions score strictly 0.0.
     - Skipped questions do NOT remove the question from the denominator or drop Q&A weight.
     """
@@ -186,9 +186,9 @@ def calculate_qa_score(
                     evidence_ids.append(eid)
 
         if score is None:
-            # Check answer metadata or transcript presence
-            transcript = ans.get("transcript") or ans.get("answer_transcript")
-            score = 0.75 if transcript and str(transcript).strip() else 0.50
+            # A transcript proves that the candidate spoke, not that the answer met the
+            # rubric. Never invent credit when an assessment artifact lacks a score.
+            score = 0.0
 
         question_scores.append(max(0.0, min(1.0, score)))
 

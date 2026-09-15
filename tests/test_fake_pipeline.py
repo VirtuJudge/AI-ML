@@ -736,6 +736,7 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
     assert assessment_data["producer_version"] == "ai-ml/0.1.0"
     assert assessment_data["source_artifact_ids"] == [result.transcript_artifact_id]
     assert assessment_data["created_at"] != "2026-09-02T12:00:00Z"
+    assert assessment_data["assessment"]["score"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -774,6 +775,7 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
     assert assessment_data["source_artifact_ids"] == [result.transcript_artifact_id]
     assert assessment_data["created_at"] != "2026-09-02T12:00:00Z"
     assert assessment_data["assessment"]["evidence_ids"] == []
+    assert assessment_data["assessment"]["score"] == 0.65
 
 
 @pytest.mark.asyncio

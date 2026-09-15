@@ -96,6 +96,51 @@ async def test_load_report_evidence_from_storage(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_report_evidence_flattens_worker_assessment_score(tmp_path: Path) -> None:
+    """The report scorer consumes the nested answer-assessment artifact format."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    analysis_ref = await storage.upload_json(
+        "analysis.json",
+        {"session_id": "session_101", "transcript": {"text": "Pitch", "segments": []}},
+        artifact_id="01JANALYSIS00000000000002",
+    )
+    qa_ref = await storage.upload_json(
+        "qa.json",
+        {
+            "questions": [{"id": "q1", "text": "What is the CAC?"}],
+            "answers": [{"question_id": "q1", "status": "submitted", "transcript": "120 USD"}],
+            "assessments": [
+                {
+                    "question_id": "q1",
+                    "assessment": {
+                        "text": "The response lacks a payback explanation.",
+                        "score": 0.45,
+                        "evidence_ids": ["ev_ans_01"],
+                    },
+                }
+            ],
+        },
+        artifact_id="01JQA0000000000000000000002",
+    )
+
+    bundle = await load_report_evidence(analysis_ref, qa_ref, storage=storage)
+
+    assert bundle.assessments == [
+        {
+            "question_id": "q1",
+            "assessment": {
+                "text": "The response lacks a payback explanation.",
+                "score": 0.45,
+                "evidence_ids": ["ev_ans_01"],
+            },
+            "assessment_text": "The response lacks a payback explanation.",
+            "score": 0.45,
+            "evidence_ids": ["ev_ans_01"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_load_report_evidence_synthetic_fallback_on_missing_storage(tmp_path: Path) -> None:
     """Verify load_report_evidence falls back to synthetic data when objects are missing."""
     storage = LocalDiskObjectStorage(base_dir=tmp_path)

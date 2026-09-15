@@ -837,6 +837,7 @@ class FakePipeline:
             "created_at": created_at,
             "assessment": {
                 "text": assessment_res.assessment.assessment_text,
+                "score": assessment_res.assessment.score,
                 "evidence_ids": assessment_res.assessment.evidence_ids,
             },
             "follow_up": (

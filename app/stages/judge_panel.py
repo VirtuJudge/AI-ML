@@ -9,6 +9,8 @@ Enforces zero-emotional-claims safety guardrails, evidence grounding, and strict
 conformance to PrimaryQuestion data contracts.
 """
 
+import re
+
 import ulid
 from pydantic import BaseModel
 
@@ -22,6 +24,17 @@ from app.prompts.judges import (
     TECHNICAL_EVALUATOR_PROMPT,
 )
 from app.stages.evidence import EvidenceBundle
+
+
+EVIDENCE_ID_IN_QUESTION_TEXT_REGEX = re.compile(
+    r"(?i)\s*\(?\s*(?:evidence\s*(?:id)?\s*[:#-]?\s*)?ev_[a-z0-9_-]+\s*\)?\s*[,;:]?"
+)
+
+
+def strip_evidence_ids_from_question_text(text: str) -> str:
+    """Keep machine evidence identifiers out of the candidate-facing question."""
+    cleaned = EVIDENCE_ID_IN_QUESTION_TEXT_REGEX.sub(" ", text)
+    return " ".join(cleaned.split())
 
 
 class JudgeSpec(BaseModel):
@@ -113,6 +126,8 @@ Full Transcript:
 
 Based on this evidence, produce exactly ONE primary grounded question in JSON format.
 Ensure you cite at least one valid evidence_id from the evidence list above.
+Put evidence IDs only in the evidence_ids JSON field. Never include an evidence ID in the
+candidate-facing text field.
 """
     return [
         {"role": "system", "content": judge.system_prompt},
@@ -170,8 +185,10 @@ def validate_judge_question(
     """
     limitations: list[Limitation] = []
 
-    # 1. Text and reason non-empty
-    if not question.text or not question.text.strip():
+    # 1. Text and reason non-empty. Evidence identifiers are metadata, not words
+    # for the candidate to see or hear.
+    cleaned_question_text = strip_evidence_ids_from_question_text(question.text)
+    if not cleaned_question_text:
         limitations.append(
             Limitation(
                 code="empty_question_text",
@@ -253,7 +270,7 @@ def validate_judge_question(
 
     validated = PrimaryQuestion(
         candidate_id=final_cand_id,
-        text=question.text.strip(),
+        text=cleaned_question_text,
         reason=question.reason.strip(),
         rubric_dimension=dim_to_use,
         evidence_ids=valid_evidence_ids,
@@ -329,6 +346,7 @@ __all__ = [
     "PRODUCT_ANALYST_PROMPT",
     "TECHNICAL_EVALUATOR_PROMPT",
     "JudgeSpec",
+    "strip_evidence_ids_from_question_text",
     "check_for_subjective_emotional_claims",
     "create_fallback_question",
     "format_prompt_for_judge",
