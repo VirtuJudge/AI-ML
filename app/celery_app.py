@@ -21,22 +21,32 @@ def create_celery_app(
     )
     queue_name = os.getenv("AI_QUEUE_NAME", DEFAULT_QUEUE_NAME)
     prefetch = int(os.getenv("CELERY_PREFETCH_MULTIPLIER", "1"))
+    broker_use_ssl = None
+    if effective_broker.startswith("rediss://"):
+        import ssl
+        broker_use_ssl = {"ssl_cert_reqs": ssl.CERT_NONE}
+
     app = Celery(app_name, broker=effective_broker)
-    app.conf.update(
-        task_serializer="json",
-        accept_content=["json"],
-        result_serializer="json",
-        timezone="UTC",
-        enable_utc=True,
-        task_default_queue=queue_name,
-        task_ignore_result=True,
-        task_store_errors_even_if_ignored=False,
-        broker_connection_retry_on_startup=True,
-        worker_prefetch_multiplier=prefetch,
-        task_acks_late=True,
-        task_reject_on_worker_lost=True,
-        include=["app.worker"],
-    )
+    conf: dict[str, Any] = {
+        "task_serializer": "json",
+        "accept_content": ["json"],
+        "result_serializer": "json",
+        "timezone": "UTC",
+        "enable_utc": True,
+        "task_default_queue": queue_name,
+        "task_ignore_result": True,
+        "task_store_errors_even_if_ignored": False,
+        "broker_connection_retry_on_startup": True,
+        "worker_prefetch_multiplier": prefetch,
+        "task_acks_late": True,
+        "task_reject_on_worker_lost": True,
+        "include": ["app.worker"],
+    }
+    if broker_use_ssl:
+        conf["broker_use_ssl"] = broker_use_ssl
+        conf["redis_backend_use_ssl"] = broker_use_ssl
+
+    app.conf.update(**conf)
     return app
 
 

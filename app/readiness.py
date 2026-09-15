@@ -1,5 +1,6 @@
 """Readiness and health check probes for VirtuJudge AI-ML worker."""
 
+import contextlib
 import logging
 import os
 from typing import Any
@@ -28,11 +29,16 @@ async def check_readiness(
     try:
         import redis.asyncio as aioredis
 
-        # Mask credentials in any logging
         r = aioredis.from_url(broker_url, socket_connect_timeout=2.0)
-        await r.ping()
-        await r.aclose()
-        broker_connected = True
+        try:
+            await r.ping()
+            broker_connected = True
+        finally:
+            with contextlib.suppress(Exception):
+                await r.aclose()
+            if hasattr(r, "connection_pool") and hasattr(r.connection_pool, "disconnect"):
+                with contextlib.suppress(Exception):
+                    await r.connection_pool.disconnect()
     except Exception as exc:
         logger.debug("Broker readiness check failed: %s", exc)
         broker_connected = False
