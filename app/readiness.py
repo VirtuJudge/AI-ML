@@ -8,8 +8,8 @@ from app.backend_client import BackendClient, BackendClientProtocol
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TASK_NAME: str = "app.worker.process_job"
-DEFAULT_QUEUE_NAME: str = "ai_jobs"
+DEFAULT_TASK_NAME: str = os.getenv("AI_TASK_NAME", "app.worker.process_job")
+DEFAULT_QUEUE_NAME: str = os.getenv("AI_QUEUE_NAME", "ai_jobs")
 
 
 async def check_readiness(
@@ -19,10 +19,11 @@ async def check_readiness(
 ) -> dict[str, Any]:
     """Perform deep readiness check verifying all external dependencies and registered task."""
     queue_name = os.getenv("AI_QUEUE_NAME", DEFAULT_QUEUE_NAME)
+    task_name = os.getenv("AI_TASK_NAME", DEFAULT_TASK_NAME)
     provider_mode = os.getenv("AI_PROVIDER_MODE", "fake")
 
     # 1. Broker connectivity
-    broker_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    broker_url = redis_url or os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
     broker_connected = False
     try:
         import redis.asyncio as aioredis
@@ -39,12 +40,18 @@ async def check_readiness(
     # 2. Celery task registration
     task_registered = False
     try:
-        if celery_app is not None:
-            task_registered = DEFAULT_TASK_NAME in celery_app.tasks
-        else:
+        app_to_check = celery_app
+        if app_to_check is None:
             from app.celery_app import celery_app as default_app
 
-            task_registered = DEFAULT_TASK_NAME in default_app.tasks
+            app_to_check = default_app
+
+        if hasattr(app_to_check, "loader") and hasattr(app_to_check.loader, "import_default_modules"):
+            app_to_check.loader.import_default_modules()
+        else:
+            import app.worker  # noqa: F401
+
+        task_registered = task_name in app_to_check.tasks
     except Exception as exc:
         logger.debug("Task registration check failed: %s", exc)
         task_registered = False
