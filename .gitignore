@@ -24,6 +24,7 @@ evaluation-results/
 *.mkv
 *.mp4
 *.wav
+my_space/
 
 # Runtime configuration
 .env
