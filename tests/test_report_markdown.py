@@ -468,6 +468,27 @@ def test_generate_markdown_report_minimal_fallback() -> None:
     assert "## Appendix" not in md
 
 
+def test_generate_markdown_report_hides_missing_delivery_feedback_and_internal_user_ids() -> None:
+    """Do not show invented coaching or opaque internal IDs to report readers."""
+    evaluation = _make_sample_evaluation()
+    presenter = evaluation.member_feedback[0]
+    presenter.speaking_intervals = []
+    presenter.speaking_time_ms = 0
+    presenter.summary = ""
+
+    qa_data = _make_sample_qa_data()
+    internal_user_id = "68766795-71d7-4a40-a689-87f4502974f7"
+    qa_data["answers"][0]["answered_by"] = internal_user_id
+
+    md = generate_markdown_report(evaluation, qa_data=qa_data)
+
+    assert "*No delivery data was recorded for this presenter.*" in md
+    assert "Vocal Projection & Pacing" not in md
+    assert "Slide Transition Pauses" not in md
+    assert internal_user_id not in md
+    assert "**Answered By:** Team Member" in md
+
+
 def test_format_speaker_metrics_highlight_empty_and_populated() -> None:
     """Verify metric highlight helper handles empty and populated speaker profiles."""
     assert "No active delivery metrics" in format_speaker_metrics_highlight(None)[0]

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 from typing import Any
+from uuid import UUID
 
 from app.contracts import Evaluation
 from app.stages.aggregation import compute_speaker_metrics_summary, format_duration_ms
@@ -40,6 +41,18 @@ def _label_title(label: str | None) -> str:
     if not label:
         return "Not Rated"
     return SCORE_LABEL_DISPLAY.get(label, label.replace("_", " ").title())
+
+
+def _display_answered_by(value: Any) -> str:
+    """Keep internal UUIDs out of the user-facing Q&A report."""
+    display_value = str(value or "").strip()
+    if not display_value:
+        return "Team Member"
+    try:
+        UUID(display_value)
+    except (TypeError, ValueError, AttributeError):
+        return display_value
+    return "Team Member"
 
 
 def format_speaker_metrics_highlight(profile: dict[str, Any] | None) -> list[str]:
@@ -231,6 +244,14 @@ def generate_markdown_report(
             out.append(f"### {member.display_name} ({spk_label})")
             out.append("")
 
+            spk_profile = (by_speaker or {}).get(spk_label)
+            has_delivery_data = bool(member.speaking_intervals) or member.speaking_time_ms > 0
+            has_delivery_data = has_delivery_data or bool((spk_profile or {}).get("windows"))
+            if not has_delivery_data:
+                out.append("*No delivery data was recorded for this presenter.*")
+                out.append("")
+                continue
+
             # Turns & total speaking duration
             turn_strs = [inv.formatted for inv in member.speaking_intervals]
             turns_disp = ", ".join(turn_strs) if turn_strs else "None recorded"
@@ -259,7 +280,6 @@ def generate_markdown_report(
                 out.append("")
 
             # Reader-facing delivery coaching, derived from windowed observations.
-            spk_profile = (by_speaker or {}).get(spk_label)
             metric_lines = format_speaker_metrics_highlight(spk_profile)
             out.append("#### Delivery Coaching")
             out.append("")
@@ -327,7 +347,7 @@ def generate_markdown_report(
             if ans_status == "skipped":
                 out.append("- **Status:** ⚠️ *Skipped by team* (Score: 0/100)")
             else:
-                answered_by = ans.get("answered_by") or "Team Member"
+                answered_by = _display_answered_by(ans.get("answered_by"))
                 out.append(f"- **Answered By:** {answered_by}")
                 ans_transcript = ans.get("transcript")
                 if ans_transcript:
