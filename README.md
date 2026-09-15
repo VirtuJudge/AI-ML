@@ -1,7 +1,7 @@
 # VirtuJudge AI-ML Engine
 
 [![AI Engine Status](https://img.shields.io/badge/AI_Engine-Live_on_HuggingFace-blue?style=flat&logo=huggingface)](https://moadel01-virtujudge-ai-engine.hf.space)
-[![Tests](https://img.shields.io/badge/Tests-329%20passed-success)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-368%20passed-success)](tests/)
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-brightgreen)](pyproject.toml)
 [![License](https://img.shields.io/badge/License-Proprietary-lightgrey.svg)]()
 
@@ -37,10 +37,10 @@ The VirtuJudge AI Engine runs 24/7 as an asynchronous worker on Hugging Face Spa
 
 ## 📋 Pipeline Stages
 
-1. **`analyze_session`**: Processes pitch video/audio and pitch deck PDF. Performs speaker diarization, audio/visual analysis, slide extraction, and generates grounded primary questions with citations.
+1. **`analyze_session`**: Processes pitch video/audio and pitch deck PDF. Performs speaker diarization, audio/visual analysis, slide extraction, and generates grounded primary questions with citations. Supports intermediate stage checkpoints and transient retries.
 2. **`analyze_answer`**: Transcribes presenter answers during interactive Q&A rounds, evaluates answer quality against slide evidence, and produces dynamic follow-up questions.
 3. **`generate_report`**: Executes the 7-category startup rubric scoring engine (with exactly 20% Q&A weight and skipped answer handling), synthesizes team and individual member feedback with diarization timestamps, and generates structured `evaluation.json` and human-readable `report.md`.
-4. **`erase_ai_data`**: Handles secure deletion of session document chunks and artifacts.
+4. **`erase_ai_data`**: Executes ADR 0007-compliant scoped physical deletion (intermediate artifacts, Q&A assessments, stage checkpoints, scratch media, and pgvector embeddings) while preserving evaluation reports for student access.
 
 ---
 
@@ -56,4 +56,4 @@ pytest -q
 pytest --cov=app tests/
 ```
 
-**Test Status:** 329 passed, 1 skipped, 0 failures.
+**Test Status:** 368 passed, 1 skipped, 0 failures.
