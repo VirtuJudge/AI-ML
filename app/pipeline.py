@@ -839,6 +839,8 @@ class FakePipeline:
             speaker_mappings=job.speaker_mappings,
             storage=self.object_storage,
             judge_provider=self.judge_provider,
+            rubric_id=job.rubric.rubric_id,
+            rubric_version=job.rubric.version,
             pipeline_version=PRODUCER_VERSION,
         )
 

@@ -347,6 +347,7 @@ async def test_generate_report_completes(fake_pipeline: FakePipeline) -> None:
     assert result.evaluation_artifact.object_key.endswith("evaluation.json")
     eval_data = await fake_pipeline.object_storage.read_json(result.evaluation_artifact.object_key)
     assert "overall_score" in eval_data
+    assert eval_data["rubric"] == {"rubric_id": "startup_pitch", "version": 1}
     assert len(eval_data["components"]) == 6
     assert len(eval_data["member_feedback"]) == 2
 

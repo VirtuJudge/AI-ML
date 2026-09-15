@@ -111,6 +111,7 @@ def test_generate_report_valid_fixture_consumption():
     assert msg.job_type == JobType.GENERATE_REPORT
     payload = GenerateReportPayload.model_validate(msg.payload)
     assert payload.report_id == "rep_001"
+    assert payload.rubric.rubric_id == "startup_pitch"
     assert isinstance(payload.analysis_artifact, ArtifactRef)
     assert payload.analysis_artifact.schema_version == 1
     assert isinstance(payload.qa_artifact, ArtifactRef)

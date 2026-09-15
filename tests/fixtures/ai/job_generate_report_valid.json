@@ -20,6 +20,10 @@
       "checksum": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "schema_version": 1
     },
+    "rubric": {
+      "rubric_id": "startup_pitch",
+      "version": 1
+    },
     "speaker_mappings": [
       {
         "speaker_label": "SPEAKER_00",

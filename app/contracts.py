@@ -175,6 +175,9 @@ class GenerateReportPayload(BaseModel):
     report_id: str
     analysis_artifact: ArtifactRef
     qa_artifact: ArtifactRef
+    rubric: RubricRef = Field(
+        default_factory=lambda: RubricRef(rubric_id="startup_pitch", version=1)
+    )
     speaker_mappings: list[SpeakerMapping] = Field(default_factory=list)
 
 
