@@ -11,7 +11,12 @@ import json
 import logging
 import os
 import signal
-from datetime import UTC, datetime
+try:
+    from datetime import UTC, datetime
+except ImportError:
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
 from typing import Any
 
 import redis.asyncio as aioredis
