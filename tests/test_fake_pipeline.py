@@ -88,6 +88,51 @@ async def test_analyze_session_with_supporting_documents(
 
 
 @pytest.mark.asyncio
+async def test_analyze_session_downloads_supporting_documents_from_object_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remote Supporting Documents are downloaded before document extraction."""
+    monkeypatch.chdir(tmp_path)
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "object-storage")
+    source = tmp_path / "source-deck.pdf"
+    source.write_bytes(b"%PDF synthetic supporting document")
+    await storage.upload_file("uploads/team/project/deck.pdf", source)
+
+    pipeline = FakePipeline(object_storage=storage)
+    document_id = "01JTESTDOCREMOTE00000000001"
+    session_id = "01JTESTSESSIONREMOTE0000001"
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTESTPRESENTATIONREMOTE01",
+            object_key="uploads/team/project/presentation.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+        ),
+        supporting_documents=[
+            AssetInput(
+                artifact_id=document_id,
+                object_key="uploads/team/project/deck.pdf",
+                checksum="sha256:" + "b" * 64,
+                media_type="application/pdf",
+            )
+        ],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "documents", "questions"],
+        practice_session_id=session_id,
+    )
+
+    result = await pipeline.analyze_session(payload)
+    stored_chunks = await pipeline.document_store.retrieve_top_k(
+        session_id,
+        [],
+        asset_version_ids=[document_id],
+    )
+
+    assert len(stored_chunks) == 2
+    assert not any(item.code == "document_file_missing" for item in result.limitations)
+
+
+@pytest.mark.asyncio
 async def test_analyze_session_result_is_stable(fake_pipeline: FakePipeline) -> None:
     """Test that analyze_session returns stable, identical results for repeated calls."""
     payload = AnalyzeSessionPayload(
@@ -807,4 +852,3 @@ async def test_analyze_session_embeds_by_speaker_in_analysis_artifact(
     assert spk1["intervals"][0]["formatted"] == "00:09 - 00:14"
     assert spk1["intervals"][0]["start_ms"] == 9300
     assert spk1["intervals"][0]["end_ms"] == 14000
-
