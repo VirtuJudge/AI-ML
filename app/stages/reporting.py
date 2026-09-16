@@ -91,6 +91,7 @@ async def run_report_stage(
     session_title: str = "Startup Pitch Practice Session",
     session_date: str | None = None,
     rubric_id: str = "startup_pitch",
+    rubric_version: int = 1,
     pipeline_version: str = "0.1.0",
 ) -> ReportStageResult:
     """Execute the end-to-end evaluation and report generation stage.
@@ -365,7 +366,7 @@ async def run_report_stage(
     reproducibility: dict[str, Any] = {
         "pipeline_version": pipeline_version,
         "rubric_id": rubric_id,
-        "rubric_version": 1,
+        "rubric_version": rubric_version,
         "prompt_versions": {
             "reporting": "1.0.0",
             "scoring": "1.0.0",
@@ -410,7 +411,7 @@ async def run_report_stage(
         id=eval_id,
         analysis_attempt_id=session_id,
         qa_round_id=qa_round_id,
-        rubric=RubricRef(rubric_id=rubric_id, version=1),
+        rubric=RubricRef(rubric_id=rubric_id, version=rubric_version),
         overall_score=overall_score,
         components=rubric_components,
         findings=all_findings,

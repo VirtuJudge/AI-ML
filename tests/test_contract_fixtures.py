@@ -47,6 +47,7 @@ class TestQueueMessageFixtures:
         msg = QueueMessage.model_validate_json(raw)
         assert msg.job_type == "generate_report"
         payload = GenerateReportPayload.model_validate(msg.payload)
+        assert payload.rubric.rubric_id == "startup_pitch"
         assert len(payload.speaker_mappings) == 1
         assert payload.speaker_mappings[0].speaker_label == "SPEAKER_00"
 
