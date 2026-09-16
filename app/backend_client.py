@@ -143,6 +143,8 @@ class BackendClient:
                     f"Job {job_id} not found on backend (HTTP 404). Stopping processing."
                 )
             elif response.status_code == 409:
+                if await self._should_retry_terminal_conflict(job_id, update):
+                    continue
                 logger.warning(
                     "Conflict recording update for job %s (HTTP 409). Job may be cancelled or superseded.",
                     job_id,
@@ -159,6 +161,30 @@ class BackendClient:
                 response.raise_for_status()
                 return response.json()
         return None
+
+    async def _should_retry_terminal_conflict(
+        self, job_id: str, update: WorkerUpdate
+    ) -> bool:
+        if update.status not in {
+            UpdateStatus.COMPLETED,
+            UpdateStatus.FAILED,
+            UpdateStatus.CANCELLED,
+        }:
+            return False
+
+        try:
+            response = await self.client.get(f"/internal/v1/ai-jobs/{job_id}")
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return False
+        if response.status_code != 200:
+            return False
+
+        data: dict[str, Any] = response.json()
+        return (
+            data.get("status") in {"pending", "queued", "running"}
+            and not data.get("cancel_requested", False)
+            and int(data.get("last_update_sequence", 0)) < update.sequence
+        )
 
     async def check_cancellation(self, job_id: str) -> bool:
         """Query the internal backend endpoint to check if job was cancelled."""

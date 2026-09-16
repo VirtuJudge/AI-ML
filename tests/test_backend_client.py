@@ -211,6 +211,67 @@ async def test_backend_client_http_status_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_backend_client_retries_terminal_update_after_active_job_conflict() -> None:
+    """A callback race must not orphan a report that was already uploaded."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "POST" and len([call for call in calls if call[0] == "POST"]) == 1:
+            return httpx.Response(409, json={"detail": "Concurrent update"})
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "running",
+                    "last_update_sequence": 4,
+                    "cancel_requested": False,
+                },
+            )
+        return httpx.Response(200, json={"status": "completed"})
+
+    client = BackendClient(base_url="http://testbackend:4000", shared_secret="sec")
+    client.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url=client.base_url
+    )
+    update = WorkerUpdate(
+        schema_version=1,
+        sequence=5,
+        status=UpdateStatus.COMPLETED,
+        occurred_at="2026-09-02T12:00:00Z",
+        trace_id="trc_report",
+        payload={
+            "evaluation_artifact": {
+                "artifact_id": "eval_1",
+                "object_key": "ai/session/session_1/evaluation.json",
+                "checksum": "sha256:" + "a" * 64,
+                "schema_version": 1,
+            },
+            "report_artifact": {
+                "artifact_id": "report_1",
+                "object_key": "ai/session/session_1/report.md",
+                "checksum": "sha256:" + "b" * 64,
+                "schema_version": 1,
+            },
+            "member_feedback_user_ids": [],
+            "limitations": [],
+        },
+    )
+
+    try:
+        result = await client.send_update("job_report", update)
+    finally:
+        await client.close()
+
+    assert result == {"status": "completed"}
+    assert calls == [
+        ("POST", "/internal/v1/ai-jobs/job_report/updates"),
+        ("GET", "/internal/v1/ai-jobs/job_report"),
+        ("POST", "/internal/v1/ai-jobs/job_report/updates"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_backend_client_cancelled_payload_is_empty_dict() -> None:
     """Test that cancelled update sends empty dict payload to backend."""
     from app.contracts import CancelledPayload
@@ -259,4 +320,3 @@ async def test_backend_client_reachability() -> None:
         assert await client.check_backend_reachability() is True
     finally:
         await client.close()
-

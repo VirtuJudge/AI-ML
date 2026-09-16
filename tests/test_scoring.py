@@ -51,7 +51,9 @@ def test_score_to_label() -> None:
     assert score_to_label(0.70) == "good"
     assert score_to_label(0.84) == "good"
 
-    assert score_to_label(0.85) == "strong"
+    assert score_to_label(0.80) == "strong"
+    assert score_to_label(0.795) == "strong"
+    assert score_to_label(0.825) == "strong"
     assert score_to_label(0.95) == "strong"
     assert score_to_label(1.00) == "strong"
 
