@@ -406,8 +406,10 @@ def test_generate_markdown_report_comprehensive() -> None:
     assert "⏱️ **Active Speaking Turns:** 00:00 - 02:15, 03:30 - 04:30 | **Total Speaking Time:** 3m 15s" in md
     assert "| Delivery & Body Language | 78 / 100 | Good |" in md
     assert "| Timing & Speech Mechanics | 74 / 100 | Good |" in md
-    assert "**Pace:** 142.0 WPM" in md
-    assert "**Posture Openness:** 0.85" in md
+    assert "#### Delivery Coaching" in md
+    assert "**Pace:**" not in md
+    assert "**Posture Openness:**" not in md
+    assert "The overall pace was easy to follow" in md
     assert "**Vocal Projection & Pacing**" in md
     assert "**Slide Transition Pauses**" in md
     assert "Pause 2 seconds after advancing" in md
@@ -416,7 +418,7 @@ def test_generate_markdown_report_comprehensive() -> None:
     assert "### Alex CTO (SPEAKER_01)" in md
     assert "⏱️ **Active Speaking Turns:** 02:15 - 03:30 | **Total Speaking Time:** 1m 15s" in md
     assert "| Delivery & Body Language | 72 / 100 | Good |" in md
-    assert "**Fillers:** 4" in md
+    assert "The delivery was slow enough to lose momentum" in md
     assert "**Direct Eye Alignment**" in md
     assert "**Reduce Filler Word Clusters**" in md
 
@@ -434,12 +436,11 @@ def test_generate_markdown_report_comprehensive() -> None:
     assert "### Question 3: What are the primary churn drivers identified during the pilot?" in md
     assert "⚠️ *Skipped by team* (Score: 0/100)" in md
 
-    # 6. Appendix
-    assert "## Appendix" in md
-    assert "[visual_partial_obstruction]" in md
-    assert "Lower body posture was not tracked" in md
-    assert "**Evaluator Model:** `openai/gpt-oss-120b`" in md
-    assert "**Scoring Engine:** `startup_pitch_v1`" in md
+    # System metadata does not belong in the reader-facing report.
+    assert "## Appendix" not in md
+    assert "[visual_partial_obstruction]" not in md
+    assert "**Evaluator Model:**" not in md
+    assert "**Scoring Engine:**" not in md
 
 
 def test_generate_markdown_report_minimal_fallback() -> None:
@@ -464,8 +465,28 @@ def test_generate_markdown_report_minimal_fallback() -> None:
     assert "Not Rated" in md
     assert "*No mapped individual presenter feedback available.*" in md
     assert "*No Q&A exchange records available for this session.*" in md
-    assert "*No systemic pipeline limitations recorded during evaluation.*" in md
-    assert "*No reproducibility metadata provided.*" in md
+    assert "## Appendix" not in md
+
+
+def test_generate_markdown_report_hides_missing_delivery_feedback_and_internal_user_ids() -> None:
+    """Do not show invented coaching or opaque internal IDs to report readers."""
+    evaluation = _make_sample_evaluation()
+    presenter = evaluation.member_feedback[0]
+    presenter.speaking_intervals = []
+    presenter.speaking_time_ms = 0
+    presenter.summary = ""
+
+    qa_data = _make_sample_qa_data()
+    internal_user_id = "68766795-71d7-4a40-a689-87f4502974f7"
+    qa_data["answers"][0]["answered_by"] = internal_user_id
+
+    md = generate_markdown_report(evaluation, qa_data=qa_data)
+
+    assert "*No delivery data was recorded for this presenter.*" in md
+    assert "Vocal Projection & Pacing" not in md
+    assert "Slide Transition Pauses" not in md
+    assert internal_user_id not in md
+    assert "**Answered By:** Team Member" in md
 
 
 def test_format_speaker_metrics_highlight_empty_and_populated() -> None:
@@ -506,14 +527,13 @@ def test_format_speaker_metrics_highlight_empty_and_populated() -> None:
         ]
     }
     lines = format_speaker_metrics_highlight(profile)
-    assert len(lines) == 2
-    assert "155.0 WPM" in lines[0]
-    assert "185.0 Hz" in lines[0]
-    assert "1000 ms (5 count)" in lines[0]
-    assert "3" in lines[0]
-    assert "0.95" in lines[1]
-    assert "0.81" in lines[1]
-    assert "4.5 px" in lines[1]
+    assert len(lines) == 3
+    assert "Pacing" in lines[0]
+    assert "easy to follow" in lines[0]
+    assert "Fluency" in lines[1]
+    assert "filler words" in lines[1]
+    assert "Audience connection" in lines[2]
+    assert not any("WPM" in line or "Hz" in line or "px" in line for line in lines)
 
 
 def test_generate_markdown_report_speaker_boundary_isolation() -> None:
@@ -601,5 +621,3 @@ def test_generate_markdown_report_question_id_candidate_id_lookup() -> None:
     assert "Alex CTO" in md
     assert "Our gross margin is 82% at current cloud volume." in md
     assert "Clear software-like margin economics." in md
-
-

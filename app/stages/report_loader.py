@@ -364,6 +364,22 @@ async def load_report_evidence(
         answers = qa_data["qa_round"].get("answers", [])
 
     assessments = qa_data.get("assessments", [])
+    if not isinstance(assessments, list):
+        assessments = []
+    normalized_assessments: list[dict[str, Any]] = []
+    for assessment in assessments:
+        if not isinstance(assessment, dict):
+            continue
+        normalized = dict(assessment)
+        nested = assessment.get("assessment")
+        if isinstance(nested, dict):
+            if normalized.get("assessment_text") is None:
+                normalized["assessment_text"] = nested.get("text")
+            if normalized.get("score") is None:
+                normalized["score"] = nested.get("score")
+            if not normalized.get("evidence_ids"):
+                normalized["evidence_ids"] = nested.get("evidence_ids", [])
+        normalized_assessments.append(normalized)
 
     return ReportEvidenceBundle(
         session_id=session_id,
@@ -377,7 +393,7 @@ async def load_report_evidence(
         limitations=limitations,
         questions=questions,
         answers=answers,
-        assessments=assessments,
+        assessments=normalized_assessments,
         metadata=analysis_data.get("metadata", {}),
     )
 

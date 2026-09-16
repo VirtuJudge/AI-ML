@@ -88,6 +88,51 @@ async def test_analyze_session_with_supporting_documents(
 
 
 @pytest.mark.asyncio
+async def test_analyze_session_downloads_supporting_documents_from_object_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remote Supporting Documents are downloaded before document extraction."""
+    monkeypatch.chdir(tmp_path)
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "object-storage")
+    source = tmp_path / "source-deck.pdf"
+    source.write_bytes(b"%PDF synthetic supporting document")
+    await storage.upload_file("uploads/team/project/deck.pdf", source)
+
+    pipeline = FakePipeline(object_storage=storage)
+    document_id = "01JTESTDOCREMOTE00000000001"
+    session_id = "01JTESTSESSIONREMOTE0000001"
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTESTPRESENTATIONREMOTE01",
+            object_key="uploads/team/project/presentation.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+        ),
+        supporting_documents=[
+            AssetInput(
+                artifact_id=document_id,
+                object_key="uploads/team/project/deck.pdf",
+                checksum="sha256:" + "b" * 64,
+                media_type="application/pdf",
+            )
+        ],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "documents", "questions"],
+        practice_session_id=session_id,
+    )
+
+    result = await pipeline.analyze_session(payload)
+    stored_chunks = await pipeline.document_store.retrieve_top_k(
+        session_id,
+        [],
+        asset_version_ids=[document_id],
+    )
+
+    assert len(stored_chunks) == 2
+    assert not any(item.code == "document_file_missing" for item in result.limitations)
+
+
+@pytest.mark.asyncio
 async def test_analyze_session_result_is_stable(fake_pipeline: FakePipeline) -> None:
     """Test that analyze_session returns stable, identical results for repeated calls."""
     payload = AnalyzeSessionPayload(
@@ -122,6 +167,9 @@ async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
             media_type="audio/wav",
             duration_ms=25000,
         ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
         remaining_follow_ups=1,
     )
 
@@ -135,7 +183,7 @@ async def test_analyze_answer_completes(fake_pipeline: FakePipeline) -> None:
     assert isinstance(result.follow_up.rubric_dimension, str)
     assert len(result.follow_up.rubric_dimension) > 0
     assert isinstance(result.follow_up.evidence_ids, list)
-    assert result.follow_up.evidence_ids == []
+    assert result.follow_up.evidence_ids == ["ev_speech_001"]
 
 
 @pytest.mark.asyncio
@@ -188,6 +236,9 @@ async def test_analyze_answer_skipped_produces_no_invented_evidence() -> None:
             media_type="audio/wav",
             duration_ms=25000,
         ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
         remaining_follow_ups=2,
     )
 
@@ -253,6 +304,9 @@ async def test_analyze_answer_follow_up_has_required_fields(
             media_type="audio/wav",
             duration_ms=25000,
         ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
         remaining_follow_ups=2,
     )
 
@@ -265,7 +319,7 @@ async def test_analyze_answer_follow_up_has_required_fields(
         and len(result.follow_up.rubric_dimension.strip()) > 0
     )
     assert isinstance(result.follow_up.evidence_ids, list)
-    assert result.follow_up.evidence_ids == []
+    assert result.follow_up.evidence_ids == ["ev_speech_001"]
 
 
 @pytest.mark.asyncio
@@ -683,6 +737,7 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
     assert assessment_data["producer_version"] == "ai-ml/0.1.0"
     assert assessment_data["source_artifact_ids"] == [result.transcript_artifact_id]
     assert assessment_data["created_at"] != "2026-09-02T12:00:00Z"
+    assert assessment_data["assessment"]["score"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -721,6 +776,7 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
     assert assessment_data["source_artifact_ids"] == [result.transcript_artifact_id]
     assert assessment_data["created_at"] != "2026-09-02T12:00:00Z"
     assert assessment_data["assessment"]["evidence_ids"] == []
+    assert assessment_data["assessment"]["score"] == 0.65
 
 
 @pytest.mark.asyncio
@@ -808,4 +864,3 @@ async def test_analyze_session_embeds_by_speaker_in_analysis_artifact(
     assert spk1["intervals"][0]["formatted"] == "00:09 - 00:14"
     assert spk1["intervals"][0]["start_ms"] == 9300
     assert spk1["intervals"][0]["end_ms"] == 14000
-

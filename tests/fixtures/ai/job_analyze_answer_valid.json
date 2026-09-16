@@ -11,6 +11,9 @@
     "question_id": "q_001",
     "answer_id": "ans_001",
     "answered_by": "user_founder_01",
+    "question_text": "What evidence supports the claimed conversion rate?",
+    "rubric_dimension": "pitch_content_and_evidence",
+    "question_evidence_ids": ["ev_speech_001"],
     "audio": {
       "artifact_id": "01JEXAMPLE0000000000000012",
       "object_key": "raw/answer_001.m4a",

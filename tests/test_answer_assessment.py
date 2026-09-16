@@ -25,6 +25,7 @@ async def test_run_answer_assessment_stage_with_follow_up() -> None:
 
     assert isinstance(result, AnswerAssessmentResult)
     assert result.assessment.assessment_text != ""
+    assert result.assessment.score == 0.65
     assert result.assessment.evidence_ids == []
     assert result.assessment.follow_up is not None
     assert isinstance(result.assessment.follow_up, FollowUpQuestion)
@@ -55,6 +56,7 @@ async def test_run_answer_assessment_stage_without_follow_up() -> None:
 
     assert isinstance(result, AnswerAssessmentResult)
     assert result.assessment.assessment_text != ""
+    assert result.assessment.score == 0.65
     assert result.assessment.evidence_ids == []
     assert result.assessment.follow_up is None
     assert result.metadata["has_follow_up"] is False
@@ -78,6 +80,7 @@ async def test_run_answer_assessment_stage_skipped_empty_transcript() -> None:
 
     assert isinstance(result, AnswerAssessmentResult)
     assert result.assessment.assessment_text == ""
+    assert result.assessment.score == 0.0
     assert result.assessment.evidence_ids == []
     assert result.assessment.follow_up is None
     assert result.limitations == []
@@ -100,6 +103,7 @@ async def test_run_answer_assessment_stage_skipped_whitespace_transcript() -> No
     )
 
     assert result.assessment.assessment_text == ""
+    assert result.assessment.score == 0.0
     assert result.assessment.evidence_ids == []
     assert result.assessment.follow_up is None
     assert result.metadata.get("skipped") is True
@@ -127,3 +131,19 @@ async def test_run_answer_assessment_stage_follow_up_contract_fields() -> None:
     assert follow_up.rubric_dimension == rubric_dimension
     assert isinstance(follow_up.evidence_ids, list)
     assert follow_up.evidence_ids == []
+
+
+@pytest.mark.asyncio
+async def test_run_answer_assessment_stage_disqualifies_direct_judge_abuse() -> None:
+    """Direct insults aimed at the judge receive no score without querying the model."""
+    result = await run_answer_assessment_stage(
+        answer_transcript="You are an idiot and this question is stupid.",
+        question_text="What is your CAC?",
+        rubric_dimension="market_and_business_model",
+        judge_provider=FakeJudgeModelProvider(),
+        remaining_follow_ups=1,
+    )
+
+    assert result.assessment.score == 0.0
+    assert result.assessment.follow_up is None
+    assert result.metadata["disqualified_for_judge_directed_abuse"] is True

@@ -8,11 +8,11 @@ Verifies:
 - Retry behavior on transient errors and non-retry on validation errors.
 """
 
-from datetime import datetime, timezone
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,21 +27,15 @@ from app.contracts import (
     FailedPayload,
     GenerateReportPayload,
     PrimaryQuestion,
-    ProgressPayload,
-    QueueMessage,
     ReportCompleted,
-    RubricRef,
     SessionAnalysisCompleted,
-    StartedPayload,
     UpdateStatus,
     WorkerUpdate,
 )
 from app.stages.common import StageTransientError
 from app.worker import (
     _async_process_job_task,
-    process_job_task,
-    set_default_backend_client,
-    set_default_pipeline,
+    _run_async,
 )
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "ai"
@@ -71,6 +65,29 @@ class MockBackendClient:
 
     async def close(self) -> None:
         pass
+
+
+class LoopBoundBackendClient(MockBackendClient):
+    """Model an async client whose connection pool belongs to its first event loop."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.event_loop: asyncio.AbstractEventLoop | None = None
+
+    def _assert_event_loop(self) -> None:
+        current_loop = asyncio.get_running_loop()
+        if self.event_loop is None:
+            self.event_loop = current_loop
+        elif self.event_loop is not current_loop:
+            raise RuntimeError("Event loop is closed")
+
+    async def send_update(self, job_id: str, update: WorkerUpdate) -> bool:
+        self._assert_event_loop()
+        return await super().send_update(job_id, update)
+
+    async def check_cancellation(self, job_id: str) -> bool:
+        self._assert_event_loop()
+        return await super().check_cancellation(job_id)
 
 
 class MockPipeline:
@@ -192,6 +209,23 @@ def test_celery_task_registration():
     assert "app.worker.process_job" in celery_app.tasks
     task_func = celery_app.tasks["app.worker.process_job"]
     assert task_func.name == "app.worker.process_job"
+
+
+def test_sync_celery_boundary_reuses_one_event_loop_across_jobs():
+    """Consecutive sync Celery tasks must not invalidate cached async clients."""
+    envelope = _load_fixture("job_analyze_session_valid.json")
+    client = LoopBoundBackendClient()
+    pipeline = MockPipeline()
+
+    first = _run_async(
+        _async_process_job_task(None, envelope, pipeline=pipeline, backend_client=client)
+    )
+    second = _run_async(
+        _async_process_job_task(None, envelope, pipeline=pipeline, backend_client=client)
+    )
+
+    assert first is not None and first.status == UpdateStatus.COMPLETED
+    assert second is not None and second.status == UpdateStatus.COMPLETED
 
 
 @pytest.mark.asyncio

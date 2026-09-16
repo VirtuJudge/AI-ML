@@ -29,6 +29,18 @@ BANNED_SUBJECTIVE_TERMS: list[str] = [
 ]
 BANNED_REGEX: re.Pattern[str] = re.compile("|".join(BANNED_SUBJECTIVE_TERMS), re.IGNORECASE)
 
+# Only explicit attacks on the judge or the question are disqualifying.  This is
+# deliberately narrower than a general profanity filter: a candidate may disagree
+# with a question without losing all credit for the answer.
+JUDGE_DIRECTED_INSULT_REGEX: re.Pattern[str] = re.compile(
+    r"(?:\b(?:you|u|the\s+judge|judge|interviewer|this\s+question)\b\s*"
+    r"(?:are|is|r)?\s*(?:a|an|the)?\s*\b(?:idiot|moron|fool|clown|stupid|dumb|"
+    r"useless|incompetent|trash|garbage)\b|"
+    r"\b(?:stupid|dumb|ridiculous|garbage|trash)\s+(?:judge|interviewer|question)\b|"
+    r"\b(?:fuck|screw)\s+you\b|\bshut\s+up\b)",
+    re.IGNORECASE,
+)
+
 # Common guardrails injected into all judge personas
 COMMON_GUARDRAILS: str = """
 CRITICAL EVALUATION RULES & SAFETY GUARDRAILS:
@@ -113,6 +125,7 @@ OUTPUT FORMAT:
 You MUST respond with a valid JSON object strictly matching this schema:
 {{
   "assessment_text": "Detailed, objective evaluation of the team member's answer.",
+  "score": 0.0,
   "evidence_ids": ["ev_ans_01"],
   "follow_up": {{
     "text": "Specific, grounded follow-up question",
@@ -125,9 +138,24 @@ You MUST respond with a valid JSON object strictly matching this schema:
 If no follow-up is warranted or remaining_follow_ups is 0, output:
 {{
   "assessment_text": "Detailed, objective evaluation of the team member's answer.",
+  "score": 0.0,
   "evidence_ids": ["ev_ans_01"],
   "follow_up": null
 }}
+
+SCORING CALIBRATION (use a number from 0.0 to 1.0):
+- 0.00: no answer, a refusal, or direct abusive language aimed at the judge or question.
+- 0.20-0.40: largely off-topic, unsupported, evasive, or materially incorrect.
+- 0.45-0.60: partially addresses the question but leaves important claims, assumptions, or
+  reasoning unexplained. This is an adequate answer, not a strong one.
+- 0.65-0.80: directly answers the question with coherent reasoning and relevant specifics,
+  while retaining minor gaps.
+- 0.85-1.00: reserve for an exceptional answer that is direct, specific, internally consistent,
+  and substantiates its key claims or trade-offs. Do not award this range for fluent but generic
+  language.
+
+Do not praise by default. State exactly what was demonstrated and name the missing evidence or
+reasoning when the answer is not exceptional. Never infer facts that are absent from the answer.
 """
 
 __all__ = [
@@ -136,6 +164,7 @@ __all__ = [
     "BANNED_SUBJECTIVE_TERMS",
     "BUSINESS_STRATEGIST_PROMPT",
     "COMMON_GUARDRAILS",
+    "JUDGE_DIRECTED_INSULT_REGEX",
     "PRODUCT_ANALYST_PROMPT",
     "TECHNICAL_EVALUATOR_PROMPT",
 ]

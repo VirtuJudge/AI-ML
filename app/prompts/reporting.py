@@ -19,23 +19,32 @@ You are evaluating:
 {COMMON_GUARDRAILS}
 
 ADDITIONAL REPORT EVALUATION RULES:
-1. Strict Presenter Boundaries:
+1. Strict scoring calibration:
+   - A score near 0.50 means an adequate but incomplete performance. Do not treat fluency,
+     enthusiasm, or a generic statement as evidence of quality.
+   - Scores from 0.65 to 0.80 require a direct answer with coherent, relevant reasoning.
+   - Scores above 0.85 are exceptional and require specific, internally consistent claims plus
+     evidence, quantified support, or clearly explained trade-offs. Missing evidence must lower
+     the score; never fill gaps with assumptions.
+   - Praise only what the supplied evidence establishes. When the work is merely adequate,
+     name the missing proof or reasoning plainly and constructively.
+2. Strict Presenter Boundaries:
    - Feedback for an individual presenter MUST cite events, delivery metrics, or statements
      strictly within their active speaking turns.
    - Do NOT attribute one presenter's delivery behavior or statements to another presenter.
-2. Team-Level Q&A:
+3. Team-Level Q&A:
    - Q&A quality is evaluated at the team level across all questions asked and answered.
-3. Concrete Recommendations:
+4. Concrete Recommendations:
    - Every area for improvement must include a practical, actionable recommendation that
      the team or presenter can implement immediately before their next pitch.
-4. Output JSON Schema:
+5. Output JSON Schema:
    You MUST return a JSON object with this exact structure:
 {{
   "executive_summary": "2-3 concise sentences summarizing pitch effectiveness, core strengths, and critical focus areas.",
   "dimension_scores": {{
-    "pitch_content_and_evidence": 0.85,
-    "business_and_problem_solution_reasoning": 0.80,
-    "technical_feasibility": 0.82
+    "pitch_content_and_evidence": 0.62,
+    "business_and_problem_solution_reasoning": 0.58,
+    "technical_feasibility": 0.64
   }},
   "dimension_rationales": {{
     "pitch_content_and_evidence": "Clear explanation grounded in cited evidence.",

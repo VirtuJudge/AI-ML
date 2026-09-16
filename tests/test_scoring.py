@@ -40,16 +40,16 @@ def test_score_to_label() -> None:
     - [80, 100]: strong
     """
     assert score_to_label(0.0) == "needs_work"
-    assert score_to_label(0.39) == "needs_work"
-    assert score_to_label(0.394) == "needs_work"
+    assert score_to_label(0.44) == "needs_work"
+    assert score_to_label(0.444) == "needs_work"
 
-    assert score_to_label(0.40) == "developing"
+    assert score_to_label(0.45) == "developing"
     assert score_to_label(0.50) == "developing"
-    assert score_to_label(0.59) == "developing"
+    assert score_to_label(0.64) == "developing"
 
-    assert score_to_label(0.60) == "good"
+    assert score_to_label(0.65) == "good"
     assert score_to_label(0.70) == "good"
-    assert score_to_label(0.79) == "good"
+    assert score_to_label(0.84) == "good"
 
     assert score_to_label(0.80) == "strong"
     assert score_to_label(0.795) == "strong"
@@ -331,6 +331,17 @@ def test_calculate_qa_score_all_skipped() -> None:
     assert qa_score == 0.0
     assert score_to_display(qa_score) == 0
     assert score_to_label(qa_score) == "needs_work"
+
+
+def test_calculate_qa_score_missing_assessment_score_awards_no_credit() -> None:
+    """A transcript alone must not silently earn the historical 75% fallback."""
+    questions = [{"id": "q1", "text": "Q1"}]
+    answers = [{"question_id": "q1", "status": "submitted", "transcript": "A response"}]
+    assessments = [{"question_id": "q1", "assessment_text": "Incomplete response."}]
+
+    qa_score, _ = calculate_qa_score(questions, answers, assessments)
+
+    assert qa_score == 0.0
 
 
 def test_calculate_qa_score_empty_questions() -> None:

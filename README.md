@@ -1,9 +1,9 @@
 # VirtuJudge AI-ML Engine
 
-[![Latest Release](https://img.shields.io/badge/Release-v1.1.0-purple?style=flat)](https://github.com/VirtuJudge/AI-ML/releases/tag/v1.1.0)
+[![Latest Release](https://img.shields.io/badge/Release-v1.2.1-purple?style=flat)](https://github.com/VirtuJudge/AI-ML/releases/tag/v1.2.1)
 [![AI Engine Status](https://img.shields.io/badge/AI_Engine-Live_on_HuggingFace-blue?style=flat&logo=huggingface)](https://moadel01-virtujudge-ai-engine.hf.space)
-[![Tests](https://img.shields.io/badge/Tests-368%20passed-success)](tests/)
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-brightgreen)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/Tests-pytest-success)](tests/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-brightgreen)](pyproject.toml)
 [![Compliance](https://img.shields.io/badge/ADR_0007-Compliant_Erasure-success)](tests/test_erasure.py)
 [![License](https://img.shields.io/badge/License-Proprietary-lightgrey.svg)]()
 
@@ -17,8 +17,8 @@ The AI Engine runs 24/7 as an autonomous worker on Hugging Face Spaces:
 
 - **Live Status Dashboard**: [https://moadel01-virtujudge-ai-engine.hf.space](https://moadel01-virtujudge-ai-engine.hf.space)
 - **Deployment Tier**: Hugging Face Space (ZeroGPU / CPU Basic 2 vCPU · 16 GB RAM)
-- **Queue Consumer**: Redis async long-polling on `virtujudge:jobs` and `virtujudge:local:jobs`
-- **Health Check API**: SSE status endpoint monitoring model caches and worker thread liveliness.
+- **Queue Consumer**: Celery worker consuming the `ai_jobs` queue through a Redis broker.
+- **Production checks**: Readiness verifies broker connectivity, task registration, backend reachability, callback credentials, and object-storage configuration.
 
 ---
 
@@ -29,7 +29,8 @@ Jobs are consumed from Redis and processed through modular extraction and evalua
 ```mermaid
 flowchart TD
     subgraph Ingestion ["1. Queue & Dispatch"]
-        Redis[("Upstash Redis Queue")] -->|"BLPOP queue"| Worker["Worker Dispatcher (app/worker.py)"]
+        Redis[("Redis / Celery Broker")] -->|"ai_jobs"| Celery["Celery task: app.worker.process_job"]
+        Celery --> Worker["Persistent-loop worker (app/worker.py)"]
         Worker -->|"POST /updates (started)"| Backend["Backend Orchestrator"]
     end
 
@@ -83,6 +84,19 @@ flowchart TD
 
 ---
 
+## ✅ Reliable Job Execution
+
+Release `v1.2.1` documents the production execution model introduced after the
+previous README revision:
+
+- **Celery transport**: JSON-only messages are consumed from `ai_jobs`; late acknowledgements and worker-loss rejection protect in-flight work.
+- **Persistent async runtime**: the Celery worker uses one reusable event loop, preventing HTTP and provider clients from being reused on a closed event loop.
+- **Contract validation**: malformed envelopes, missing required fields, unknown job types, invalid checksums, and stale attempts are rejected safely before pipeline execution.
+- **Callback lifecycle**: the worker emits ordered `started`, progress, terminal, and cancellation updates. Backend `401`, `404`, and `409` responses stop the affected task rather than triggering unsafe retries.
+- **Transient retry policy**: retryable provider failures use bounded Celery retries; invalid input and superseded jobs are acknowledged without retrying.
+
+---
+
 ## 📋 The 4 Pipeline Lifecycle Phases
 
 Defined in `app/pipeline.py` and `app/contracts.py`:
@@ -126,7 +140,7 @@ Primary questions and answer assessments are evaluated by a specialized 3-judge 
 - **Business Strategist (`gpt-oss-120b`)**: Market sizing, unit economics, CAC/LTV, monetization.
 - **Technical Evaluator (`gpt-oss-120b`)**: Architecture, defensibility, technical feasibility.
 - **Product Analyst (`qwen3.8-27b`)**: Product-market fit, user friction, milestones, roadmap.
-- **GroqKeyPool**: Resilient key manager rotating across 4 API keys with transparent 429/503 failover.
+- **GroqKeyPool**: Resilient key manager rotating across configured API keys with transparent 429/503/529 failover.
 - **Guardrails**: Regex filtering suppresses subjective or emotional claims to ensure grounded, objective evaluations.
 
 ---
@@ -158,9 +172,10 @@ AI-ML/
 ├── app/
 │   ├── contracts.py              # Pydantic v2 schemas for backend contracts & updates
 │   ├── pipeline.py               # PitchAnalysisPipeline protocol & FakePipeline implementation
-│   ├── worker.py                 # Job dispatcher with cancellation cleanup & error mapping
+│   ├── celery_app.py             # Celery broker, queue, serializer, and acknowledgement settings
+│   ├── worker.py                 # Celery task, persistent async runtime, cancellation & retry handling
 │   ├── backend_client.py         # Async HTTP client for status callbacks & cancellation checks
-│   ├── queue_consumer.py         # 24/7 Redis BLPOP polling loop with worker heartbeats
+│   ├── readiness.py              # Broker, task, backend, credential, and storage readiness checks
 │   ├── document_store.py         # Supabase PostgreSQL pgvector store & in-memory fake
 │   ├── compat.py                 # Python 3.10 and PyTorch compatibility shims
 │   ├── prompts/                  # Judge and report generation prompt templates
@@ -168,7 +183,7 @@ AI-ML/
 │   ├── stages/                   # Pipeline stages (media, speech, vision, audio, scoring, reporting)
 │   └── storage/                  # Cloudflare R2 / AWS S3 and local storage clients
 ├── scripts/                      # Worker runners and end-to-end verification scripts
-├── tests/                        # Comprehensive test suite (368 deterministic tests)
+├── tests/                        # Unit, contract, integration, and reliability coverage
 ├── pyproject.toml                # Build configuration & dependency definitions
 └── README.md                     # Project documentation
 ```
@@ -178,8 +193,31 @@ AI-ML/
 ## 🧪 Testing & Verification
 
 ```bash
-# Run test suite
+# Install the development dependencies, then run the test suite.
+pip install -e ".[dev]"
 pytest -q
 ```
 
-**Test Status:** `368 passed, 1 skipped, 0 failures` (100% pass rate).
+For the Hugging Face production image, dependencies are pinned in
+[`requirements.txt`](requirements.txt) and required OS packages are listed in
+[`packages.txt`](packages.txt).
+
+---
+
+## ⚙️ Configuration
+
+Copy [`.env.example`](.env.example) to `.env` for local development. Never
+commit real credentials.
+
+- `CELERY_BROKER_URL` or `REDIS_URL`: Redis broker used by Celery.
+- `AI_QUEUE_NAME`: queue name; defaults to `ai_jobs`.
+- `BACKEND_INTERNAL_URL` and `AI_WORKER_SHARED_SECRET`: authenticated backend callback configuration. Both are required in production.
+- `OBJECT_STORAGE_*`: S3-compatible object storage configuration, including Cloudflare R2.
+- `AI_PROVIDER_MODE`: use `fake` locally; use `live` only when the required model, storage, and API credentials are configured.
+- `GROQ_API_KEY` through `GROQ_API_KEY_4`: optional Groq key pool used for transcription and judge calls.
+
+Start the local worker with:
+
+```bash
+python -m app
+```

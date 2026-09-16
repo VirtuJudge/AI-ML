@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import shutil
+
 try:
     from datetime import UTC, datetime
 except ImportError:
@@ -19,6 +20,7 @@ from app.contracts import (
     AnalyzeAnswerPayload,
     AnalyzeSessionPayload,
     AnswerAnalysisCompleted,
+    AssetInput,
     EraseAIDataPayload,
     ErasureCompleted,
     GenerateReportPayload,
@@ -331,6 +333,58 @@ class FakePipeline:
             except Exception as exc:
                 logger.debug("Failed to emit progress update: %s", exc)
 
+    async def _resolve_supporting_documents(
+        self,
+        documents: list[AssetInput],
+        practice_session_id: str,
+    ) -> list[AssetInput]:
+        """Resolve remote Supporting Document object keys to local extraction paths."""
+        resolved_documents: list[AssetInput] = []
+
+        for document in documents:
+            object_path = Path(document.object_key)
+            if object_path.is_file():
+                resolved_documents.append(document)
+                continue
+
+            object_name = object_path.name or "supporting-document"
+            artifact_dir = hashlib.sha256(document.artifact_id.encode("utf-8")).hexdigest()[:16]
+            safe_session_dir = Path(practice_session_id).name
+            if safe_session_dir in {"", ".", ".."} or safe_session_dir != practice_session_id:
+                safe_session_dir = hashlib.sha256(
+                    practice_session_id.encode("utf-8")
+                ).hexdigest()[:16]
+            destination = (
+                Path(".storage/temp_media")
+                / safe_session_dir
+                / "documents"
+                / artifact_dir
+                / object_name
+            )
+            try:
+                await self.object_storage.download_file(document.object_key, destination)
+            except ObjectNotFoundError:
+                logger.warning(
+                    "Supporting document was not found in object storage: artifact_id=%s",
+                    document.artifact_id,
+                )
+                resolved_documents.append(document)
+                continue
+            except ObjectStorageError:
+                logger.warning(
+                    "Supporting document could not be downloaded: artifact_id=%s",
+                    document.artifact_id,
+                    exc_info=True,
+                )
+                resolved_documents.append(document)
+                continue
+
+            resolved_documents.append(
+                document.model_copy(update={"object_key": str(destination)})
+            )
+
+        return resolved_documents
+
     async def analyze_session(
         self,
         job: AnalyzeSessionPayload,
@@ -517,8 +571,12 @@ class FakePipeline:
             or getattr(job, "session_id", None)
             or job.presentation.artifact_id
         )
-        doc_stage_res = await run_document_stage(
+        supporting_documents = await self._resolve_supporting_documents(
             job.supporting_documents,
+            session_id,
+        )
+        doc_stage_res = await run_document_stage(
+            supporting_documents,
             self.document_provider,
             practice_session_id=session_id,
         )
@@ -744,11 +802,8 @@ class FakePipeline:
         # Inspection point 2: Before Groq LLM answer assessment & follow-up question generation
         await self._check_cancellation(job_id, backend_client, stage="assessment")
 
-        question_text = (
-            f"What specific unit economics assumptions drive your projected customer acquisition "
-            f"cost at scale for question {job.question_id}?"
-        )
-        rubric_dimension = "market_and_business_model"
+        question_text = job.question_text or f"Question {job.question_id}"
+        rubric_dimension = job.rubric_dimension or "unmapped"
 
         assessment_res = await with_transient_retries(
             lambda: run_answer_assessment_stage(
@@ -760,6 +815,15 @@ class FakePipeline:
             ),
             stage_name="assessment",
         )
+
+        follow_up = assessment_res.assessment.follow_up
+        if follow_up is not None:
+            if job.question_evidence_ids:
+                follow_up = follow_up.model_copy(
+                    update={"evidence_ids": list(job.question_evidence_ids)}
+                )
+            else:
+                follow_up = None
 
         assessment_payload = {
             "artifact_id": assessment_artifact_id,
@@ -773,11 +837,12 @@ class FakePipeline:
             "created_at": created_at,
             "assessment": {
                 "text": assessment_res.assessment.assessment_text,
+                "score": assessment_res.assessment.score,
                 "evidence_ids": assessment_res.assessment.evidence_ids,
             },
             "follow_up": (
-                assessment_res.assessment.follow_up.model_dump()
-                if assessment_res.assessment.follow_up
+                follow_up.model_dump()
+                if follow_up
                 else None
             ),
             "limitations": [lim.model_dump() for lim in assessment_res.limitations],
@@ -788,8 +853,6 @@ class FakePipeline:
             assessment_payload,
             artifact_id=assessment_artifact_id,
         )
-
-        follow_up = assessment_res.assessment.follow_up
 
         return AnswerAnalysisCompleted(
             answer_id=job.answer_id,

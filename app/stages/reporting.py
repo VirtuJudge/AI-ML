@@ -273,47 +273,57 @@ async def run_report_stage(
         spk_prof_with_label.setdefault("speaker_label", spk_label)
         delivery_components = calculate_individual_delivery_scores(spk_prof_with_label)
 
-        # Retrieve member findings from LLM feedback
-        mbr_strengths = list(feedback_result.member_strengths.get(spk_label, []))
-        mbr_improvements = list(feedback_result.member_improvements.get(spk_label, []))
-
-        # Default fallbacks if LLM omitted findings for this presenter
-        if not mbr_strengths:
-            mbr_strengths = [
-                Finding(
-                    id=f"f_{spk_label.lower()}_s1",
-                    kind="strength",
-                    title="Engaged Vocal Presence",
-                    detail=(
-                        f"{display_name} maintained clear vocal delivery "
-                        "throughout their presentation turns."
-                    ),
-                    rubric_dimension="delivery_and_body_language",
-                    speaker_labels=[spk_label],
-                )
-            ]
-        if not mbr_improvements:
-            mbr_improvements = [
-                Finding(
-                    id=f"f_{spk_label.lower()}_i1",
-                    kind="improvement",
-                    title="Slide Transition Calibration",
-                    detail=(
-                        f"{display_name} can use deliberate pauses when introducing new slides."
-                    ),
-                    recommendation=(
-                        "Insert a 1-2 second pause before transitioning to new sections."
-                    ),
-                    rubric_dimension="timing_and_speech_mechanics",
-                    speaker_labels=[spk_label],
-                )
-            ]
-
-        time_display = format_duration_ms(speaking_time_ms)
-        summary = (
-            f"Active presentation delivery analysis for {display_name} across "
-            f"{len(speaking_intervals)} turn(s) ({time_display} total)."
+        has_delivery_data = bool(speaking_intervals or spk_profile.get("windows")) or (
+            speaking_time_ms > 0
         )
+        if not has_delivery_data:
+            # Delivery feedback must be grounded in a recorded turn, duration, or
+            # observation. Do not turn missing media into invented praise or advice.
+            mbr_strengths = []
+            mbr_improvements = []
+            summary = "No delivery data was recorded for this presenter."
+        else:
+            # Retrieve member findings from LLM feedback.
+            mbr_strengths = list(feedback_result.member_strengths.get(spk_label, []))
+            mbr_improvements = list(feedback_result.member_improvements.get(spk_label, []))
+
+            # Default fallbacks apply only when there is delivery evidence.
+            if not mbr_strengths:
+                mbr_strengths = [
+                    Finding(
+                        id=f"f_{spk_label.lower()}_s1",
+                        kind="strength",
+                        title="Engaged Vocal Presence",
+                        detail=(
+                            f"{display_name} maintained clear vocal delivery "
+                            "throughout their presentation turns."
+                        ),
+                        rubric_dimension="delivery_and_body_language",
+                        speaker_labels=[spk_label],
+                    )
+                ]
+            if not mbr_improvements:
+                mbr_improvements = [
+                    Finding(
+                        id=f"f_{spk_label.lower()}_i1",
+                        kind="improvement",
+                        title="Slide Transition Calibration",
+                        detail=(
+                            f"{display_name} can use deliberate pauses when introducing new slides."
+                        ),
+                        recommendation=(
+                            "Insert a 1-2 second pause before transitioning to new sections."
+                        ),
+                        rubric_dimension="timing_and_speech_mechanics",
+                        speaker_labels=[spk_label],
+                    )
+                ]
+
+            time_display = format_duration_ms(speaking_time_ms)
+            summary = (
+                f"Active presentation delivery analysis for {display_name} across "
+                f"{len(speaking_intervals)} turn(s) ({time_display} total)."
+            )
 
         member_feedbacks.append(
             MemberFeedback(

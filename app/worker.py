@@ -1,12 +1,15 @@
 """Worker dispatcher and Celery transport task for VirtuJudge AI-ML pipeline jobs."""
 
 import asyncio
+import atexit
+import concurrent.futures
 import contextlib
 import logging
-import os
 import random
 import shutil
+import threading
 from collections.abc import Coroutine
+
 try:
     from datetime import UTC, datetime
 except ImportError:
@@ -51,6 +54,8 @@ T = TypeVar("T")
 
 _default_pipeline: PitchAnalysisPipeline | None = None
 _default_backend_client: BackendClientProtocol | None = None
+_worker_event_loop: asyncio.AbstractEventLoop | None = None
+_worker_event_loop_lock = threading.Lock()
 
 
 def set_default_pipeline(pipeline: PitchAnalysisPipeline | None) -> None:
@@ -83,20 +88,50 @@ def get_or_create_backend_client() -> BackendClientProtocol:
     return _default_backend_client
 
 
+def _get_worker_event_loop() -> asyncio.AbstractEventLoop:
+    """Create the worker's reusable event loop on first use."""
+    global _worker_event_loop
+
+    if _worker_event_loop is None or _worker_event_loop.is_closed():
+        _worker_event_loop = asyncio.new_event_loop()
+    return _worker_event_loop
+
+
+def _run_on_worker_event_loop(coro: Coroutine[Any, Any, T]) -> T:
+    """Run one coroutine to completion while serializing access to the worker loop."""
+    with _worker_event_loop_lock:
+        return _get_worker_event_loop().run_until_complete(coro)
+
+
 def _run_async(coro: Coroutine[Any, Any, T]) -> T:
-    """Execute an async coroutine safely whether inside or outside an existing loop."""
+    """Execute every Celery coroutine on one persistent event loop.
+
+    Async HTTP, database, and provider connection pools are bound to the loop where
+    they are first used. Reusing one loop prevents cached clients from retaining
+    transports that belonged to an already-closed ``asyncio.run`` loop.
+    """
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        loop = None
+        return _run_on_worker_event_loop(coro)
 
-    if loop and loop.is_running():
-        import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(_run_on_worker_event_loop, coro).result()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    else:
-        return asyncio.run(coro)
+
+def _shutdown_worker_event_loop() -> None:
+    """Close the reusable worker event loop during interpreter shutdown."""
+    global _worker_event_loop
+
+    with _worker_event_loop_lock:
+        loop = _worker_event_loop
+        if loop is None or loop.is_closed():
+            return
+        loop.close()
+        _worker_event_loop = None
+
+
+atexit.register(_shutdown_worker_event_loop)
 
 
 def _map_validation_error(exc: ValidationError) -> tuple[ErrorCode, str]:

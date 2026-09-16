@@ -90,6 +90,7 @@ class FakeJudgeModelProvider:
 
         return AnswerAssessment(
             assessment_text=assessment_text,
+            score=0.85 if is_comprehensive else 0.65,
             evidence_ids=evidence_ids,
             follow_up=follow_up,
         )

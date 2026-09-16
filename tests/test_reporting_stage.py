@@ -118,7 +118,7 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
     assert "## Team Pitch Assessment" in md
     assert "## Individual Presenter Delivery Feedback" in md
     assert "## Q&A Session Deep Dive" in md
-    assert "## Appendix" in md
+    assert "## Appendix" not in md
 
 
 @pytest.mark.asyncio
@@ -320,3 +320,29 @@ async def test_run_report_stage_missing_modalities_produce_not_evaluated() -> No
     assert len(scored_comps) == 3
     eff_sum = sum(c.effective_weight for c in scored_comps if c.effective_weight is not None)
     assert pytest.approx(eff_sum, rel=1e-3) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_zero_turn_presenter_has_no_delivery_feedback() -> None:
+    """Presenter coaching requires a recorded turn or delivery observation."""
+    bundle = ReportEvidenceBundle(
+        session_id="session_no_delivery_data",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 0,
+                "intervals": [],
+                "windows": [],
+            }
+        },
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_NO_DELIVERY_01",
+        evidence_bundle_override=bundle,
+        judge_provider=FakeJudgeModelProvider(),
+    )
+
+    presenter = result.evaluation.member_feedback[0]
+    assert presenter.strengths == []
+    assert presenter.improvements == []
+    assert "No delivery data was recorded" in presenter.summary
