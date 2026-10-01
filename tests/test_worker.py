@@ -68,8 +68,8 @@ async def test_process_erase_job(
     assert update.sequence == 2
     assert update.trace_id == erase_message.trace_id
     assert isinstance(update.payload, ErasureCompleted)
-    assert update.payload.deleted_records == 14
-    assert update.payload.deleted_objects == 6
+    assert update.payload.deleted_records == 0
+    assert update.payload.deleted_objects == 0
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from app.backend_client import BackendClient
-from app.document_store import FakeDocumentStore, create_document_store
+from app.document_store import create_document_store
 from app.pipeline import FakePipeline
 from app.storage import create_object_storage
 from app.providers.fake_audio import FakeAudioMetricsProvider
@@ -85,12 +85,6 @@ async def build_pipeline() -> FakePipeline:
             doc_provider = FakeDocumentProvider()
 
         judge_provider = GroqJudgeModelProvider()
-        try:
-            doc_store = await create_document_store()
-        except Exception as exc:
-            logger.warning("Failed to initialize live pgvector document store (%s). Falling back to FakeDocumentStore.", exc)
-            doc_store = FakeDocumentStore()
-
         object_storage = create_object_storage()
     else:
         logger.info(
@@ -107,9 +101,11 @@ async def build_pipeline() -> FakePipeline:
             if os.getenv("GROQ_API_KEY")
             else FakeJudgeModelProvider()
         )
-        doc_store = FakeDocumentStore()
         object_storage = create_object_storage()
 
+    # Store selection is independent of model mode. A configured persistent
+    # store must never silently become an empty fake during erasure.
+    doc_store = await create_document_store()
     return FakePipeline(
         speech_provider=speech_provider,
         diarization_provider=diarization_provider,

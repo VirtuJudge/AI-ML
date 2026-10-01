@@ -11,7 +11,7 @@ except ImportError:
         pass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SHA256_HEX_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 
@@ -189,9 +189,18 @@ class EraseAIDataPayload(BaseModel):
 
     erasure_request_id: str
     scope: Literal["asset", "practice_session", "project", "team"]
-    scope_id: str
+    scope_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
     practice_session_ids: list[str] = Field(default_factory=list)
     answer_ids: list[str] = Field(default_factory=list)
+    asset_version_ids: list[str] = Field(default_factory=list)
+    retention_only: bool = False
+
+    @field_validator("practice_session_ids", "answer_ids", "asset_version_ids")
+    @classmethod
+    def validate_scoped_ids(cls, values: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z0-9_-]+", value) is None for value in values):
+            raise ValueError("Invalid erasure resource identifier")
+        return values
 
 
 class SessionAnalysisCompleted(BaseModel):
@@ -391,11 +400,17 @@ class QueueMessage(BaseModel):
     schema_version: int = 1
     job_id: str
     job_type: JobType
-    practice_session_id: str
+    practice_session_id: str | None = None
     analysis_attempt: int = 1
     created_at: datetime
     trace_id: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_ancestry(self) -> "QueueMessage":
+        if self.job_type != JobType.ERASE_AI_DATA and not self.practice_session_id:
+            raise ValueError("Analysis and report jobs require practice_session_id")
+        return self
 
 
 class WorkerUpdate(BaseModel):

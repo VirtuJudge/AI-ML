@@ -127,9 +127,10 @@ Defined in `app/pipeline.py` and `app/contracts.py`:
 - **Output**: Generates `evaluation.json` and Markdown `report.md`.
 
 ### 4. `erase_ai_data` (Physical Erasure & Compliance)
-- **`practice_session` Scope**: Purges intermediate observations, checkpoints, scratch media, and vector chunks while preserving final reports.
+- **Explicit session/project erasure**: Purges AI observations, checkpoints, scratch media, vector chunks, transcripts, evaluations, and final reports. Project erasure uses the backend's explicit session inventory, never the project ID as a session ID.
+- **Scheduled raw-media retention** (`retention_only=true`): Removes source-linked raw intermediates while preserving reports, evaluations, answer transcripts, and assessments. Backend-owned media and PDFs are purged by the backend coordinator, not the AI worker.
 - **`project` / `team` Scope**: Complete purge across all associated sessions.
-- **`asset` Scope**: Deletes uploaded asset files from object storage.
+- **`asset` Scope**: Uses exact source version IDs for derived-data retention. Upload keys remain under backend ownership.
 
 ---
 
