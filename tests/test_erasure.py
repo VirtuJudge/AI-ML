@@ -5,8 +5,7 @@ Verifies:
   - Intermediate artifacts (analysis.json, checkpoints/*, answers/*) are physically removed.
   - Document chunks in document_store are deleted.
   - Local scratch media (.storage/temp_media/{session_id}) is removed.
-  - CRITICAL: report.md and evaluation.json under ai/session/{session_id}/ are
-    STRICTLY PRESERVED for the 30-day student access window.
+  - Explicit deletion removes report.md and evaluation.json too.
 - Scoped erasure for scope="project" and scope="team":
   - Full purge: ALL objects under ai/session/{session_id}/* are removed
     (including report.md and evaluation.json).
@@ -108,7 +107,7 @@ async def _populate_session_data(
 
 @pytest.mark.asyncio
 async def test_scoped_erasure_practice_session(tmp_path: Path) -> None:
-    """Test practice_session erasure purges intermediates while preserving report & evaluation."""
+    """Explicit Practice Session erasure purges intermediate and final artifacts."""
     storage = LocalDiskObjectStorage(base_dir=tmp_path)
     document_store = FakeDocumentStore()
     pipeline = FakePipeline(object_storage=storage, document_store=document_store)
@@ -159,19 +158,12 @@ async def test_scoped_erasure_practice_session(tmp_path: Path) -> None:
         # 4. Local scratch media is removed
         assert not scratch_dir.exists()
 
-        # 5. CRITICAL: report.md and evaluation.json are STRICTLY PRESERVED
-        # for 30-day student window
+        # Explicit erasure also removes final artifacts.
         report_path = tmp_path / f"ai/session/{session_id}/report.md"
         evaluation_path = tmp_path / f"ai/session/{session_id}/evaluation.json"
 
-        assert report_path.is_file()
-        report_content = report_path.read_text(encoding="utf-8")
-        assert "Preserved strictly for 30-day student access." in report_content
-
-        assert evaluation_path.is_file()
-        eval_data = await storage.read_json(f"ai/session/{session_id}/evaluation.json")
-        assert eval_data["overall_score"] == 92.0
-        assert eval_data["status"] == "published"
+        assert not report_path.exists()
+        assert not evaluation_path.exists()
     finally:
         if scratch_dir.exists():
             shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -197,6 +189,7 @@ async def test_full_purge_project_scope(tmp_path: Path) -> None:
             erasure_request_id="01JERASUREREQ000000000002",
             scope="project",
             scope_id=session_id,
+            practice_session_ids=[session_id],
         )
         erasure_result = await pipeline.erase_data(job)
 
@@ -235,6 +228,7 @@ async def test_full_purge_team_scope(tmp_path: Path) -> None:
             erasure_request_id="01JERASUREREQ000000000003",
             scope="team",
             scope_id=session_id,
+            practice_session_ids=[session_id],
         )
         erasure_result = await pipeline.erase_data(job)
 
@@ -284,22 +278,20 @@ async def test_erasure_idempotency_practice_session(tmp_path: Path) -> None:
         res1 = await pipeline.erase_data(job)
         assert isinstance(res1, ErasureCompleted)
         assert not (tmp_path / f"ai/session/{session_id}/analysis.json").exists()
-        assert (tmp_path / f"ai/session/{session_id}/report.md").is_file()
-        assert (tmp_path / f"ai/session/{session_id}/evaluation.json").is_file()
+        assert not (tmp_path / f"ai/session/{session_id}/report.md").exists()
+        assert not (tmp_path / f"ai/session/{session_id}/evaluation.json").exists()
 
         # 2nd execution (idempotent retry)
         res2 = await pipeline.erase_data(job)
         assert isinstance(res2, ErasureCompleted)
         assert res2.erasure_request_id == job.erasure_request_id
-        # Preserved artifacts remain intact
-        assert (tmp_path / f"ai/session/{session_id}/report.md").is_file()
-        assert (tmp_path / f"ai/session/{session_id}/evaluation.json").is_file()
+        assert res2.deleted_records == 0
+        assert res2.deleted_objects == 0
 
         # 3rd execution (idempotent retry)
         res3 = await pipeline.erase_data(job)
         assert isinstance(res3, ErasureCompleted)
-        assert (tmp_path / f"ai/session/{session_id}/report.md").is_file()
-        assert (tmp_path / f"ai/session/{session_id}/evaluation.json").is_file()
+        assert res3.deleted_objects == 0
     finally:
         if scratch_dir.exists():
             shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -320,6 +312,7 @@ async def test_erasure_idempotency_full_purge(tmp_path: Path) -> None:
             erasure_request_id="01JERASUREREQ000000000005",
             scope="project",
             scope_id=session_id,
+            practice_session_ids=[session_id],
         )
 
         # 1st purge
@@ -337,6 +330,7 @@ async def test_erasure_idempotency_full_purge(tmp_path: Path) -> None:
             erasure_request_id="01JERASUREREQ000000000006",
             scope="team",
             scope_id=session_id,
+            practice_session_ids=[session_id],
         )
         res3 = await pipeline.erase_data(job_team)
         assert isinstance(res3, ErasureCompleted)
@@ -384,10 +378,10 @@ async def test_worker_process_job_erasure(tmp_path: Path) -> None:
         assert isinstance(update.payload, ErasureCompleted)
         assert update.payload.erasure_request_id == "01JERASUREREQ000000000007"
 
-        # Intermediate artifacts removed; final report and evaluation strictly preserved
+        # Explicit erasure removes intermediate and final artifacts.
         assert not (tmp_path / f"ai/session/{session_id}/analysis.json").exists()
-        assert (tmp_path / f"ai/session/{session_id}/report.md").is_file()
-        assert (tmp_path / f"ai/session/{session_id}/evaluation.json").is_file()
+        assert not (tmp_path / f"ai/session/{session_id}/report.md").exists()
+        assert not (tmp_path / f"ai/session/{session_id}/evaluation.json").exists()
     finally:
         if scratch_dir.exists():
             shutil.rmtree(scratch_dir, ignore_errors=True)

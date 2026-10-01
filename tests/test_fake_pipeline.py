@@ -421,8 +421,8 @@ async def test_erase_data_completes(fake_pipeline: FakePipeline) -> None:
 
     result = await fake_pipeline.erase_data(payload)
     assert result.erasure_request_id == "01JTEST0000000000000000040"
-    assert result.deleted_records == 14
-    assert result.deleted_objects == 6
+    assert result.deleted_records == 0
+    assert result.deleted_objects == 0
 
 
 def test_combine_timed_evidence_audio_attribution() -> None:

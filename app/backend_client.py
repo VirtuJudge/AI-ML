@@ -192,7 +192,9 @@ class BackendClient:
         try:
             response = await self.client.get(url)
         except (httpx.ConnectError, httpx.TimeoutException):
-            return False
+            # No contact is not proof of consent. Never continue a stage when
+            # revocation cannot be checked against the source of truth.
+            raise
 
         if response.status_code == 401:
             raise BackendUnauthorizedError(
@@ -201,7 +203,7 @@ class BackendClient:
         if response.status_code == 404:
             raise JobNotFoundError(f"Job {job_id} not found on backend (HTTP 404).")
         if response.status_code != 200:
-            return False
+            response.raise_for_status()
 
         data: dict[str, Any] = response.json()
         return bool(data.get("cancel_requested", False)) or data.get("status") == "cancelled"
