@@ -11,7 +11,7 @@ import urllib.parse
 from typing import Any, Protocol
 
 try:
-    import asyncpg
+    import asyncpg  # type: ignore
 except ImportError:
     asyncpg = None  # type: ignore[assignment]
 

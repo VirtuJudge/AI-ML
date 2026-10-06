@@ -17,17 +17,17 @@ if not hasattr(datetime, "UTC"):
 
 # 1. torchaudio legacy compatibility shims for pyannote.audio 3.x & speechbrain
 try:
-    import torchaudio
+    import torchaudio  # type: ignore
 
     # AudioMetaData shim
     if not hasattr(torchaudio, "AudioMetaData"):
         try:
-            from torchaudio.backend.common import AudioMetaData
+            from torchaudio.backend.common import AudioMetaData  # type: ignore
 
             torchaudio.AudioMetaData = AudioMetaData
         except Exception:
             try:
-                from torchaudio._backend.common import AudioMetaData
+                from torchaudio._backend.common import AudioMetaData  # type: ignore
 
                 torchaudio.AudioMetaData = AudioMetaData
             except Exception:

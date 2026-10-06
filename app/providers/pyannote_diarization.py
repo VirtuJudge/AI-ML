@@ -44,7 +44,7 @@ class PyannoteDiarizationProvider:
         Raises:
             ImportError: If pyannote.audio is not installed and pipeline_instance is not provided.
         """
-        self.model_name = model_name or os.getenv("DIARIZATION_MODEL", self.DEFAULT_MODEL)
+        self.model_name = model_name or os.getenv("DIARIZATION_MODEL") or self.DEFAULT_MODEL
 
         resolved_token = (
             auth_token
