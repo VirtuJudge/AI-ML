@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app.backend_client import BackendClient, FakeBackendClient
+from app.backend_client import BackendClient, BackendUnavailableError, FakeBackendClient
 from app.contracts import EraseAIDataPayload, QueueMessage, WorkerUpdate
 from app.document_store import FakeDocumentStore
 from app.pipeline import FakePipeline
@@ -125,7 +125,8 @@ async def test_unreachable_cancellation_check_fails_closed() -> None:
         base_url="http://synthetic", transport=httpx.MockTransport(handler)
     )
     try:
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(BackendUnavailableError) as error:
             await client.check_cancellation("job")
+        assert isinstance(error.value.__cause__, httpx.ConnectError)
     finally:
         await client.close()

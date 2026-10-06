@@ -299,7 +299,7 @@ async def test_celery_task_handles_transient_error_with_retry():
 async def test_celery_task_non_retryable_validation_error():
     """Verify non-retryable invalid input acknowledges without raising task.retry."""
     invalid_envelope = {
-        "job_id": "01JEXAMPLE_BAD",
+        "job_id": "01JEXAMPLE0000000000000051",
         "trace_id": "trc_bad",
         "job_type": "invalid_type",
     }

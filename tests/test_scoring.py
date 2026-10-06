@@ -34,10 +34,10 @@ def test_score_to_display() -> None:
 def test_score_to_label() -> None:
     """Verify label boundaries on [0, 100] display scale:
 
-    - [0, 40): needs_work
-    - [40, 60): developing
-    - [60, 80): good
-    - [80, 100]: strong
+    - [0, 45): needs_work
+    - [45, 65): developing
+    - [65, 85): good
+    - [85, 100]: strong
     """
     assert score_to_label(0.0) == "needs_work"
     assert score_to_label(0.44) == "needs_work"
@@ -51,9 +51,10 @@ def test_score_to_label() -> None:
     assert score_to_label(0.70) == "good"
     assert score_to_label(0.84) == "good"
 
-    assert score_to_label(0.80) == "strong"
-    assert score_to_label(0.795) == "strong"
-    assert score_to_label(0.825) == "strong"
+    assert score_to_label(0.80) == "good"
+    assert score_to_label(0.795) == "good"
+    assert score_to_label(0.825) == "good"
+    assert score_to_label(0.85) == "strong"
     assert score_to_label(0.95) == "strong"
     assert score_to_label(1.00) == "strong"
 
