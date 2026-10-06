@@ -41,10 +41,15 @@ class StepCancellationBackendClient:
         self.cancel_at_call = cancel_at_call
         self.call_count = 0
         self.updates: list[WorkerUpdate] = []
+        self.last_sequence = 0
         self.preflight_checked = False
 
     async def send_update(self, job_id: str, update: WorkerUpdate) -> None:
         self.updates.append(update)
+        self.last_sequence = max(self.last_sequence, update.sequence)
+
+    async def get_last_update_sequence(self, job_id: str) -> int:
+        return self.last_sequence
 
     async def check_cancellation(self, job_id: str) -> bool:
         if not self.preflight_checked:
@@ -110,10 +115,7 @@ async def test_analyze_session_cancelled_before_speech(
     assert terminal_update.status.value == "cancelled"
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "speech"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
     # Backend received started and cancelled in monotonic sequence
     assert len(backend_client.updates) >= 2
@@ -149,10 +151,7 @@ async def test_analyze_session_cancelled_after_speech_before_vision(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "vision"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
 
 @pytest.mark.asyncio
@@ -173,10 +172,7 @@ async def test_analyze_session_cancelled_before_questions(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "questions"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
 
 @pytest.mark.asyncio
@@ -197,10 +193,7 @@ async def test_analyze_session_cancelled_before_upload(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "aggregation"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
     # Confirm final analysis.json upload was aborted
     session_id = analyze_session_message.practice_session_id
@@ -230,10 +223,7 @@ async def test_analyze_answer_cancelled_before_transcription(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "speech"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
 
 @pytest.mark.asyncio
@@ -254,10 +244,7 @@ async def test_analyze_answer_cancelled_before_assessment(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "assessment"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +269,7 @@ async def test_generate_report_cancelled_before_ingestion(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "ingestion"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
 
 @pytest.mark.asyncio
@@ -306,10 +290,7 @@ async def test_generate_report_cancelled_before_synthesis(
     assert terminal_update.status == UpdateStatus.CANCELLED
     assert isinstance(terminal_update.payload, CancelledPayload)
     assert terminal_update.payload.stage == "reporting"
-    assert (
-        terminal_update.payload.message
-        == "Analysis cancelled by user request."
-    )
+    assert terminal_update.payload.message == "Analysis cancelled by user request."
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +354,7 @@ async def test_stage_checkpoint_reuse_across_attempts(
     checksum_v1 = job_v1.presentation.checksum
 
     # 1. On attempt=1: runs provider and writes checkpoint
-    res_attempt1 = await pipeline.analyze_session(
-        job_v1, job_id="job_attempt_1", attempt=1
-    )
+    res_attempt1 = await pipeline.analyze_session(job_v1, job_id="job_attempt_1", attempt=1)
     assert res_attempt1 is not None
     assert spy_speech.call_count == 1
 
@@ -383,15 +362,11 @@ async def test_stage_checkpoint_reuse_across_attempts(
     expected_ckpt_key = f"ai/session/{session_id}/checkpoints/speech_{clean_hash_v1}.json"
     assert (tmp_path / expected_ckpt_key).is_file()
 
-    cached_v1 = await get_stage_checkpoint(
-        storage, session_id, "speech", checksum_v1
-    )
+    cached_v1 = await get_stage_checkpoint(storage, session_id, "speech", checksum_v1)
     assert cached_v1 is not None
 
     # 2. On attempt=2 with same checksum: reuses cached checkpoint without calling provider
-    res_attempt2_same = await pipeline.analyze_session(
-        job_v1, job_id="job_attempt_2", attempt=2
-    )
+    res_attempt2_same = await pipeline.analyze_session(job_v1, job_id="job_attempt_2", attempt=2)
     assert res_attempt2_same is not None
     # Provider call count MUST remain 1
     assert spy_speech.call_count == 1
@@ -481,10 +456,7 @@ async def test_worker_transient_error_handling(
     assert terminal_update.payload.code == "provider_error"
 
     # 2. Safe message without leaking stack traces or provider internals
-    assert (
-        terminal_update.payload.message
-        == "A transient external provider error occurred."
-    )
+    assert terminal_update.payload.message == "A transient external provider error occurred."
     serialized_payload = terminal_update.payload.model_dump_json()
     assert "gsk_live_SECRET999888" not in serialized_payload
     assert "internal_key.pem" not in serialized_payload

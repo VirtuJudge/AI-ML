@@ -100,9 +100,7 @@ class PyMuPDFDocumentProvider:
 
         try:
             if doc.is_encrypted and not doc.authenticate(""):  # type: ignore[no-untyped-call]
-                raise DocumentExtractionError(
-                    "PDF document is password-protected or encrypted."
-                )
+                raise DocumentExtractionError("PDF document is password-protected or encrypted.")
 
             all_chunks: list[DocumentChunk] = []
             for page_index in range(len(doc)):

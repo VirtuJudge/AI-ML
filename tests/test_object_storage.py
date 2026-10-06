@@ -75,7 +75,6 @@ async def test_local_disk_storage_path_traversal_rejected(tmp_path: Path) -> Non
         await storage.download_file("../../secret.txt", tmp_path / "out.txt")
 
 
-
 @pytest.mark.asyncio
 async def test_s3_storage_mocked_calls() -> None:
     """Verify S3ObjectStorage invokes boto3 client correctly."""
@@ -325,6 +324,3 @@ async def test_s3_storage_delete_prefix_chunking() -> None:
     deleted = await storage.delete_prefix("logs/")
     assert deleted == 1500
     assert mock_boto_client.delete_objects.call_count == 2
-
-
-

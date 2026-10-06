@@ -409,8 +409,7 @@ class GroqKeyPool:
 
         if network_error_count == len(attempt_indices):
             raise AllKeysExhaustedError(
-                f"Groq API request failed due to network error on all "
-                f"{len(self._api_keys)} keys."
+                f"Groq API request failed due to network error on all {len(self._api_keys)} keys."
             )
 
         if last_error_code is not None:

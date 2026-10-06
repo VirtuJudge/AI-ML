@@ -7,6 +7,8 @@ required=(
   .github/pull_request_template.md
   .github/ISSUE_TEMPLATE/bug_report.yml
   .github/ISSUE_TEMPLATE/feature_request.yml
+  Dockerfile scripts/check_quality.py scripts/quality-baseline.json
+  scripts/check_live_provider_install.py
 )
 
 for file in "${required[@]}"; do
@@ -19,3 +21,6 @@ if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v -E '(^|/)\.env\.example$'
 fi
 
 echo "Repository check passed"
+
+python scripts/check_quality.py
+python -m pytest -m "not live"

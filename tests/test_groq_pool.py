@@ -260,4 +260,3 @@ async def test_groq_pool_post_multipart_failover() -> None:
 
     assert res == {"text": "transcribed speech"}
     assert client.post.call_count == 2
-

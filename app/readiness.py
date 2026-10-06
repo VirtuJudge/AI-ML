@@ -24,7 +24,11 @@ async def check_readiness(
     provider_mode = os.getenv("AI_PROVIDER_MODE", "fake")
 
     # 1. Broker connectivity
-    broker_url = redis_url or os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    broker_url = (
+        redis_url
+        or os.getenv("CELERY_BROKER_URL")
+        or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    )
     broker_connected = False
     try:
         import redis.asyncio as aioredis
@@ -52,7 +56,9 @@ async def check_readiness(
 
             app_to_check = default_app
 
-        if hasattr(app_to_check, "loader") and hasattr(app_to_check.loader, "import_default_modules"):
+        if hasattr(app_to_check, "loader") and hasattr(
+            app_to_check.loader, "import_default_modules"
+        ):
             app_to_check.loader.import_default_modules()
         else:
             import app.worker  # noqa: F401

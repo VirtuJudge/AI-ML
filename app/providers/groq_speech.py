@@ -8,7 +8,6 @@ Note:
     Files exceeding 25MB should be chunked, compressed, or normalized before transcription.
 """
 
-import asyncio
 import math
 import mimetypes
 import os
@@ -165,7 +164,10 @@ class GroqSpeechProvider:
                 f"exceeds Groq's 25MB upload limit ({self.max_file_size_bytes} bytes)."
             )
 
-        audio_bytes = await asyncio.to_thread(audio_path.read_bytes)
+        # Audio uploads are capped at 25 MB. Read the bounded local file directly
+        # so this adapter does not depend on asyncio's process-wide default
+        # executor, which can remain shut down across the local test loop lifecycle.
+        audio_bytes = audio_path.read_bytes()
         filename = audio_path.name
         mime_type = mimetypes.guess_type(filename)[0] or "audio/wav"
 

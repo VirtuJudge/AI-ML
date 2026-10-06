@@ -109,9 +109,7 @@ async def test_presentation_only_without_documents(
     base_session_payload: AnalyzeSessionPayload,
 ) -> None:
     """Invariant 4: Presentation-only pitch (0 documents) produces 3 grounded questions."""
-    no_docs_payload = base_session_payload.model_copy(
-        update={"supporting_documents": []}
-    )
+    no_docs_payload = base_session_payload.model_copy(update={"supporting_documents": []})
     pipeline = FakePipeline()
     result = await pipeline.analyze_session(no_docs_payload)
 
@@ -127,6 +125,7 @@ async def test_presentation_with_missing_vision(
     base_session_payload: AnalyzeSessionPayload,
 ) -> None:
     """Invariant 5: Missing vision produces limitations and 3 valid primary questions."""
+
     class EmptyVisionProvider(FakeVisionProvider):
         async def analyze_video(self, video_path: object) -> list:
             return []

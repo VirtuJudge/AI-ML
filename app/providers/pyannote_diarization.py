@@ -44,7 +44,7 @@ class PyannoteDiarizationProvider:
         Raises:
             ImportError: If pyannote.audio is not installed and pipeline_instance is not provided.
         """
-        self.model_name = model_name or os.getenv("DIARIZATION_MODEL", self.DEFAULT_MODEL)
+        self.model_name = model_name or os.getenv("DIARIZATION_MODEL") or self.DEFAULT_MODEL
 
         resolved_token = (
             auth_token
@@ -73,7 +73,12 @@ class PyannoteDiarizationProvider:
 
             hf_model = (
                 "pyannote/speaker-diarization-3.1"
-                if self.model_name in ("pyannote-community-1", "community-1", "pyannote/speaker-diarization-community-1")
+                if self.model_name
+                in (
+                    "pyannote-community-1",
+                    "community-1",
+                    "pyannote/speaker-diarization-community-1",
+                )
                 else self.model_name
             )
 
@@ -147,11 +152,7 @@ class PyannoteDiarizationProvider:
 
         # pyannote 4.0 returns DiarizeOutput with .speaker_diarization, while 3.x returns Annotation
         annotation = getattr(diarization_output, "speaker_diarization", diarization_output)
-        it = (
-            annotation.itertracks(yield_label=True)
-            if hasattr(annotation, "itertracks")
-            else []
-        )
+        it = annotation.itertracks(yield_label=True) if hasattr(annotation, "itertracks") else []
 
         for item in it:
             if len(item) == 3:

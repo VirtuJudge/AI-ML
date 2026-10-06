@@ -199,6 +199,7 @@ async def test_mediapipe_provider_strict_tracking_threshold(synthetic_video: Pat
 @pytest.mark.asyncio
 async def test_mediapipe_provider_movement_recency_reset(synthetic_video: Path) -> None:
     """Verify displacement resets to 0.0 when pose tracking has a temporal gap."""
+
     def make_pose(x: float, y: float):
         landmarks = [MagicMock(x=x, y=y, z=0.0) for _ in range(33)]
         # Left/right shoulders (11, 12)
@@ -243,4 +244,3 @@ async def test_mediapipe_provider_movement_recency_reset(synthetic_video: Path) 
     assert movement_obs[1].value == 0.0
     # Immediately consecutive frame should compute real displacement > 0.0
     assert movement_obs[2].value > 0.0
-

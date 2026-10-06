@@ -5,6 +5,7 @@ ObjectStorageProtocol, preventing expensive recomputation across pipeline runs.
 """
 
 import logging
+
 try:
     from datetime import UTC, datetime
 except ImportError:
@@ -74,8 +75,7 @@ async def get_stage_checkpoint(
 
     if payload.get("schema_version") != expected_schema_version:
         logger.info(
-            "Stage checkpoint schema_version mismatch for stage=%s session=%s: "
-            "expected %s, got %s",
+            "Stage checkpoint schema_version mismatch for stage=%s session=%s: expected %s, got %s",
             stage,
             session_id,
             expected_schema_version,
@@ -85,8 +85,7 @@ async def get_stage_checkpoint(
 
     if payload.get("input_checksum") != input_checksum:
         logger.info(
-            "Stage checkpoint input_checksum mismatch for stage=%s session=%s: "
-            "expected %s, got %s",
+            "Stage checkpoint input_checksum mismatch for stage=%s session=%s: expected %s, got %s",
             stage,
             session_id,
             input_checksum,

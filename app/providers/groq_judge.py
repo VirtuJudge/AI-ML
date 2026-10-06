@@ -444,18 +444,31 @@ class GroqJudgeModelProvider:
 
                 if not title or not detail:
                     continue
-                if BANNED_REGEX.search(title) or BANNED_REGEX.search(detail) or (rec and BANNED_REGEX.search(rec)):
+                if (
+                    BANNED_REGEX.search(title)
+                    or BANNED_REGEX.search(detail)
+                    or (rec and BANNED_REGEX.search(rec))
+                ):
                     logger.warning("Finding contained prohibited terms; skipping item.")
                     continue
 
                 kind = item.get("kind")
-                if kind not in ("strength", "improvement", "alignment", "contradiction", "omission", "observation"):
+                if kind not in (
+                    "strength",
+                    "improvement",
+                    "alignment",
+                    "contradiction",
+                    "omission",
+                    "observation",
+                ):
                     kind = default_kind
 
                 f_id = str(item.get("id") or f"f_{ulid.new().str}")
                 e_ids = [str(e).strip() for e in item.get("evidence_ids", []) if str(e).strip()]
                 dim = item.get("rubric_dimension") or default_dim
-                spks = [str(s).strip() for s in item.get("speaker_labels", []) if str(s).strip()] or (default_speakers or [])
+                spks = [
+                    str(s).strip() for s in item.get("speaker_labels", []) if str(s).strip()
+                ] or (default_speakers or [])
 
                 cleaned.append(
                     Finding(
@@ -486,7 +499,12 @@ class GroqJudgeModelProvider:
         raw_mbr_s = parsed.get("member_strengths")
         if isinstance(raw_mbr_s, dict):
             for spk, items in raw_mbr_s.items():
-                cleaned = _clean_findings(items, default_kind="strength", default_dim="delivery_and_body_language", default_speakers=[spk])
+                cleaned = _clean_findings(
+                    items,
+                    default_kind="strength",
+                    default_dim="delivery_and_body_language",
+                    default_speakers=[spk],
+                )
                 if cleaned:
                     member_strengths[spk] = cleaned
 
@@ -494,7 +512,12 @@ class GroqJudgeModelProvider:
         raw_mbr_i = parsed.get("member_improvements")
         if isinstance(raw_mbr_i, dict):
             for spk, items in raw_mbr_i.items():
-                cleaned = _clean_findings(items, default_kind="improvement", default_dim="timing_and_speech_mechanics", default_speakers=[spk])
+                cleaned = _clean_findings(
+                    items,
+                    default_kind="improvement",
+                    default_dim="timing_and_speech_mechanics",
+                    default_speakers=[spk],
+                )
                 if cleaned:
                     member_improvements[spk] = cleaned
 

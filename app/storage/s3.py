@@ -183,6 +183,7 @@ class S3ObjectStorage:
 
     async def read_json(self, object_key: str) -> dict[str, Any]:
         """Download and deserialize a JSON object from S3/R2."""
+
         def _read_sync() -> bytes:
             client = self._get_client()
             try:
@@ -204,6 +205,7 @@ class S3ObjectStorage:
 
     async def delete_object(self, object_key: str) -> None:
         """Delete an object from S3/R2."""
+
         def _delete_sync() -> None:
             client = self._get_client()
             try:
@@ -218,18 +220,14 @@ class S3ObjectStorage:
 
         await asyncio.to_thread(_delete_sync)
 
-    async def delete_prefix(
-        self, prefix: str, exclude_suffixes: list[str] | None = None
-    ) -> int:
+    async def delete_prefix(self, prefix: str, exclude_suffixes: list[str] | None = None) -> int:
         """Delete all objects matching prefix except those ending with any exclude_suffixes.
 
         Uses delete_objects batch API (up to 1000 keys per batch) and returns deleted count.
         """
         keys = await self.list_objects(prefix)
         suffixes = exclude_suffixes or []
-        keys_to_delete = [
-            k for k in keys if not any(k.endswith(suffix) for suffix in suffixes)
-        ]
+        keys_to_delete = [k for k in keys if not any(k.endswith(suffix) for suffix in suffixes)]
         if not keys_to_delete:
             return 0
 
@@ -298,4 +296,3 @@ __all__ = [
     "S3ObjectStorage",
     "S3StorageConfig",
 ]
-

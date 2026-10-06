@@ -330,11 +330,14 @@ def test_groq_judge_parse_assessment_rejects_missing_score() -> None:
     """Malformed assessment output cannot gain an implicit score."""
     provider = GroqJudgeModelProvider(key_pool=AsyncMock(spec=GroqKeyPool))
 
-    assert provider._parse_assessment(
-        raw_text='{"assessment_text": "Generic response.", "evidence_ids": []}',
-        rubric_dimension="market_and_business_model",
-        remaining_follow_ups=0,
-    ) is None
+    assert (
+        provider._parse_assessment(
+            raw_text='{"assessment_text": "Generic response.", "evidence_ids": []}',
+            rubric_dimension="market_and_business_model",
+            remaining_follow_ups=0,
+        )
+        is None
+    )
 
 
 def test_judge_provider_protocol_includes_report_feedback() -> None:
@@ -507,6 +510,3 @@ async def test_groq_judge_generate_report_feedback_failure_emits_grounded_fallba
     assert "SPEAKER_01" in res.member_improvements
     assert len(res.team_strengths) >= 1
     assert len(res.team_improvements) >= 1
-
-
-

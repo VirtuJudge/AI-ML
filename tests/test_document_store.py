@@ -212,7 +212,9 @@ async def test_delete_by_session() -> None:
 
 def test_normalize_database_url_supabase() -> None:
     """Verify Supabase URL normalization and SSL enforcement."""
-    raw_url = "postgresql+asyncpg://postgres:secret%2F123@db.dummyproject123.supabase.co:5432/postgres"
+    raw_url = (
+        "postgresql+asyncpg://postgres:secret%2F123@db.dummyproject123.supabase.co:5432/postgres"
+    )
     clean_dsn, ssl_mode = _normalize_database_url(raw_url)
 
     assert clean_dsn.startswith("postgresql://")
@@ -342,4 +344,3 @@ async def test_known_question_retrieval_accuracy() -> None:
     assert len(results_tech) == 1
     assert results_tech[0].page_or_slide == 2
     assert "Technical Architecture" in results_tech[0].text
-

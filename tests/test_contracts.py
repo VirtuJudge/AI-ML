@@ -432,5 +432,3 @@ def test_speaker_mapping_optional_display_name() -> None:
     # Without display_name (defaults to None)
     m2 = SpeakerMapping(speaker_label="SPEAKER_01", user_id="u2")
     assert m2.display_name is None
-
-

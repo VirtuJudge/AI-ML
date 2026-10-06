@@ -154,7 +154,9 @@ class LibrosaAudioProvider:
                         filler_duration_ms += consec_voiced * frame_ms
 
             except Exception:
-                logger.debug("Pitch and filler estimation failed for window [%.2f, %.2f]", w_start, w_end)
+                logger.debug(
+                    "Pitch and filler estimation failed for window [%.2f, %.2f]", w_start, w_end
+                )
 
             # 4. Silence / pause detection via RMS energy thresholding
             pause_duration_ms = 0.0

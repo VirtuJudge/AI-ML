@@ -214,8 +214,17 @@ commit real credentials.
 - `AI_QUEUE_NAME`: queue name; defaults to `ai_jobs`.
 - `BACKEND_INTERNAL_URL` and `AI_WORKER_SHARED_SECRET`: authenticated backend callback configuration. Both are required in production.
 - `OBJECT_STORAGE_*`: S3-compatible object storage configuration, including Cloudflare R2.
-- `AI_PROVIDER_MODE`: use `fake` locally; use `live` only when the required model, storage, and API credentials are configured.
-- `GROQ_API_KEY` through `GROQ_API_KEY_4`: optional Groq key pool used for transcription and judge calls.
+- `AI_PROVIDER_MODE`: `fake` makes no external model calls; `mixed` uses fake stage providers and explicitly enables the Groq judge; `live` (or the `groq` alias) requires the live provider extras, Hugging Face and Groq credentials, and a configured database.
+- `GROQ_API_KEY` through `GROQ_API_KEY_4`: Groq keys used by explicit `mixed`, `live`, or `groq` modes; keys do not enable external calls in `fake` mode.
+- `REDIS_TLS_CERT_REQS`: certificate verification is always required for `rediss://`; setting this to `none` is rejected.
+- `REDIS_SSL_CA_CERTS`: optional CA bundle for a private Redis certificate authority.
+- `AI_QUARANTINE_QUEUE`: queue name for callback messages requiring operator recovery; default `ai_jobs_quarantine` is intentionally not consumed by the worker.
+
+Build the default CPU fake image with `docker build --target fake -t virtujudge-ai-ml:fake .`.
+Build the live-provider image with `docker build --target live -t virtujudge-ai-ml:live .`.
+The live image starts only after its provider adapters and persistent document store initialize successfully.
+
+Run `uv run bash scripts/validate-repository.sh` for the default quality gate and deterministic test suite. Tests marked `live` are excluded there and can be selected explicitly with `uv run python -m pytest -m live` when provider credentials and external services are available.
 
 Start the local worker with:
 

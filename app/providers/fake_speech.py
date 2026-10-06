@@ -20,8 +20,7 @@ class FakeSpeechProvider:
                     start_ms=0,
                     end_ms=4500,
                     text=(
-                        "Welcome to our pitch for VirtuJudge, the automated AI "
-                        "evaluation platform."
+                        "Welcome to our pitch for VirtuJudge, the automated AI evaluation platform."
                     ),
                     confidence=0.98,
                 ),
@@ -38,8 +37,7 @@ class FakeSpeechProvider:
                     start_ms=9300,
                     end_ms=14000,
                     text=(
-                        "Our unit economics and defensibility are proven by "
-                        "early customer trials."
+                        "Our unit economics and defensibility are proven by early customer trials."
                     ),
                     confidence=0.97,
                 ),

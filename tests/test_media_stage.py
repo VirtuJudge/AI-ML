@@ -289,5 +289,3 @@ async def test_split_media_audio_only_fallback(tmp_path: Path) -> None:
         assert result.audio_path == output_audio
         assert result.video_path is None
         assert result.duration_ms == 3000
-
-

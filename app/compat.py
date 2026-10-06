@@ -6,8 +6,10 @@ import types
 
 # 0. Python 3.10 compatibility polyfills
 if not hasattr(enum, "StrEnum"):
+
     class StrEnum(str, enum.Enum):
         pass
+
     enum.StrEnum = StrEnum
 
 if not hasattr(datetime, "UTC"):
@@ -15,17 +17,17 @@ if not hasattr(datetime, "UTC"):
 
 # 1. torchaudio legacy compatibility shims for pyannote.audio 3.x & speechbrain
 try:
-    import torchaudio
+    import torchaudio  # type: ignore
 
     # AudioMetaData shim
     if not hasattr(torchaudio, "AudioMetaData"):
         try:
-            from torchaudio.backend.common import AudioMetaData
+            from torchaudio.backend.common import AudioMetaData  # type: ignore
 
             torchaudio.AudioMetaData = AudioMetaData
         except Exception:
             try:
-                from torchaudio._backend.common import AudioMetaData
+                from torchaudio._backend.common import AudioMetaData  # type: ignore
 
                 torchaudio.AudioMetaData = AudioMetaData
             except Exception:
@@ -168,10 +170,17 @@ try:
     _orig_lazy_getattr = LazyModule.__getattr__
 
     # Attributes that Gradio / jurigged / importlib introspection access
-    _INTROSPECTION_ATTRS = frozenset({
-        "__file__", "__path__", "__spec__", "__loader__",
-        "__name__", "__package__", "__all__",
-    })
+    _INTROSPECTION_ATTRS = frozenset(
+        {
+            "__file__",
+            "__path__",
+            "__spec__",
+            "__loader__",
+            "__name__",
+            "__package__",
+            "__all__",
+        }
+    )
 
     def _safe_lazy_getattr(self, attr):  # type: ignore[override]
         if attr in _INTROSPECTION_ATTRS:
@@ -181,4 +190,3 @@ try:
     LazyModule.__getattr__ = _safe_lazy_getattr  # type: ignore[assignment]
 except Exception:
     pass
-

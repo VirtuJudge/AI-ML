@@ -55,20 +55,16 @@ class ObjectStorageProtocol(Protocol):
         """Delete an object from storage."""
         ...
 
-    async def delete_prefix(
-        self, prefix: str, exclude_suffixes: list[str] | None = None
-    ) -> int:
+    async def delete_prefix(self, prefix: str, exclude_suffixes: list[str] | None = None) -> int:
         """Delete all objects matching prefix except those ending with any exclude_suffixes.
 
         Return count of deleted objects.
         """
         ...
 
-
     async def list_objects(self, prefix: str) -> list[str]:
         """List all object keys matching the given prefix."""
         ...
-
 
 
 class S3StorageConfig(BaseModel):
@@ -126,5 +122,3 @@ __all__ = [
     "S3StorageConfig",
     "compute_file_sha256",
 ]
-
-

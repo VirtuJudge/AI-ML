@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app.backend_client import BackendClient, FakeBackendClient
+from app.backend_client import BackendClient, BackendUnavailableError, FakeBackendClient
 from app.contracts import EraseAIDataPayload, QueueMessage, WorkerUpdate
 from app.document_store import FakeDocumentStore
 from app.pipeline import FakePipeline
@@ -80,6 +80,7 @@ async def test_project_scope_requires_explicit_session_inventory(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_redelivery_resumes_backend_sequence(tmp_path: Path) -> None:
     backend = AsyncMock()
+    backend.get_last_update_sequence.return_value = 0
     backend.send_update.side_effect = [{"last_update_sequence": 8}, {"last_update_sequence": 9}]
     message = QueueMessage(
         schema_version=1,
@@ -124,7 +125,8 @@ async def test_unreachable_cancellation_check_fails_closed() -> None:
         base_url="http://synthetic", transport=httpx.MockTransport(handler)
     )
     try:
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(BackendUnavailableError) as error:
             await client.check_cancellation("job")
+        assert isinstance(error.value.__cause__, httpx.ConnectError)
     finally:
         await client.close()

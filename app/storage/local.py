@@ -99,9 +99,7 @@ class LocalDiskObjectStorage:
         if path.is_file():
             path.unlink()
 
-    async def delete_prefix(
-        self, prefix: str, exclude_suffixes: list[str] | None = None
-    ) -> int:
+    async def delete_prefix(self, prefix: str, exclude_suffixes: list[str] | None = None) -> int:
         """Delete all objects matching prefix except those ending with any exclude_suffixes.
 
         Cleans up empty directories and returns count of deleted objects.
@@ -109,9 +107,7 @@ class LocalDiskObjectStorage:
 
         keys = await self.list_objects(prefix)
         suffixes = exclude_suffixes or []
-        to_delete = [
-            k for k in keys if not any(k.endswith(suffix) for suffix in suffixes)
-        ]
+        to_delete = [k for k in keys if not any(k.endswith(suffix) for suffix in suffixes)]
 
         deleted_count = 0
         for key in to_delete:
@@ -152,7 +148,6 @@ class LocalDiskObjectStorage:
                     matched.append(key)
 
         return sorted(matched)
-
 
 
 __all__ = ["LocalDiskObjectStorage"]

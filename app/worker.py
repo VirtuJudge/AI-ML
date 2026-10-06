@@ -3,19 +3,14 @@
 import asyncio
 import atexit
 import concurrent.futures
-import contextlib
 import logging
+import os
 import random
+import re
 import shutil
 import threading
 from collections.abc import Coroutine
-
-try:
-    from datetime import UTC, datetime
-except ImportError:
-    from datetime import datetime, timezone
-
-    UTC = timezone.utc
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -25,6 +20,7 @@ from app.backend_client import (
     BackendClient,
     BackendClientProtocol,
     BackendUnauthorizedError,
+    BackendUnavailableError,
     JobConflictError,
     JobNotFoundError,
 )
@@ -51,6 +47,10 @@ from app.stages.common import StageTransientError
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+ULID_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
+MAX_PROVIDER_RETRIES = 3
+MAX_CALLBACK_RETRIES = 3
+MAX_TASK_RETRIES = MAX_PROVIDER_RETRIES + MAX_CALLBACK_RETRIES
 
 _default_pipeline: PitchAnalysisPipeline | None = None
 _default_backend_client: BackendClientProtocol | None = None
@@ -167,22 +167,23 @@ def _map_validation_error(exc: ValidationError) -> tuple[ErrorCode, str]:
 class MonotonicUpdateTracker:
     """Client wrapper tracking strictly monotonic sequence numbers for a job."""
 
-    def __init__(self, backend_client: BackendClientProtocol, trace_id: str) -> None:
+    def __init__(
+        self,
+        backend_client: BackendClientProtocol,
+        trace_id: str,
+        initial_sequence: int = 0,
+    ) -> None:
         self.backend_client = backend_client
         self.trace_id = trace_id
-        self.sequence = 0
+        self.sequence = initial_sequence
 
     @property
     def next_sequence(self) -> int:
         return self.sequence + 1
 
     async def send_update(self, job_id: str, update: WorkerUpdate) -> dict[str, Any] | None:
-        if update.status == UpdateStatus.STARTED:
-            self.sequence = 1
-            update.sequence = 1
-        else:
-            self.sequence += 1
-            update.sequence = self.sequence
+        self.sequence += 1
+        update.sequence = self.sequence
         result = await self.backend_client.send_update(job_id, update)
         # A redelivered job may already have posted updates before its worker died.
         # Resume the backend's durable sequence instead of replaying 1, 2 forever.
@@ -205,6 +206,9 @@ class MonotonicUpdateTracker:
     async def check_cancellation(self, job_id: str) -> bool:
         return await self.backend_client.check_cancellation(job_id)
 
+    async def get_last_update_sequence(self, job_id: str) -> int:
+        return await self.backend_client.get_last_update_sequence(job_id)
+
     async def check_backend_reachability(self) -> bool:
         return await self.backend_client.check_backend_reachability()
 
@@ -212,9 +216,7 @@ class MonotonicUpdateTracker:
         await self.backend_client.close()
 
 
-def create_started_update(
-    message: QueueMessage, pipeline_version: str = "1.0.0"
-) -> WorkerUpdate:
+def create_started_update(message: QueueMessage, pipeline_version: str = "1.0.0") -> WorkerUpdate:
     """Create a sequence=1 started WorkerUpdate for a given queue message."""
     return WorkerUpdate(
         schema_version=1,
@@ -230,6 +232,8 @@ async def process_job(
     message: QueueMessage,
     pipeline: PitchAnalysisPipeline,
     backend_client: BackendClientProtocol | None = None,
+    *,
+    publish_terminal_update: bool = True,
 ) -> WorkerUpdate:
     """Process an incoming QueueMessage and return the terminal WorkerUpdate."""
     tracker: MonotonicUpdateTracker | None = None
@@ -239,7 +243,12 @@ async def process_job(
     if backend_client is not None:
         if message.job_type != JobType.ERASE_AI_DATA:
             cancelled_before_dispatch = await backend_client.check_cancellation(message.job_id)
-        tracker = MonotonicUpdateTracker(backend_client, trace_id=message.trace_id)
+        last_sequence = await backend_client.get_last_update_sequence(message.job_id)
+        tracker = MonotonicUpdateTracker(
+            backend_client,
+            trace_id=message.trace_id,
+            initial_sequence=last_sequence,
+        )
         client_to_use = tracker
         started_update = create_started_update(message)
         try:
@@ -295,7 +304,12 @@ async def process_job(
                 job_id=message.job_id,
                 backend_client=client_to_use,
             )
-        else:
+        if message.job_type not in {
+            JobType.ANALYZE_SESSION,
+            JobType.ANALYZE_ANSWER,
+            JobType.GENERATE_REPORT,
+            JobType.ERASE_AI_DATA,
+        }:
             terminal_seq = tracker.next_sequence if tracker else 2
             terminal_update = WorkerUpdate(
                 schema_version=1,
@@ -311,19 +325,16 @@ async def process_job(
                     message=f"Unsupported job type: {message.job_type}",
                 ),
             )
-            if client_to_use is not None:
-                await client_to_use.send_update(message.job_id, terminal_update)
-            return terminal_update
-
-        terminal_seq = tracker.next_sequence if tracker else 2
-        terminal_update = WorkerUpdate(
-            schema_version=1,
-            sequence=terminal_seq,
-            status=UpdateStatus.COMPLETED,
-            occurred_at=datetime.now(UTC),
-            trace_id=message.trace_id,
-            payload=result,
-        )
+        else:
+            terminal_seq = tracker.next_sequence if tracker else 2
+            terminal_update = WorkerUpdate(
+                schema_version=1,
+                sequence=terminal_seq,
+                status=UpdateStatus.COMPLETED,
+                occurred_at=datetime.now(UTC),
+                trace_id=message.trace_id,
+                payload=result,
+            )
     except JobCancelledError as exc:
         if message.practice_session_id:
             temp_dir = Path(".storage/temp_media") / message.practice_session_id
@@ -386,6 +397,8 @@ async def process_job(
                 message="A transient external provider error occurred.",
             ),
         )
+    except (BackendUnavailableError, BackendUnauthorizedError, JobNotFoundError, JobConflictError):
+        raise
     except Exception:
         terminal_seq = tracker.next_sequence if tracker else 2
         terminal_update = WorkerUpdate(
@@ -403,11 +416,8 @@ async def process_job(
             ),
         )
 
-    if client_to_use is not None:
-        try:
-            await client_to_use.send_update(message.job_id, terminal_update)
-        except (BackendUnauthorizedError, JobNotFoundError, JobConflictError) as exc:
-            logger.warning("Terminal callback for job %s terminated with %s", message.job_id, exc)
+    if client_to_use is not None and publish_terminal_update:
+        await client_to_use.send_update(message.job_id, terminal_update)
 
     return terminal_update
 
@@ -417,109 +427,300 @@ async def _async_process_job_task(
     envelope: dict[str, Any],
     pipeline: PitchAnalysisPipeline | None = None,
     backend_client: BackendClientProtocol | None = None,
+    delivery_update: dict[str, Any] | None = None,
 ) -> WorkerUpdate | None:
     """Inner coroutine executing one Celery job task."""
-    if pipeline is None:
-        pipeline = await get_or_create_pipeline()
     if backend_client is None:
         backend_client = get_or_create_backend_client()
+
+    retries = getattr(getattr(task, "request", None), "retries", 0)
+    max_retries = getattr(task, "max_retries", 3) if task is not None else 0
+
+    def retry_or_quarantine(
+        *,
+        job_id: str,
+        reason: str,
+        pending_update: dict[str, Any] | None,
+        retry_args: list[Any],
+        retry_kwargs: dict[str, Any] | None = None,
+        retryable: bool = True,
+    ) -> None:
+        if retryable and task is not None and retries < max_retries:
+            countdown = int(min(60, (2**retries) * 5 + random.uniform(0, 2)))
+            logger.warning(
+                "Backend callback for job %s will retry (attempt %d/%d, reason=%s).",
+                job_id,
+                retries + 1,
+                max_retries,
+                reason,
+            )
+            raise task.retry(
+                args=retry_args,
+                kwargs=retry_kwargs,
+                countdown=countdown,
+            )
+
+        sender = getattr(task, "app", celery_app) if task is not None else celery_app
+        record = {
+            "job_id": job_id,
+            "reason": reason,
+            "queue_message": envelope,
+            "terminal_update": pending_update,
+        }
+        sender.send_task(
+            "app.worker.quarantine_callback_delivery",
+            args=[record],
+            queue=os.getenv("AI_QUARANTINE_QUEUE", "ai_jobs_quarantine"),
+            ignore_result=True,
+        )
+        logger.error("Callback for job %s was quarantined (reason=%s).", job_id, reason)
+
+    if delivery_update is not None:
+        job_id = str(envelope.get("job_id", ""))
+        pending_update = WorkerUpdate.model_validate(delivery_update)
+        try:
+            await backend_client.send_update(job_id, pending_update)
+        except BackendUnauthorizedError:
+            retry_or_quarantine(
+                job_id=job_id,
+                reason="backend_unauthorized",
+                pending_update=delivery_update,
+                retry_args=[envelope],
+                retryable=False,
+            )
+            return pending_update
+        except JobNotFoundError:
+            retry_or_quarantine(
+                job_id=job_id,
+                reason="job_not_found",
+                pending_update=delivery_update,
+                retry_args=[envelope],
+                retryable=False,
+            )
+            return pending_update
+        except Exception as exc:
+            reason = "job_conflict" if isinstance(exc, JobConflictError) else "callback_unavailable"
+            retry_or_quarantine(
+                job_id=job_id,
+                reason=reason,
+                pending_update=delivery_update,
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": delivery_update},
+            )
+            return pending_update
+        return pending_update
 
     # 1. Validate envelope model
     try:
         message = QueueMessage.model_validate(envelope)
     except ValidationError as val_exc:
         code, safe_msg = _map_validation_error(val_exc)
-        job_id = str(envelope.get("job_id", ""))
-        trace_id = str(envelope.get("trace_id", "trc_validation_error"))
-        attempt = int(envelope.get("analysis_attempt", 1))
-        if job_id and backend_client:
-            update = WorkerUpdate(
-                schema_version=1,
-                sequence=1,
-                status=UpdateStatus.FAILED,
-                occurred_at=datetime.now(UTC),
-                trace_id=trace_id,
-                payload=FailedPayload(
-                    stage="validation",
-                    code=code,
-                    retryable=False,
-                    attempts=attempt,
-                    message=safe_msg,
-                ),
+        raw_job_id = envelope.get("job_id")
+        if not isinstance(raw_job_id, str) or not ULID_PATTERN.fullmatch(raw_job_id):
+            retry_or_quarantine(
+                job_id="unknown",
+                reason="malformed_queue_message",
+                pending_update=None,
+                retry_args=[envelope],
+                retryable=False,
             )
-            with contextlib.suppress(Exception):
-                await backend_client.send_update(job_id, update)
-        # Class 1: non-retryable invalid input. Acknowledge and exit.
+            return None
+
+        raw_trace_id = envelope.get("trace_id")
+        trace_id = (
+            raw_trace_id
+            if isinstance(raw_trace_id, str) and ULID_PATTERN.fullmatch(raw_trace_id)
+            else raw_job_id
+        )
+        raw_attempt = envelope.get("analysis_attempt", 1)
+        attempt = (
+            raw_attempt
+            if isinstance(raw_attempt, int)
+            and not isinstance(raw_attempt, bool)
+            and raw_attempt >= 0
+            else 1
+        )
+        try:
+            sequence = await backend_client.get_last_update_sequence(raw_job_id)
+        except BackendUnauthorizedError:
+            retry_or_quarantine(
+                job_id=raw_job_id,
+                reason="backend_unauthorized",
+                pending_update=None,
+                retry_args=[envelope],
+                retryable=False,
+            )
+            return None
+        except JobNotFoundError:
+            retry_or_quarantine(
+                job_id=raw_job_id,
+                reason="job_not_found",
+                pending_update=None,
+                retry_args=[envelope],
+                retryable=False,
+            )
+            return None
+        except BackendUnavailableError:
+            retry_or_quarantine(
+                job_id=raw_job_id,
+                reason="backend_state_unavailable",
+                pending_update=None,
+                retry_args=[envelope],
+            )
+            return None
+
+        update = WorkerUpdate(
+            schema_version=1,
+            sequence=sequence + 1,
+            status=UpdateStatus.FAILED,
+            occurred_at=datetime.now(UTC),
+            trace_id=trace_id,
+            payload=FailedPayload(
+                stage="validation",
+                code=code,
+                retryable=False,
+                attempts=attempt,
+                message=safe_msg,
+            ),
+        )
+        serialized_update = update.model_dump(mode="json")
+        try:
+            await backend_client.send_update(raw_job_id, update)
+        except BackendUnauthorizedError:
+            retry_or_quarantine(
+                job_id=raw_job_id,
+                reason="backend_unauthorized",
+                pending_update=serialized_update,
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": serialized_update},
+                retryable=False,
+            )
+        except JobNotFoundError:
+            retry_or_quarantine(
+                job_id=raw_job_id,
+                reason="job_not_found",
+                pending_update=serialized_update,
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": serialized_update},
+                retryable=False,
+            )
+        except Exception as exc:
+            reason = "job_conflict" if isinstance(exc, JobConflictError) else "callback_unavailable"
+            retry_or_quarantine(
+                job_id=raw_job_id,
+                reason=reason,
+                pending_update=serialized_update,
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": serialized_update},
+            )
         return None
     except Exception as exc:
-        logger.error("Non-retryable envelope parsing error: %s", exc)
+        logger.error("Non-retryable envelope parsing error (error_type=%s).", type(exc).__name__)
         return None
 
-    # 2. Dispatch job
+    # 2. Dispatch job. The terminal callback is delivered separately so a retry
+    # can resend the same result without running the pipeline again.
     try:
-        update = await process_job(message, pipeline, backend_client)
+        if pipeline is None:
+            pipeline = await get_or_create_pipeline()
+        update = await process_job(
+            message,
+            pipeline,
+            backend_client,
+            publish_terminal_update=False,
+        )
         if (
             update is not None
             and update.status == UpdateStatus.FAILED
             and isinstance(update.payload, FailedPayload)
             and update.payload.retryable
             and task is not None
+            and retries < MAX_PROVIDER_RETRIES
         ):
-            retries = getattr(task.request, "retries", 0)
-            max_retries = getattr(task, "max_retries", 3)
-            if retries < max_retries:
-                countdown = int(min(60, (2**retries) * 5 + random.uniform(0, 2)))
-                logger.warning(
-                    "Transient error on job %s (attempt %d/%d). Retrying in %ds.",
-                    message.job_id,
-                    retries + 1,
-                    max_retries,
-                    countdown,
-                )
-                raise task.retry(countdown=countdown)
-        return update
-    except BackendUnauthorizedError as exc:
-        logger.error("Fatal worker authorization error on job %s: %s. Not retrying.", message.job_id, exc)
-        return None
-    except (JobNotFoundError, JobConflictError) as exc:
-        logger.warning("Job %s stopped due to status mismatch: %s. Not retrying.", message.job_id, exc)
-        return None
-    except StageTransientError as exc:
-        # Class 2: transient error. Exponential backoff retry in Celery
-        retries = getattr(task.request, "retries", 0) if task else 0
-        max_retries = getattr(task, "max_retries", 3) if task else 3
-        if retries < max_retries:
             countdown = int(min(60, (2**retries) * 5 + random.uniform(0, 2)))
             logger.warning(
-                "Transient error processing job %s (attempt %d/%d). Retrying in %ds: %s",
+                "Transient error on job %s (attempt %d/%d). Retrying in %ds.",
                 message.job_id,
                 retries + 1,
                 max_retries,
                 countdown,
-                exc,
             )
-            if task is not None:
-                raise task.retry(exc=exc, countdown=countdown)
-            raise
-        else:
-            logger.error("Max retries exceeded on job %s: %s", message.job_id, exc)
-            terminal_update = WorkerUpdate(
-                schema_version=1,
-                sequence=99,
-                status=UpdateStatus.FAILED,
-                occurred_at=datetime.now(UTC),
-                trace_id=message.trace_id,
-                payload=FailedPayload(
-                    stage=getattr(exc, "stage", "speech"),
-                    code=ErrorCode.PROVIDER_ERROR,
-                    retryable=False,
-                    attempts=message.analysis_attempt,
-                    message="Transient retries exhausted.",
-                ),
+            raise task.retry(countdown=countdown)
+        if update is None:
+            return None
+
+        if (
+            update.status == UpdateStatus.FAILED
+            and isinstance(update.payload, FailedPayload)
+            and update.payload.retryable
+        ):
+            update = update.model_copy(
+                update={
+                    "payload": update.payload.model_copy(
+                        update={
+                            "retryable": False,
+                            "message": "Transient retries exhausted.",
+                        }
+                    )
+                }
             )
-            with contextlib.suppress(Exception):
-                await backend_client.send_update(message.job_id, terminal_update)
-            return terminal_update
+
+        try:
+            await backend_client.send_update(message.job_id, update)
+        except BackendUnauthorizedError:
+            retry_or_quarantine(
+                job_id=message.job_id,
+                reason="backend_unauthorized",
+                pending_update=update.model_dump(mode="json"),
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": update.model_dump(mode="json")},
+                retryable=False,
+            )
+        except JobNotFoundError:
+            retry_or_quarantine(
+                job_id=message.job_id,
+                reason="job_not_found",
+                pending_update=update.model_dump(mode="json"),
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": update.model_dump(mode="json")},
+                retryable=False,
+            )
+        except Exception as exc:
+            reason = "job_conflict" if isinstance(exc, JobConflictError) else "callback_unavailable"
+            retry_or_quarantine(
+                job_id=message.job_id,
+                reason=reason,
+                pending_update=update.model_dump(mode="json"),
+                retry_args=[envelope],
+                retry_kwargs={"delivery_update": update.model_dump(mode="json")},
+            )
+        return update
+    except BackendUnauthorizedError:
+        retry_or_quarantine(
+            job_id=message.job_id,
+            reason="backend_unauthorized",
+            pending_update=None,
+            retry_args=[envelope],
+            retryable=False,
+        )
+        return None
+    except (JobNotFoundError, JobConflictError):
+        retry_or_quarantine(
+            job_id=message.job_id,
+            reason="job_status_conflict",
+            pending_update=None,
+            retry_args=[envelope],
+            retryable=False,
+        )
+        return None
+    except BackendUnavailableError:
+        retry_or_quarantine(
+            job_id=message.job_id,
+            reason="backend_state_unavailable",
+            pending_update=None,
+            retry_args=[envelope],
+        )
+        return None
 
 
 @celery_app.task(
@@ -527,11 +728,15 @@ async def _async_process_job_task(
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
-    max_retries=3,
+    max_retries=MAX_TASK_RETRIES,
 )
-def process_job_task(self: Any, envelope: dict[str, Any]) -> None:
+def process_job_task(
+    self: Any,
+    envelope: dict[str, Any],
+    delivery_update: dict[str, Any] | None = None,
+) -> None:
     """Celery task entry point consuming jobs from ai_jobs queue."""
-    _run_async(_async_process_job_task(self, envelope))
+    _run_async(_async_process_job_task(self, envelope, delivery_update=delivery_update))
 
 
 __all__ = [

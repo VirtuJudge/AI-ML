@@ -86,11 +86,7 @@ def normalize_effective_weights(
     effective weights are normalized only across available scored dimensions:
         effective_weight_i = configured_weight_i / sum(configured_weights of scored dimensions)
     """
-    scored_sum = sum(
-        c.configured_weight
-        for c in components
-        if c.status == "scored"
-    )
+    scored_sum = sum(c.configured_weight for c in components if c.status == "scored")
 
     for comp in components:
         if comp.status == "scored":
@@ -120,8 +116,7 @@ def calculate_overall_score(components: list[ScoreComponent]) -> float | None:
         return None
 
     total = sum(
-        float(c.normalized_score or 0.0) * float(c.effective_weight or 0.0)
-        for c in scored_comps
+        float(c.normalized_score or 0.0) * float(c.effective_weight or 0.0) for c in scored_comps
     )
     return round(total, 4)
 
@@ -263,12 +258,16 @@ def calculate_individual_delivery_scores(
 
         timing_norm = round(0.40 * wpm_score + 0.35 * pause_score + 0.25 * filler_score, 4)
         spk_label = speaker_profile.get("speaker_label") or "speaker"
-        acoustic_eids = speaker_profile.get("acoustic_evidence_ids") or [
-            eid
-            for w in acoustic_windows
-            if isinstance(w, dict)
-            for eid in w.get("evidence_ids", [])
-        ] or [f"ev_audio_{str(spk_label).lower()}"]
+        acoustic_eids = (
+            speaker_profile.get("acoustic_evidence_ids")
+            or [
+                eid
+                for w in acoustic_windows
+                if isinstance(w, dict)
+                for eid in w.get("evidence_ids", [])
+            ]
+            or [f"ev_audio_{str(spk_label).lower()}"]
+        )
 
         timing_comp = ScoreComponent(
             dimension="timing_and_speech_mechanics",
@@ -299,9 +298,7 @@ def calculate_individual_delivery_scores(
         gaze_vals = [v["gaze_direction"] for v in visual_windows if "gaze_direction" in v]
         posture_vals = [v["posture_openness"] for v in visual_windows if "posture_openness" in v]
         sym_vals = [
-            v["shoulder_symmetry_ratio"]
-            for v in visual_windows
-            if "shoulder_symmetry_ratio" in v
+            v["shoulder_symmetry_ratio"] for v in visual_windows if "shoulder_symmetry_ratio" in v
         ]
 
         # Gaze scoring: categorical 1.0 = camera (direct eye contact), 2.0 = slides
@@ -340,12 +337,16 @@ def calculate_individual_delivery_scores(
 
         delivery_norm = round(0.40 * gaze_score + 0.35 * posture_score + 0.25 * sym_score, 4)
         spk_label = speaker_profile.get("speaker_label") or "speaker"
-        visual_eids = speaker_profile.get("visual_evidence_ids") or [
-            eid
-            for w in visual_windows
-            if isinstance(w, dict)
-            for eid in w.get("evidence_ids", [])
-        ] or [f"ev_vision_{str(spk_label).lower()}"]
+        visual_eids = (
+            speaker_profile.get("visual_evidence_ids")
+            or [
+                eid
+                for w in visual_windows
+                if isinstance(w, dict)
+                for eid in w.get("evidence_ids", [])
+            ]
+            or [f"ev_vision_{str(spk_label).lower()}"]
+        )
 
         delivery_comp = ScoreComponent(
             dimension="delivery_and_body_language",

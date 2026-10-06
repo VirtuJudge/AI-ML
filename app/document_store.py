@@ -11,7 +11,7 @@ import urllib.parse
 from typing import Any, Protocol
 
 try:
-    import asyncpg
+    import asyncpg  # type: ignore
 except ImportError:
     asyncpg = None  # type: ignore[assignment]
 
@@ -294,7 +294,9 @@ def _normalize_database_url(url: str) -> tuple[str, str | None]:
     # Handle URL parsing and password quoting if necessary
     try:
         parsed = urllib.parse.urlparse(clean)
-        if parsed.password and ("@" in parsed.password or "/" in parsed.password or "\\" in parsed.password):
+        if parsed.password and (
+            "@" in parsed.password or "/" in parsed.password or "\\" in parsed.password
+        ):
             quoted_pw = urllib.parse.quote_plus(parsed.password)
             user_part = f"{parsed.username}:{quoted_pw}" if parsed.username else quoted_pw
             netloc = f"{user_part}@{parsed.hostname}"

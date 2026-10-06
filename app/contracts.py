@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime
+
 try:
     from enum import StrEnum
 except ImportError:
@@ -9,6 +10,8 @@ except ImportError:
 
     class StrEnum(str, Enum):
         pass
+
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -213,9 +216,7 @@ class SessionAnalysisCompleted(BaseModel):
 
     @field_validator("primary_questions")
     @classmethod
-    def validate_three_primary_questions(
-        cls, v: list[PrimaryQuestion]
-    ) -> list[PrimaryQuestion]:
+    def validate_three_primary_questions(cls, v: list[PrimaryQuestion]) -> list[PrimaryQuestion]:
         if len(v) != 3:
             raise ValueError(f"primary_questions must contain exactly 3 items, got {len(v)}")
         for idx, q in enumerate(v):

@@ -219,10 +219,7 @@ def extract_speaker_intervals(
     else:
         segments = list(cleaned_segments)
 
-    spk_turns = [
-        seg for seg in segments
-        if seg.speaker_label == speaker_label
-    ]
+    spk_turns = [seg for seg in segments if seg.speaker_label == speaker_label]
     spk_turns.sort(key=lambda s: (s.start_ms, s.end_ms))
 
     intervals: list[dict[str, Any]] = []
@@ -435,9 +432,7 @@ def aggregate_speaker_observations(
                 if "pause_duration_ms" in audio_metric_values:
                     p_dur = sum(audio_metric_values["pause_duration_ms"])
                     is_int = float(p_dur).is_integer()
-                    acoustic_dict["pause_duration_ms"] = (
-                        int(p_dur) if is_int else round(p_dur, 1)
-                    )
+                    acoustic_dict["pause_duration_ms"] = int(p_dur) if is_int else round(p_dur, 1)
 
                 if "pause_count" in audio_metric_values:
                     acoustic_dict["pause_count"] = int(sum(audio_metric_values["pause_count"]))
@@ -529,8 +524,7 @@ def format_speaker_summary_for_prompt(
         # Presenting turns
         intervals = profile.get("intervals", [])
         turn_strs = [
-            item["formatted"] if isinstance(item, dict) else str(item)
-            for item in intervals
+            item["formatted"] if isinstance(item, dict) else str(item) for item in intervals
         ]
         turns_display = ", ".join(turn_strs) if turn_strs else "None recorded"
         total_time_str = format_duration_ms(profile.get("speaking_time_ms", 0))

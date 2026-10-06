@@ -147,7 +147,10 @@ async def test_complete_product_journey(journey_pipeline: FakePipeline) -> None:
     assert isinstance(erasure_result, ErasureCompleted)
     assert erasure_result.deleted_records >= 0
     assert erasure_result.deleted_objects > 0
-    assert await journey_pipeline.object_storage.list_objects(f"ai/session/{erasure_job.scope_id}/") == []
+    assert (
+        await journey_pipeline.object_storage.list_objects(f"ai/session/{erasure_job.scope_id}/")
+        == []
+    )
 
 
 @pytest.mark.asyncio
