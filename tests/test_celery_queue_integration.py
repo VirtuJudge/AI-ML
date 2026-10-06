@@ -323,7 +323,7 @@ async def test_celery_task_non_retryable_validation_error():
     # Sent safe failed update to backend
     assert len(client.updates) == 1
     job_id, update = client.updates[0]
-    assert job_id == "01JEXAMPLE_BAD"
+    assert job_id == "00000000000000000000000001"
     assert update.status == UpdateStatus.FAILED
     assert isinstance(update.payload, FailedPayload)
     assert update.payload.retryable is False
