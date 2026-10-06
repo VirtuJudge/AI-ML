@@ -184,7 +184,12 @@ class MonotonicUpdateTracker:
     async def send_update(self, job_id: str, update: WorkerUpdate) -> dict[str, Any] | None:
         self.sequence += 1
         update.sequence = self.sequence
-        return await self.backend_client.send_update(job_id, update)
+        result = await self.backend_client.send_update(job_id, update)
+        # A redelivered job may already have posted updates before its worker died.
+        # Resume the backend's durable sequence instead of replaying 1, 2 forever.
+        if isinstance(result, dict):
+            self.sequence = max(self.sequence, int(result.get("last_update_sequence", 0)))
+        return result
 
     async def send_progress(self, job_id: str, stage: str, progress: float, message: str) -> None:
         self.sequence += 1
@@ -233,8 +238,11 @@ async def process_job(
     """Process an incoming QueueMessage and return the terminal WorkerUpdate."""
     tracker: MonotonicUpdateTracker | None = None
     client_to_use: BackendClientProtocol | None = backend_client
+    cancelled_before_dispatch = False
 
     if backend_client is not None:
+        if message.job_type != JobType.ERASE_AI_DATA:
+            cancelled_before_dispatch = await backend_client.check_cancellation(message.job_id)
         last_sequence = await backend_client.get_last_update_sequence(message.job_id)
         tracker = MonotonicUpdateTracker(
             backend_client,
@@ -244,16 +252,19 @@ async def process_job(
         client_to_use = tracker
         started_update = create_started_update(message)
         try:
-            await tracker.send_update(message.job_id, started_update)
+            if not cancelled_before_dispatch:
+                await tracker.send_update(message.job_id, started_update)
         except BackendUnauthorizedError:
             logger.error("Fatal worker authorization failure sending started update.")
             raise
-        except (JobNotFoundError, JobConflictError) as exc:
-            logger.warning("Job %s rejected at start: %s", message.job_id, exc)
+        except (JobNotFoundError, JobConflictError):
+            logger.warning("Job %s rejected at start", message.job_id)
             raise
 
     terminal_update: WorkerUpdate
     try:
+        if cancelled_before_dispatch:
+            raise JobCancelledError(job_id=message.job_id, stage="dispatch")
         result: Any
         if message.job_type == JobType.ANALYZE_SESSION:
             payload_dict = dict(message.payload)

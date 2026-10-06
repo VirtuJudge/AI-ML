@@ -981,63 +981,51 @@ class FakePipeline:
         deleted_records = 0
         deleted_objects = 0
 
+        session_ids = list(dict.fromkeys(job.practice_session_ids))
         if job.scope == "practice_session":
-            # 1. Purge intermediate vector document chunks from Supabase/PostgreSQL
+            session_ids = [job.scope_id]
+        if job.retention_only:
             if self.document_store is not None:
-                deleted_docs = await self.document_store.delete_by_session(job.scope_id)
-                deleted_records += deleted_docs
-
-            # 2. Physical erasure from Object Storage:
-            # Delete intermediate artifacts (analysis.json, checkpoints, answers)
-            # strictly PRESERVING report.md and evaluation.json for 30-day retention window
-            prefix = f"ai/session/{job.scope_id}/"
-            exclude = ["report.md", "evaluation.json"]
-            objs = await self.object_storage.delete_prefix(prefix, exclude_suffixes=exclude)
-            deleted_objects += objs
-            for answer_id in job.answer_ids:
-                deleted_objects += await self.object_storage.delete_prefix(
-                    f"ai/answer/{answer_id}/", exclude_suffixes=None
+                deleted_records += await self.document_store.delete_by_asset_versions(
+                    job.asset_version_ids
                 )
-
-            # Also clean scratch temp media directory
-            temp_media_dir = Path(".storage/temp_media") / job.scope_id
-            if temp_media_dir.exists():
-                shutil.rmtree(temp_media_dir, ignore_errors=True)
-
-            # In synthetic test runs where no real objects were stored,
-            # preserve deterministic counts expected by contract suite
-            if self._is_synthetic_speech_run():
-                deleted_records += 14
-                if deleted_objects == 0:
-                    deleted_objects = 6
-
-        elif job.scope in ("project", "team"):
-            if job.practice_session_ids:
-                for session_id in job.practice_session_ids:
-                    deleted_objects += await self.object_storage.delete_prefix(
-                        f"ai/session/{session_id}/", exclude_suffixes=None
-                    )
-                    if self.document_store is not None:
-                        deleted_records += await self.document_store.delete_by_session(session_id)
-            else:
-                # Full purge: remove all objects including evaluation.json and report.md
-                prefix = f"ai/session/{job.scope_id}/"
-                objs = await self.object_storage.delete_prefix(prefix, exclude_suffixes=None)
-                deleted_objects += objs
-
-                if self.document_store is not None:
-                    deleted_docs = await self.document_store.delete_by_session(job.scope_id)
-                    deleted_records += deleted_docs
-
-            if self._is_synthetic_speech_run():
-                deleted_records += 14
-                if deleted_objects == 0:
-                    deleted_objects = 6
+            excluded = [
+                "report.md",
+                "evaluation.json",
+                "transcript.json",
+                "assessment.json",
+                "qa.json",
+            ]
         else:
-            # Asset scope
-            await self.object_storage.delete_object(f"uploads/{job.scope_id}")
-            deleted_objects = 1
-            deleted_records = 1
+            excluded = None
+        for session_id in session_ids:
+            if not job.retention_only and self.document_store is not None:
+                deleted_records += await self.document_store.delete_by_session(session_id)
+            if job.retention_only and job.answer_ids:
+                for answer_id in job.answer_ids:
+                    deleted_objects += await self.object_storage.delete_prefix(
+                        f"ai/session/{session_id}/answers/{answer_id}/",
+                        exclude_suffixes=excluded,
+                    )
+            else:
+                deleted_objects += await self.object_storage.delete_prefix(
+                    f"ai/session/{session_id}/",
+                    exclude_suffixes=excluded,
+                )
+            scratch = Path(".storage/temp_media") / session_id
+            if scratch.exists():
+                shutil.rmtree(scratch)
+        # Media normalization uses the source Artifact ID (Asset Version), not
+        # always the Practice Session ID, as its local scratch directory.
+        for version_id in job.asset_version_ids:
+            scratch = Path(".storage/temp_media") / version_id
+            if scratch.exists():
+                shutil.rmtree(scratch)
+        for answer_id in job.answer_ids:
+            deleted_objects += await self.object_storage.delete_prefix(
+                f"ai/answer/{answer_id}/",
+                exclude_suffixes=excluded,
+            )
 
         return ErasureCompleted(
             erasure_request_id=job.erasure_request_id,

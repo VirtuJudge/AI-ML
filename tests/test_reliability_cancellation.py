@@ -42,6 +42,7 @@ class StepCancellationBackendClient:
         self.call_count = 0
         self.updates: list[WorkerUpdate] = []
         self.last_sequence = 0
+        self.preflight_checked = False
 
     async def send_update(self, job_id: str, update: WorkerUpdate) -> None:
         self.updates.append(update)
@@ -51,6 +52,9 @@ class StepCancellationBackendClient:
         return self.last_sequence
 
     async def check_cancellation(self, job_id: str) -> bool:
+        if not self.preflight_checked:
+            self.preflight_checked = True
+            return False
         self.call_count += 1
         return self.call_count >= self.cancel_at_call
 

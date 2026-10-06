@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from app.document_store import FakeDocumentStore, create_document_store
+from app.document_store import create_document_store
 from app.pipeline import FakePipeline
 from app.providers.fake_audio import FakeAudioMetricsProvider
 from app.providers.fake_documents import FakeDocumentProvider
@@ -95,15 +95,6 @@ async def build_pipeline() -> FakePipeline:
         judge_provider = GroqJudgeModelProvider()
         if not os.getenv("DATABASE_URL"):
             raise RuntimeError("DATABASE_URL is required for live document persistence.")
-        try:
-            doc_store = await create_document_store()
-        except Exception as exc:
-            logger.error(
-                "Live pgvector document store initialization failed (%s).",
-                type(exc).__name__,
-            )
-            raise RuntimeError("Live document store initialization failed.") from None
-
         object_storage = create_object_storage()
     else:
         logger.info(
@@ -118,9 +109,15 @@ async def build_pipeline() -> FakePipeline:
         judge_provider = (
             GroqJudgeModelProvider() if provider_mode == "mixed" else FakeJudgeModelProvider()
         )
-        doc_store = FakeDocumentStore()
         object_storage = create_object_storage()
 
+    # Store selection is independent of model mode. A configured persistent
+    # store must never silently become an empty fake during erasure.
+    try:
+        doc_store = await create_document_store()
+    except Exception as exc:
+        logger.error("Document store initialization failed (%s).", type(exc).__name__)
+        raise RuntimeError("Document store initialization failed.") from None
     return FakePipeline(
         speech_provider=speech_provider,
         diarization_provider=diarization_provider,

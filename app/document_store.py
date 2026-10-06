@@ -40,6 +40,8 @@ class DocumentStore(Protocol):
         """Delete all stored chunks for a given practice session."""
         ...
 
+    async def delete_by_asset_versions(self, asset_version_ids: list[str]) -> int: ...
+
 
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     """Calculate cosine similarity between two vector lists."""
@@ -108,6 +110,15 @@ class FakeDocumentStore:
         """Delete all chunks for a session and return count of deleted items."""
         chunks = self._store.pop(session_id, [])
         return len(chunks)
+
+    async def delete_by_asset_versions(self, asset_version_ids: list[str]) -> int:
+        versions = set(asset_version_ids)
+        count = 0
+        for session_id, chunks in self._store.items():
+            kept = [chunk for chunk in chunks if chunk.asset_version_id not in versions]
+            count += len(chunks) - len(kept)
+            self._store[session_id] = kept
+        return count
 
 
 class PgVectorDocumentStore:
@@ -257,6 +268,16 @@ class PgVectorDocumentStore:
             )
             parts = res.split()
             return int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 0
+
+    async def delete_by_asset_versions(self, asset_version_ids: list[str]) -> int:
+        if self.db_pool is None:
+            raise RuntimeError("Database connection pool is not configured.")
+        async with self.db_pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM ai_document_chunks WHERE asset_version_id = ANY($1::text[])",
+                asset_version_ids,
+            )
+            return int(result.split()[-1])
 
 
 def _normalize_database_url(url: str) -> tuple[str, str | None]:
