@@ -168,4 +168,3 @@ def backend_client() -> FakeBackendClient:
 def journey_pipeline() -> FakePipeline:
     """Fixture providing a FakePipeline with all fake providers wired."""
     return FakePipeline()
-

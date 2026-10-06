@@ -385,7 +385,9 @@ def test_generate_markdown_report_comprehensive() -> None:
     # 2. Score Breakdown Table
     assert "## Rubric Score Breakdown" in md
     assert "| Pitch Content & Evidence | 25% | 25% | 85 / 100 | Strong | `scored` |" in md
-    assert "| Business & Problem-Solution Reasoning | 20% | 20% | 75 / 100 | Good | `scored` |" in md
+    assert (
+        "| Business & Problem-Solution Reasoning | 20% | 20% | 75 / 100 | Good | `scored` |" in md
+    )
     assert "| Q&A Quality | 20% | 20% | 80 / 100 | Strong | `scored` |" in md
     assert "### Dimension Rationales" in md
     assert "Compelling market definition" in md
@@ -403,7 +405,10 @@ def test_generate_markdown_report_comprehensive() -> None:
 
     # Jane Founder
     assert "### Jane Founder (SPEAKER_00)" in md
-    assert "⏱️ **Active Speaking Turns:** 00:00 - 02:15, 03:30 - 04:30 | **Total Speaking Time:** 3m 15s" in md
+    assert (
+        "⏱️ **Active Speaking Turns:** 00:00 - 02:15, 03:30 - 04:30 | **Total Speaking Time:** 3m 15s"
+        in md
+    )
     assert "| Delivery & Body Language | 78 / 100 | Good |" in md
     assert "| Timing & Speech Mechanics | 74 / 100 | Good |" in md
     assert "#### Delivery Coaching" in md
@@ -426,12 +431,14 @@ def test_generate_markdown_report_comprehensive() -> None:
     assert "## Q&A Session Deep Dive" in md
     assert "### Question 1: What is your customer acquisition cost (CAC) payback period?" in md
     assert "**Answered By:** Jane Founder" in md
-    assert 'Our CAC is under $200 with a 6-month payback' in md
+    assert "Our CAC is under $200 with a 6-month payback" in md
     assert "Strong (85/100)" in md
 
-    assert "### Question 2: How does your proprietary engine scale horizontally under peak load?" in md
+    assert (
+        "### Question 2: How does your proprietary engine scale horizontally under peak load?" in md
+    )
     assert "**Answered By:** Alex CTO" in md
-    assert 'We utilize stateless worker nodes' in md
+    assert "We utilize stateless worker nodes" in md
 
     assert "### Question 3: What are the primary churn drivers identified during the pilot?" in md
     assert "⚠️ *Skipped by team* (Score: 0/100)" in md

@@ -175,9 +175,7 @@ async def run_report_stage(
         "business_and_problem_solution_reasoning": feedback_result.dimension_scores.get(
             "business_and_problem_solution_reasoning"
         ),
-        "technical_feasibility": feedback_result.dimension_scores.get(
-            "technical_feasibility"
-        ),
+        "technical_feasibility": feedback_result.dimension_scores.get("technical_feasibility"),
         "delivery_and_body_language": team_delivery,
         "timing_and_speech_mechanics": team_timing,
         "qa_quality": qa_score if bundle.questions else None,
@@ -260,10 +258,7 @@ async def run_report_stage(
                 end_ms = item.get("end_ms", 0)
                 s_min, s_sec = divmod(start_ms // 1000, 60)
                 e_min, e_sec = divmod(end_ms // 1000, 60)
-                fmt = (
-                    item.get("formatted")
-                    or f"{s_min:02d}:{s_sec:02d} - {e_min:02d}:{e_sec:02d}"
-                )
+                fmt = item.get("formatted") or f"{s_min:02d}:{s_sec:02d} - {e_min:02d}:{e_sec:02d}"
                 speaking_intervals.append(
                     SpeakingInterval(start_ms=start_ms, end_ms=end_ms, formatted=fmt)
                 )

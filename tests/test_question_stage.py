@@ -40,9 +40,7 @@ def _make_mock_speech() -> SpeechStageResult:
         diarization=DiarizationResult(
             speaker_count=1,
             speaker_labels=["SPEAKER_00"],
-            segments=[
-                SpeakerSegment(start_ms=0, end_ms=4000, speaker_label="SPEAKER_00")
-            ],
+            segments=[SpeakerSegment(start_ms=0, end_ms=4000, speaker_label="SPEAKER_00")],
         ),
         speaker_labels=["SPEAKER_00"],
         limitations=[],

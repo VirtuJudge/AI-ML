@@ -20,19 +20,21 @@ from pydantic import BaseModel, Field
 
 from app.contracts import AssetInput, Limitation
 
-SUPPORTED_MEDIA_EXTENSIONS: frozenset[str] = frozenset({
-    ".mp4",
-    ".webm",
-    ".mov",
-    ".mkv",
-    ".avi",
-    ".m4a",
-    ".wav",
-    ".mp3",
-    ".ogg",
-    ".flac",
-    ".aac",
-})
+SUPPORTED_MEDIA_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".mkv",
+        ".avi",
+        ".m4a",
+        ".wav",
+        ".mp3",
+        ".ogg",
+        ".flac",
+        ".aac",
+    }
+)
 
 
 class MediaNormalizationResult(BaseModel):

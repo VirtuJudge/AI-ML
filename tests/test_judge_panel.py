@@ -141,7 +141,6 @@ def test_validate_judge_question_preserves_custom_candidate_ids() -> None:
     assert ulid.parse(val_empty.candidate_id) is not None
 
 
-
 def test_validate_judge_question_rejects_emotional_claims() -> None:
     """Verify guardrails strictly reject questions commenting on confidence or anxiety."""
     bundle = _make_test_bundle()

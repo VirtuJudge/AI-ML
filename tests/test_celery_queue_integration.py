@@ -40,11 +40,13 @@ from app.worker import (
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "ai"
 if not FIXTURES_DIR.is_dir():
-    FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "Backend" / "contracts" / "fixtures" / "ai"
+    FIXTURES_DIR = (
+        Path(__file__).resolve().parent.parent.parent / "Backend" / "contracts" / "fixtures" / "ai"
+    )
 
 
 def _load_fixture(filename: str) -> dict[str, Any]:
-    with open(FIXTURES_DIR / filename, "r", encoding="utf-8") as f:
+    with open(FIXTURES_DIR / filename, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -52,10 +54,15 @@ class MockBackendClient:
     def __init__(self) -> None:
         self.updates: list[tuple[str, WorkerUpdate]] = []
         self.cancellation_requested = False
+        self.last_sequences: dict[str, int] = {}
 
     async def send_update(self, job_id: str, update: WorkerUpdate) -> bool:
         self.updates.append((job_id, update))
+        self.last_sequences[job_id] = max(self.last_sequences.get(job_id, 0), update.sequence)
         return True
+
+    async def get_last_update_sequence(self, job_id: str) -> int:
+        return self.last_sequences.get(job_id, 0)
 
     async def check_cancellation(self, job_id: str) -> bool:
         return self.cancellation_requested
@@ -106,7 +113,9 @@ class MockPipeline:
             raise StageTransientError("Groq 503 Service Unavailable")
         self.last_analyzed_session = payload
         if backend_client and hasattr(backend_client, "send_progress"):
-            await backend_client.send_progress(job_id, "speech", 0.2, "Transcribing presentation speech")
+            await backend_client.send_progress(
+                job_id, "speech", 0.2, "Transcribing presentation speech"
+            )
         return SessionAnalysisCompleted(
             analysis_artifact=ArtifactRef(
                 artifact_id="01JEXAMPLE0000000000000051",
@@ -230,7 +239,7 @@ def test_sync_celery_boundary_reuses_one_event_loop_across_jobs():
 
 @pytest.mark.asyncio
 async def test_celery_task_consumes_backend_analyze_session_fixture():
-    """Verify Celery task consumes backend-formatted analyze_session fixture and emits monotonic sequence."""
+    """Check task consumes a backend fixture and emits monotonic updates."""
     envelope = _load_fixture("job_analyze_session_valid.json")
     client = MockBackendClient()
     pipeline = MockPipeline()
@@ -289,7 +298,11 @@ async def test_celery_task_handles_transient_error_with_retry():
 @pytest.mark.asyncio
 async def test_celery_task_non_retryable_validation_error():
     """Verify non-retryable invalid input acknowledges without raising task.retry."""
-    invalid_envelope = {"job_id": "01JEXAMPLE_BAD", "trace_id": "trc_bad", "job_type": "invalid_type"}
+    invalid_envelope = {
+        "job_id": "01JEXAMPLE_BAD",
+        "trace_id": "trc_bad",
+        "job_type": "invalid_type",
+    }
     client = MockBackendClient()
     pipeline = MockPipeline()
 

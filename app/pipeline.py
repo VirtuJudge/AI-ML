@@ -87,7 +87,6 @@ def generate_deterministic_ulid(seed_key: str, dt: datetime | str | None = None)
     return str(ulid.from_bytes(ts_bytes + rand_bytes))
 
 
-
 def combine_timed_evidence(
     diarization: DiarizationResult,
     visual_observations: list[VisualObservation],
@@ -102,8 +101,7 @@ def combine_timed_evidence(
     4. Re-labels visual observations with canonical speaker labels.
     """
     valid_speakers = [
-        s for s in diarization.speaker_labels
-        if s not in ("SPEAKER_UNKNOWN", "UNKNOWN", "")
+        s for s in diarization.speaker_labels if s not in ("SPEAKER_UNKNOWN", "UNKNOWN", "")
     ]
 
     # --- 1. Audio Attribution ---
@@ -351,9 +349,9 @@ class FakePipeline:
             artifact_dir = hashlib.sha256(document.artifact_id.encode("utf-8")).hexdigest()[:16]
             safe_session_dir = Path(practice_session_id).name
             if safe_session_dir in {"", ".", ".."} or safe_session_dir != practice_session_id:
-                safe_session_dir = hashlib.sha256(
-                    practice_session_id.encode("utf-8")
-                ).hexdigest()[:16]
+                safe_session_dir = hashlib.sha256(practice_session_id.encode("utf-8")).hexdigest()[
+                    :16
+                ]
             destination = (
                 Path(".storage/temp_media")
                 / safe_session_dir
@@ -379,9 +377,7 @@ class FakePipeline:
                 resolved_documents.append(document)
                 continue
 
-            resolved_documents.append(
-                document.model_copy(update={"object_key": str(destination)})
-            )
+            resolved_documents.append(document.model_copy(update={"object_key": str(destination)}))
 
         return resolved_documents
 
@@ -399,7 +395,11 @@ class FakePipeline:
             or job.presentation.artifact_id
         )
         await self._emit_progress(
-            backend_client, job_id, "ingestion", 0.05, "Ingesting presentation and validating inputs..."
+            backend_client,
+            job_id,
+            "ingestion",
+            0.05,
+            "Ingesting presentation and validating inputs...",
         )
 
         input_file = Path(job.presentation.object_key)
@@ -448,9 +448,7 @@ class FakePipeline:
                 )
 
         if not skip_file_check and not input_file.is_file():
-            raise FileNotFoundError(
-                f"Presentation media file '{input_file}' does not exist."
-            )
+            raise FileNotFoundError(f"Presentation media file '{input_file}' does not exist.")
 
         if not skip_file_check:
             split_res = await split_media(input_file)
@@ -497,8 +495,14 @@ class FakePipeline:
             if speech_cached is not None:
                 return SpeechStageResult.model_validate(speech_cached)
             res = await with_transient_retries(
-                lambda: run_speech_stage(target_audio, self.speech_provider, self.diarization_provider,
-                    media_duration_ms=duration_ms, skip_normalization=True, strict_timestamps=False),
+                lambda: run_speech_stage(
+                    target_audio,
+                    self.speech_provider,
+                    self.diarization_provider,
+                    media_duration_ms=duration_ms,
+                    skip_normalization=True,
+                    strict_timestamps=False,
+                ),
                 stage_name="speech",
             )
             await save_stage_checkpoint(
@@ -510,8 +514,13 @@ class FakePipeline:
             if vision_cached is not None:
                 return VisionStageResult.model_validate(vision_cached)
             res = await with_transient_retries(
-                lambda: run_vision_stage(video_path, self.vision_provider, media_duration_ms=duration_ms,
-                    source_artifact_id=job.presentation.artifact_id, skip_file_check=skip_file_check),
+                lambda: run_vision_stage(
+                    video_path,
+                    self.vision_provider,
+                    media_duration_ms=duration_ms,
+                    source_artifact_id=job.presentation.artifact_id,
+                    skip_file_check=skip_file_check,
+                ),
                 stage_name="vision",
             )
             await save_stage_checkpoint(
@@ -523,8 +532,13 @@ class FakePipeline:
             if audio_cached is not None:
                 return AudioStageResult.model_validate(audio_cached)
             res = await with_transient_retries(
-                lambda: run_audio_stage(audio_path, self.audio_provider, media_duration_ms=duration_ms,
-                    source_artifact_id=job.presentation.artifact_id, skip_file_check=skip_file_check),
+                lambda: run_audio_stage(
+                    audio_path,
+                    self.audio_provider,
+                    media_duration_ms=duration_ms,
+                    source_artifact_id=job.presentation.artifact_id,
+                    skip_file_check=skip_file_check,
+                ),
                 stage_name="audio",
             )
             await save_stage_checkpoint(
@@ -543,7 +557,11 @@ class FakePipeline:
             backend_client, job_id, "vision", 0.50, "Extracting visual cues and slide structure..."
         )
         await self._emit_progress(
-            backend_client, job_id, "audio_features", 0.60, "Measuring acoustic delivery features..."
+            backend_client,
+            job_id,
+            "audio_features",
+            0.60,
+            "Measuring acoustic delivery features...",
         )
 
         vision_res, audio_res = await asyncio.gather(_run_vision(), _run_audio())
@@ -588,7 +606,11 @@ class FakePipeline:
             backend_client, job_id, "aggregation", 0.80, "Aggregating multimodal evidence..."
         )
         await self._emit_progress(
-            backend_client, job_id, "grounding", 0.85, "Grounding evidence against rubric dimensions..."
+            backend_client,
+            job_id,
+            "grounding",
+            0.85,
+            "Grounding evidence against rubric dimensions...",
         )
 
         # Inspection point 4: After document retrieval, before calling Groq 3-Judge LLM panel
@@ -632,23 +654,16 @@ class FakePipeline:
             "observations": {
                 "visual": [o.model_dump() for o in vision_res.observations],
                 "audio": [o.model_dump() for o in audio_res.observations],
-                "speaker_mapping": [
-                    {"visual": k, "audio": v} for k, v in speaker_mapping.items()
-                ],
+                "speaker_mapping": [{"visual": k, "audio": v} for k, v in speaker_mapping.items()],
             },
             "by_speaker": by_speaker,
             "evidence_bundle": {
-                "items": [
-                    item.model_dump()
-                    for item in question_stage_res.evidence_bundle.items
-                ],
+                "items": [item.model_dump() for item in question_stage_res.evidence_bundle.items],
                 "has_documents": question_stage_res.evidence_bundle.has_documents,
                 "has_vision": question_stage_res.evidence_bundle.has_vision,
                 "has_audio": question_stage_res.evidence_bundle.has_audio,
             },
-            "primary_questions": [
-                q.model_dump() for q in question_stage_res.primary_questions
-            ],
+            "primary_questions": [q.model_dump() for q in question_stage_res.primary_questions],
             "limitations": [lim.model_dump() for lim in question_stage_res.limitations],
             "metadata": {
                 "media_duration_ms": duration_ms,
@@ -705,8 +720,7 @@ class FakePipeline:
                         skip_file_check = False
                     else:
                         raise ObjectStorageError(
-                            "Download succeeded but file not found at destination "
-                            f"'{temp_dest}'."
+                            f"Download succeeded but file not found at destination '{temp_dest}'."
                         )
                 except ObjectNotFoundError as err:
                     if not self._is_synthetic_speech_run():
@@ -718,15 +732,13 @@ class FakePipeline:
                         )
                         raise
                     logger.warning(
-                        "Answer audio artifact '%s' not found in storage; "
-                        "using synthetic inputs.",
+                        "Answer audio artifact '%s' not found in storage; using synthetic inputs.",
                         audio_asset.artifact_id,
                     )
                 except Exception as exc:
                     if not self._is_synthetic_speech_run():
                         logger.error(
-                            "Failed to download answer audio artifact '%s' from "
-                            "object storage: %s",
+                            "Failed to download answer audio artifact '%s' from object storage: %s",
                             audio_asset.artifact_id,
                             exc,
                             exc_info=True,
@@ -744,16 +756,18 @@ class FakePipeline:
                     )
 
             if not skip_file_check and not input_file.is_file():
-                raise FileNotFoundError(
-                    f"Answer audio file '{input_file}' does not exist."
-                )
+                raise FileNotFoundError(f"Answer audio file '{input_file}' does not exist.")
 
             duration_ms = audio_asset.duration_ms or 15000
 
             speech_res = await with_transient_retries(
-                lambda: run_answer_speech_stage(input_file, self.speech_provider,
-                    media_duration_ms=duration_ms, skip_normalization=skip_file_check,
-                    strict_timestamps=False),
+                lambda: run_answer_speech_stage(
+                    input_file,
+                    self.speech_provider,
+                    media_duration_ms=duration_ms,
+                    skip_normalization=skip_file_check,
+                    strict_timestamps=False,
+                ),
                 stage_name="speech",
             )
 
@@ -767,16 +781,10 @@ class FakePipeline:
 
         now_utc = datetime.now(UTC)
         created_at = now_utc.isoformat()
-        transcript_artifact_id = generate_deterministic_ulid(
-            f"{job.answer_id}:transcript", now_utc
-        )
-        assessment_artifact_id = generate_deterministic_ulid(
-            f"{job.answer_id}:assessment", now_utc
-        )
+        transcript_artifact_id = generate_deterministic_ulid(f"{job.answer_id}:transcript", now_utc)
+        assessment_artifact_id = generate_deterministic_ulid(f"{job.answer_id}:assessment", now_utc)
 
-        transcript_source_ids = (
-            [audio_asset.artifact_id] if audio_asset is not None else []
-        )
+        transcript_source_ids = [audio_asset.artifact_id] if audio_asset is not None else []
         artifact_payload = {
             "artifact_id": transcript_artifact_id,
             "answer_id": job.answer_id,
@@ -840,11 +848,7 @@ class FakePipeline:
                 "score": assessment_res.assessment.score,
                 "evidence_ids": assessment_res.assessment.evidence_ids,
             },
-            "follow_up": (
-                follow_up.model_dump()
-                if follow_up
-                else None
-            ),
+            "follow_up": (follow_up.model_dump() if follow_up else None),
             "limitations": [lim.model_dump() for lim in assessment_res.limitations],
         }
 
@@ -885,13 +889,21 @@ class FakePipeline:
         # Inspection point 1: Before loading analysis.json and qa.json
         await self._check_cancellation(job_id, backend_client, stage="ingestion")
         await self._emit_progress(
-            backend_client, job_id, "ingestion", 0.20, "Loading session analysis and Q&A artifacts..."
+            backend_client,
+            job_id,
+            "ingestion",
+            0.20,
+            "Loading session analysis and Q&A artifacts...",
         )
 
         # Inspection point 2: Before Groq LLM team/member feedback synthesis
         await self._check_cancellation(job_id, backend_client, stage="reporting")
         await self._emit_progress(
-            backend_client, job_id, "reporting", 0.60, "Synthesizing team and member performance evaluations..."
+            backend_client,
+            job_id,
+            "reporting",
+            0.60,
+            "Synthesizing team and member performance evaluations...",
         )
 
         # 1. Run the report stage
@@ -910,7 +922,11 @@ class FakePipeline:
         # Inspection point 3: Before final report.md / evaluation.json upload
         await self._check_cancellation(job_id, backend_client, stage="reporting")
         await self._emit_progress(
-            backend_client, job_id, "synthesis", 0.90, "Uploading evaluation artifact and markdown report..."
+            backend_client,
+            job_id,
+            "synthesis",
+            0.90,
+            "Uploading evaluation artifact and markdown report...",
         )
 
         created_at = datetime.now(UTC).isoformat()

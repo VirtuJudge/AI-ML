@@ -343,9 +343,7 @@ class MediaPipeVisionProvider:
                             elbow_span = math.sqrt((le.x - re.x) ** 2 + (le.y - re.y) ** 2)
                             arm_span = max(wrist_span, elbow_span)
                             posture_openness = (
-                                round(arm_span / dx_shoulder, 2)
-                                if dx_shoulder > 1e-4
-                                else 1.0
+                                round(arm_span / dx_shoulder, 2) if dx_shoulder > 1e-4 else 1.0
                             )
 
                             shoulder_cx = (ls.x + rs.x) / 2.0

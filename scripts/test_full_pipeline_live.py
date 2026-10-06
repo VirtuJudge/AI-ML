@@ -98,7 +98,9 @@ def compute_sha256(path: Path) -> str:
     return f"sha256:{h.hexdigest()}"
 
 
-def slice_audio_clip(source_audio: Path, output_path: Path, start_s: float, duration_s: float) -> None:
+def slice_audio_clip(
+    source_audio: Path, output_path: Path, start_s: float, duration_s: float
+) -> None:
     """Extract a short audio clip from a WAV file using FFmpeg."""
     cmd = [
         "ffmpeg",
@@ -136,7 +138,9 @@ async def main() -> None:
         sys.exit(1)
 
     print(f"\n[INPUTS]")
-    print(f"  Presentation Video: {video_file.resolve()} ({video_file.stat().st_size / (1024 * 1024):.2f} MB)")
+    print(
+        f"  Presentation Video: {video_file.resolve()} ({video_file.stat().st_size / (1024 * 1024):.2f} MB)"
+    )
     print(f"  Supporting Deck:    {deck_file.resolve()} ({deck_file.stat().st_size / 1024:.1f} KB)")
 
     # 1. Initialize live providers
@@ -145,6 +149,7 @@ async def main() -> None:
 
     try:
         from app.providers.pyannote_diarization import PyannoteDiarizationProvider
+
         diar_provider = PyannoteDiarizationProvider()
         print("  [OK] PyAnnote Diarization Provider active")
     except Exception as exc:
@@ -153,6 +158,7 @@ async def main() -> None:
 
     try:
         from app.providers.mediapipe_vision import MediaPipeVisionProvider
+
         vision_provider = MediaPipeVisionProvider()
         print("  [OK] MediaPipe Vision Provider active (Face + Pose landmarkers)")
     except Exception as exc:
@@ -161,6 +167,7 @@ async def main() -> None:
 
     try:
         from app.providers.librosa_audio import LibrosaAudioProvider
+
         audio_provider = LibrosaAudioProvider()
         print("  [OK] Librosa Acoustic Audio Provider active (prosody, tempo, pauses)")
     except Exception as exc:
@@ -169,6 +176,7 @@ async def main() -> None:
 
     try:
         from app.providers.pymupdf_documents import PyMuPDFDocumentProvider
+
         doc_provider = PyMuPDFDocumentProvider()
         print("  [OK] PyMuPDF Document Provider active (deck text extraction)")
     except Exception as exc:
@@ -180,12 +188,18 @@ async def main() -> None:
 
     storage = create_object_storage()
     if isinstance(storage, S3ObjectStorage):
-        print(f"  [OK] Object Storage initialized (Cloudflare R2 S3: bucket={storage.bucket} @ {storage.endpoint_url})")
+        print(
+            f"  [OK] Object Storage initialized (Cloudflare R2 S3: bucket={storage.bucket} @ {storage.endpoint_url})"
+        )
     else:
-        print(f"  [OK] Object Storage initialized ({type(storage).__name__}: target={getattr(storage, 'base_dir', '.storage')})")
+        print(
+            f"  [OK] Object Storage initialized ({type(storage).__name__}: target={getattr(storage, 'base_dir', '.storage')})"
+        )
 
     doc_store = await create_document_store()
-    print(f"  [OK] Document Store initialized ({type(doc_store).__name__} -> Supabase PostgreSQL / pgvector)")
+    print(
+        f"  [OK] Document Store initialized ({type(doc_store).__name__} -> Supabase PostgreSQL / pgvector)"
+    )
 
     pipeline = FakePipeline(
         speech_provider=speech_provider,
@@ -241,7 +255,9 @@ async def main() -> None:
     stage1_duration = asyncio.get_event_loop().time() - t0
 
     print(f"\n  [STAGE 1 COMPLETED in {stage1_duration:.1f}s]")
-    print(f"  Detected Speakers ({len(session_res.speaker_labels)}):   {session_res.speaker_labels}")
+    print(
+        f"  Detected Speakers ({len(session_res.speaker_labels)}):   {session_res.speaker_labels}"
+    )
     print(f"  Primary Questions Generated: {len(session_res.primary_questions)}")
     if isinstance(doc_store, PgVectorDocumentStore):
         async with doc_store.db_pool.acquire() as conn:
@@ -275,7 +291,7 @@ async def main() -> None:
     for idx, q in enumerate(session_res.primary_questions):
         print(f"\n  [Q&A Round {idx + 1}/3] Evaluating Founder Answer to Judge {idx + 1}...")
         answer_wav = temp_dir / f"answer_{idx + 1}.wav"
-        
+
         # Split a 15-second snippet from the test video
         slice_audio_clip(video_file, answer_wav, start_s=round_offsets[idx], duration_s=15.0)
         ans_checksum = compute_sha256(answer_wav)
@@ -299,13 +315,17 @@ async def main() -> None:
         ans_res = await pipeline.analyze_answer(answer_job)
         ans_duration = asyncio.get_event_loop().time() - t_ans
 
-        assessment_data = await storage.read_json(f"ai/answer/{answer_job.answer_id}/assessment.json")
+        assessment_data = await storage.read_json(
+            f"ai/answer/{answer_job.answer_id}/assessment.json"
+        )
         qa_assessments.append(assessment_data)
 
         print(f"    Assessment Duration: {ans_duration:.1f}s")
         print(f"    Answer Score:        {assessment_data.get('score', 'N/A')}/100")
         print(f"    Confidence:          {assessment_data.get('confidence', 'N/A')}")
-        print(f"    Follow-up Generated: {ans_res.follow_up.text if ans_res.follow_up else 'None (Final round)'}")
+        print(
+            f"    Follow-up Generated: {ans_res.follow_up.text if ans_res.follow_up else 'None (Final round)'}"
+        )
 
     # Build Q&A aggregate artifact for report stage
     qa_artifact_id = generate_deterministic_ulid(f"{session_id}:qa_aggregate")
@@ -316,7 +336,9 @@ async def main() -> None:
         "qa_rounds": qa_assessments,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    qa_ref = await storage.upload_json(qa_artifact_key, qa_aggregate_data, artifact_id=qa_artifact_id)
+    qa_ref = await storage.upload_json(
+        qa_artifact_key, qa_aggregate_data, artifact_id=qa_artifact_id
+    )
 
     # -------------------------------------------------------------------------
     # STAGE 3: Generate Final Report & Evaluation (AI-07)
@@ -368,8 +390,12 @@ async def main() -> None:
     print(f"  Overall Score: {score_str}")
     print("\n  [Component Scores]")
     for comp in eval_json.get("components", []):
-        d_score = f"{comp.get('display_score')}/100" if comp.get("display_score") is not None else "N/A"
-        print(f"    - {comp.get('dimension'):<25}: {d_score:<10} (Weight: {comp.get('configured_weight', 0):.2f})")
+        d_score = (
+            f"{comp.get('display_score')}/100" if comp.get("display_score") is not None else "N/A"
+        )
+        print(
+            f"    - {comp.get('dimension'):<25}: {d_score:<10} (Weight: {comp.get('configured_weight', 0):.2f})"
+        )
 
     # Read and print the report markdown preview
     temp_report_file = Path(".storage/temp_report_preview.md")
@@ -385,7 +411,9 @@ async def main() -> None:
     for line in report_md_content.splitlines()[:60]:
         print(line)
     if len(report_md_content.splitlines()) > 60:
-        print(f"\n... [{len(report_md_content.splitlines()) - 60} more lines in object storage ({report_res.report_artifact.object_key})]")
+        print(
+            f"\n... [{len(report_md_content.splitlines()) - 60} more lines in object storage ({report_res.report_artifact.object_key})]"
+        )
 
     print("\n" + "=" * 80)
     print("  >>> FULL PIPELINE END-TO-END EXECUTION SUCCEEDED! <<<")

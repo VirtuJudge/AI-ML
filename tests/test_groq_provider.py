@@ -455,6 +455,3 @@ async def test_groq_speech_with_custom_key_pool() -> None:
 
     assert provider.key_pool is pool
     assert provider.api_key == "gsk_custom_1"
-
-
-

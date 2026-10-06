@@ -51,6 +51,7 @@ class JudgeSpec(BaseModel):
     fallback_text: str
     fallback_reason: str
 
+
 JUDGE_PANEL: list[JudgeSpec] = [
     JudgeSpec(
         role="business_strategist",
@@ -122,7 +123,7 @@ def format_prompt_for_judge(judge: JudgeSpec, bundle: EvidenceBundle) -> list[di
 {evidence_text}
 
 Full Transcript:
-{bundle.transcript_full_text or '(None provided)'}
+{bundle.transcript_full_text or "(None provided)"}
 
 Based on this evidence, produce exactly ONE primary grounded question in JSON format.
 Ensure you cite at least one valid evidence_id from the evidence list above.

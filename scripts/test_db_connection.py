@@ -53,9 +53,7 @@ async def main() -> None:
         print(f"  Public tables ({len(tables)}): {[r['tablename'] for r in tables]}")
 
         # Check if pgvector extension is available
-        ext = await conn.fetchval(
-            "SELECT extname FROM pg_extension WHERE extname = 'vector';"
-        )
+        ext = await conn.fetchval("SELECT extname FROM pg_extension WHERE extname = 'vector';")
         print(f"  pgvector installed: {bool(ext)}")
 
         await conn.close()

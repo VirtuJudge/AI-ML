@@ -268,4 +268,3 @@ def test_evidence_bundle_add_limitations() -> None:
     bundle.add_limitations([lim2])
     assert len(bundle.limitations) == 2
     assert [lim.code for lim in bundle.limitations] == ["lim_1", "lim_2"]
-

@@ -134,6 +134,7 @@ async def test_process_one_message_handles_malformed_json() -> None:
     res = await consumer.process_one_message("{invalid json payload")
     assert res is None
     assert len(mock_backend.updates) == 0
+    mock_redis.lpush.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -178,8 +179,9 @@ async def test_consumer_run_max_jobs() -> None:
     raw_json = msg.model_dump_json()
 
     mock_redis = AsyncMock()
-    # Return 1 message on first call, None subsequently
-    mock_redis.blpop.side_effect = [("virtujudge:local:jobs", raw_json), None]
+    mock_redis.rpoplpush.return_value = None
+    # Atomically move one ready message into the pending list.
+    mock_redis.blmove.side_effect = [raw_json]
 
     mock_backend = FakeBackendClient()
 

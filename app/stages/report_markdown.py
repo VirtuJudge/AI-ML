@@ -179,8 +179,7 @@ def generate_markdown_report(
     out.append("## Rubric Score Breakdown")
     out.append("")
     out.append(
-        "| Rubric Dimension | Configured Weight | Effective Weight | "
-        "Score | Rating | Status |"
+        "| Rubric Dimension | Configured Weight | Effective Weight | Score | Rating | Status |"
     )
     out.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
 
@@ -351,7 +350,7 @@ def generate_markdown_report(
                 out.append(f"- **Answered By:** {answered_by}")
                 ans_transcript = ans.get("transcript")
                 if ans_transcript:
-                    out.append(f"- **Response:** *\"{ans_transcript}\"*")
+                    out.append(f'- **Response:** *"{ans_transcript}"*')
 
             ass_score = ass.get("score")
             if ass_score is not None:

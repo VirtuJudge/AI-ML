@@ -166,4 +166,3 @@ __all__ = [
     "DocumentStageResult",
     "run_document_stage",
 ]
-

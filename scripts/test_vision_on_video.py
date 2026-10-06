@@ -136,10 +136,7 @@ async def test_video(video_path: Path, sample_fps: float, max_persons: int = 50)
 
     if movements:
         mean_mov = sum(movements) / len(movements)
-        print(
-            f"  Upper Body Movement:  mean={mean_mov:.1f} px/sample, "
-            f"max={max(movements):.1f} px"
-        )
+        print(f"  Upper Body Movement:  mean={mean_mov:.1f} px/sample, max={max(movements):.1f} px")
 
     print("\n--- SAMPLE TIMED OBSERVATIONS (First 15) ---")
     for obs in result.observations[:15]:

@@ -139,18 +139,10 @@ async def test_scoped_erasure_practice_session(tmp_path: Path) -> None:
 
         # 2. Intermediate artifacts are physically removed
         assert not (tmp_path / f"ai/session/{session_id}/analysis.json").exists()
-        assert not (
-            tmp_path / f"ai/session/{session_id}/checkpoints/speech_abc123.json"
-        ).exists()
-        assert not (
-            tmp_path / f"ai/session/{session_id}/checkpoints/vision_def456.json"
-        ).exists()
-        assert not (
-            tmp_path / f"ai/session/{session_id}/checkpoints/audio_ghi789.json"
-        ).exists()
-        assert not (
-            tmp_path / f"ai/session/{session_id}/answers/ans_001/transcript.json"
-        ).exists()
+        assert not (tmp_path / f"ai/session/{session_id}/checkpoints/speech_abc123.json").exists()
+        assert not (tmp_path / f"ai/session/{session_id}/checkpoints/vision_def456.json").exists()
+        assert not (tmp_path / f"ai/session/{session_id}/checkpoints/audio_ghi789.json").exists()
+        assert not (tmp_path / f"ai/session/{session_id}/answers/ans_001/transcript.json").exists()
 
         # 3. Document chunks in document_store are deleted
         remaining_chunks = await document_store.retrieve_top_k(session_id, query_embedding=[])

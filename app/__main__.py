@@ -1,14 +1,11 @@
 """CLI entrypoint to run the VirtuJudge AI-ML worker daemon."""
 
-import asyncio
 import logging
 import os
 from pathlib import Path
 
-from app.backend_client import BackendClient
 from app.document_store import FakeDocumentStore, create_document_store
 from app.pipeline import FakePipeline
-from app.storage import create_object_storage
 from app.providers.fake_audio import FakeAudioMetricsProvider
 from app.providers.fake_documents import FakeDocumentProvider
 from app.providers.fake_judge import FakeJudgeModelProvider
@@ -16,7 +13,7 @@ from app.providers.fake_speech import FakeDiarizationProvider, FakeSpeechProvide
 from app.providers.fake_vision import FakeVisionProvider
 from app.providers.groq_judge import GroqJudgeModelProvider
 from app.providers.groq_speech import GroqSpeechProvider
-from app.queue_consumer import RedisQueueConsumer
+from app.storage import create_object_storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,9 +35,13 @@ def _load_env() -> None:
 
 async def build_pipeline() -> FakePipeline:
     """Compose PitchAnalysisPipeline using configured environment providers."""
-    provider_mode = os.getenv("AI_PROVIDER_MODE", "fake").lower()
+    provider_mode = os.getenv("AI_PROVIDER_MODE", "fake").strip().lower()
+    live_modes = {"live", "groq"}
+    supported_modes = live_modes | {"fake", "mixed"}
+    if provider_mode not in supported_modes:
+        raise ValueError("AI_PROVIDER_MODE must be one of: fake, mixed, live, or groq.")
 
-    if provider_mode in ("groq", "live"):
+    if provider_mode in live_modes:
         logger.info("Initializing pipeline with LIVE Groq and ML providers...")
         speech_provider = GroqSpeechProvider()
         try:
@@ -48,48 +49,60 @@ async def build_pipeline() -> FakePipeline:
 
             diarization_provider = PyannoteDiarizationProvider()
         except Exception as exc:
-            logger.warning("PyAnnote diarization failed in %s mode (%s). Falling back to FakeDiarizationProvider.", provider_mode, exc)
-            diarization_provider = FakeDiarizationProvider()
+            logger.error(
+                "PyAnnote diarization initialization failed in %s mode (%s).",
+                provider_mode,
+                type(exc).__name__,
+            )
+            raise RuntimeError("PyAnnote diarization failed in live mode.") from None
 
         try:
             from app.providers.mediapipe_vision import MediaPipeVisionProvider
 
             vision_provider = MediaPipeVisionProvider()
         except Exception as exc:
-            if provider_mode == "live":
-                logger.error("FATAL: Failed to initialize MediaPipe vision in live mode: %s", exc)
-                raise RuntimeError(f"MediaPipe vision failed in live mode: {exc}") from exc
-            logger.warning("MediaPipe vision fallback to fake: %s", exc)
-            vision_provider = FakeVisionProvider()
+            logger.error(
+                "MediaPipe vision initialization failed in %s mode (%s).",
+                provider_mode,
+                type(exc).__name__,
+            )
+            raise RuntimeError("MediaPipe vision failed in live mode.") from None
 
         try:
             from app.providers.librosa_audio import LibrosaAudioProvider
 
             audio_provider = LibrosaAudioProvider()
         except Exception as exc:
-            if provider_mode == "live":
-                logger.error("FATAL: Failed to initialize Librosa audio in live mode: %s", exc)
-                raise RuntimeError(f"Librosa audio failed in live mode: {exc}") from exc
-            logger.warning("Librosa audio fallback to fake: %s", exc)
-            audio_provider = FakeAudioMetricsProvider()
+            logger.error(
+                "Librosa audio initialization failed in %s mode (%s).",
+                provider_mode,
+                type(exc).__name__,
+            )
+            raise RuntimeError("Librosa audio failed in live mode.") from None
 
         try:
             from app.providers.pymupdf_documents import PyMuPDFDocumentProvider
 
             doc_provider = PyMuPDFDocumentProvider()
         except Exception as exc:
-            if provider_mode == "live":
-                logger.error("FATAL: Failed to initialize PyMuPDF in live mode: %s", exc)
-                raise RuntimeError(f"PyMuPDF document provider failed in live mode: {exc}") from exc
-            logger.warning("PyMuPDF fallback to fake: %s", exc)
-            doc_provider = FakeDocumentProvider()
+            logger.error(
+                "PyMuPDF document provider initialization failed in %s mode (%s).",
+                provider_mode,
+                type(exc).__name__,
+            )
+            raise RuntimeError("PyMuPDF document provider failed in live mode.") from None
 
         judge_provider = GroqJudgeModelProvider()
+        if not os.getenv("DATABASE_URL"):
+            raise RuntimeError("DATABASE_URL is required for live document persistence.")
         try:
             doc_store = await create_document_store()
         except Exception as exc:
-            logger.warning("Failed to initialize live pgvector document store (%s). Falling back to FakeDocumentStore.", exc)
-            doc_store = FakeDocumentStore()
+            logger.error(
+                "Live pgvector document store initialization failed (%s).",
+                type(exc).__name__,
+            )
+            raise RuntimeError("Live document store initialization failed.") from None
 
         object_storage = create_object_storage()
     else:
@@ -103,9 +116,7 @@ async def build_pipeline() -> FakePipeline:
         audio_provider = FakeAudioMetricsProvider()
         doc_provider = FakeDocumentProvider()
         judge_provider = (
-            GroqJudgeModelProvider()
-            if os.getenv("GROQ_API_KEY")
-            else FakeJudgeModelProvider()
+            GroqJudgeModelProvider() if provider_mode == "mixed" else FakeJudgeModelProvider()
         )
         doc_store = FakeDocumentStore()
         object_storage = create_object_storage()
@@ -125,6 +136,11 @@ async def build_pipeline() -> FakePipeline:
 def main() -> None:
     """Initialize environment and start Celery worker on queue ai_jobs."""
     _load_env()
+    from app.worker import _run_async, set_default_pipeline
+
+    # Build providers before the worker begins consuming jobs so broken live
+    # dependencies, credentials, or stores fail at startup rather than mid-job.
+    set_default_pipeline(_run_async(build_pipeline()))
     logger.info("Starting VirtuJudge AI Celery Worker on queue 'ai_jobs'...")
     from app.celery_app import celery_app
 

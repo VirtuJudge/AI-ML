@@ -59,9 +59,7 @@ async def test_process_generate_report_job(
 
 
 @pytest.mark.asyncio
-async def test_process_erase_job(
-    erase_message: QueueMessage, fake_pipeline: FakePipeline
-) -> None:
+async def test_process_erase_job(erase_message: QueueMessage, fake_pipeline: FakePipeline) -> None:
     """Test process_job returns completed WorkerUpdate with ErasureCompleted payload."""
     update = await process_job(erase_message, fake_pipeline)
     assert update.status == UpdateStatus.COMPLETED

@@ -144,7 +144,7 @@ class EvidenceBundle(BaseModel):
                     if item.start_ms is not None and item.end_ms is not None
                     else ""
                 )
-                lines.append(f"- [{item.evidence_id}] {spk}{t_range}: \"{item.excerpt}\"")
+                lines.append(f'- [{item.evidence_id}] {spk}{t_range}: "{item.excerpt}"')
 
         # Supporting Document Evidence
         doc_items = self.get_items_for_source("documents")[:max_items_per_source]
@@ -152,7 +152,7 @@ class EvidenceBundle(BaseModel):
             lines.append("\n### Supporting Document & Slide Evidence:")
             for item in doc_items:
                 page_info = f" (Slide {item.page_or_slide})" if item.page_or_slide else ""
-                lines.append(f"- [{item.evidence_id}]{page_info}: \"{item.excerpt}\"")
+                lines.append(f'- [{item.evidence_id}]{page_info}: "{item.excerpt}"')
 
         return "\n".join(lines)
 

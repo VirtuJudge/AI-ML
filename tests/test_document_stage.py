@@ -333,4 +333,3 @@ async def test_document_stage_embedding_failure_limitation(dummy_pdf_file: Path)
     assert len(result.limitations) == 1
     assert result.limitations[0].code == "document_embedding_failed"
     assert result.limitations[0].scope == "documents"
-

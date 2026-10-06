@@ -243,8 +243,7 @@ async def run_pipeline_on_video(
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(
-            "Usage: python scripts/test_video_pipeline.py "
-            "<path_to_video> [expected_num_speakers]"
+            "Usage: python scripts/test_video_pipeline.py <path_to_video> [expected_num_speakers]"
         )
         sys.exit(1)
 

@@ -62,10 +62,7 @@ def test_score_to_label() -> None:
 
 def test_canonicalize_dimension() -> None:
     """Verify dimension aliases map to canonical rubric keys."""
-    assert (
-        canonicalize_dimension("business_reasoning")
-        == "business_and_problem_solution_reasoning"
-    )
+    assert canonicalize_dimension("business_reasoning") == "business_and_problem_solution_reasoning"
     assert (
         canonicalize_dimension("market_and_business_model")
         == "business_and_problem_solution_reasoning"
@@ -73,10 +70,7 @@ def test_canonicalize_dimension() -> None:
     assert canonicalize_dimension("delivery") == "delivery_and_body_language"
     assert canonicalize_dimension("timing") == "timing_and_speech_mechanics"
     assert canonicalize_dimension("qa") == "qa_quality"
-    assert (
-        canonicalize_dimension("pitch_content_and_evidence")
-        == "pitch_content_and_evidence"
-    )
+    assert canonicalize_dimension("pitch_content_and_evidence") == "pitch_content_and_evidence"
 
 
 # ============================================================================

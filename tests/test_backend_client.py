@@ -117,10 +117,25 @@ async def test_backend_client_http_send_update() -> None:
 @pytest.mark.asyncio
 async def test_backend_client_http_check_cancellation() -> None:
     """Test BackendClient parses cancellation flag from backend response."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/internal/v1/ai-jobs/job_cancelled":
-            return httpx.Response(200, json={"cancel_requested": True})
-        return httpx.Response(200, json={"cancel_requested": False})
+            return httpx.Response(
+                200,
+                json={
+                    "status": "cancelled",
+                    "last_update_sequence": 0,
+                    "cancel_requested": True,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "status": "running",
+                "last_update_sequence": 0,
+                "cancel_requested": False,
+            },
+        )
 
     transport = httpx.MockTransport(handler)
     client = BackendClient(base_url="http://testbackend:4000", shared_secret="secret_123")
@@ -152,7 +167,11 @@ async def test_backend_client_production_config_validation() -> None:
         BackendClient(base_url="http://localhost:8000", shared_secret="sec", strict_production=True)
 
     with pytest.raises(BackendConfigurationError, match="AI_WORKER_SHARED_SECRET is required"):
-        BackendClient(base_url="https://virtujudge-backend.onrender.com", shared_secret="", strict_production=True)
+        BackendClient(
+            base_url="https://virtujudge-backend.onrender.com",
+            shared_secret="",
+            strict_production=True,
+        )
 
     # Valid production config succeeds
     client = BackendClient(
@@ -307,6 +326,7 @@ async def test_backend_client_cancelled_payload_is_empty_dict() -> None:
 @pytest.mark.asyncio
 async def test_backend_client_reachability() -> None:
     """Test check_backend_reachability handles health response."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "healthy"})

@@ -118,14 +118,22 @@ async def main() -> None:
             store = await create_document_store(args.database_url)
         except Exception as exc:
             if not args.json:
-                print(f"\nNote: Database connection unavailable ({exc}). Using offline FakeDocumentStore.")
+                print(
+                    f"\nNote: Database connection unavailable ({exc}). Using offline FakeDocumentStore."
+                )
             store = FakeDocumentStore()
 
     session_id = f"session_{file_path.stem}"
     stored_count = await store.store_chunks(session_id, chunks)
     if not args.json:
-        store_type = "Supabase / PostgreSQL pgvector ('ai_document_chunks')" if not isinstance(store, FakeDocumentStore) else "offline FakeDocumentStore"
-        print(f"\nDocument Store: Successfully saved {stored_count} chunks to {store_type} (session_id={session_id})")
+        store_type = (
+            "Supabase / PostgreSQL pgvector ('ai_document_chunks')"
+            if not isinstance(store, FakeDocumentStore)
+            else "offline FakeDocumentStore"
+        )
+        print(
+            f"\nDocument Store: Successfully saved {stored_count} chunks to {store_type} (session_id={session_id})"
+        )
 
     # If a query is provided, embed it and retrieve top-k
     retrieved_chunks = []
@@ -173,18 +181,18 @@ async def main() -> None:
         preview = c.text.replace("\n", " ")
         if len(preview) > 140:
             preview = preview[:137] + "..."
-        print(f"  Text Content: \"{preview}\"")
+        print(f'  Text Content: "{preview}"')
 
     if args.query:
         print("\n" + "=" * 75)
-        print(f"TOP-{args.top_k} RETRIEVAL FOR QUERY: \"{args.query}\"")
+        print(f'TOP-{args.top_k} RETRIEVAL FOR QUERY: "{args.query}"')
         print("=" * 75)
         if not retrieved_chunks:
             print("No matching chunks found.")
         else:
             for rank, rc in enumerate(retrieved_chunks, 1):
                 print(f"\nRank {rank}: [Page/Slide {rc.page_or_slide}] Chunk ID: {rc.chunk_id}")
-                print(f"Text excerpt: \"{rc.text}\"")
+                print(f'Text excerpt: "{rc.text}"')
 
     print("\n" + "=" * 75)
     print("TEST PASSED: Document parsed, chunked, embedded, and indexed cleanly.")

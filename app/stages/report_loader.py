@@ -37,7 +37,9 @@ class ReportEvidenceBundle(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-def build_synthetic_analysis_data(session_id: str = "01JTESTSESSION0000000000001") -> dict[str, Any]:
+def build_synthetic_analysis_data(
+    session_id: str = "01JTESTSESSION0000000000001",
+) -> dict[str, Any]:
     """Generate contract-compliant synthetic analysis artifact payload for testing."""
     return {
         "artifact_id": f"{session_id}:analysis",
@@ -338,7 +340,9 @@ async def load_report_evidence(
         diarization_segments = analysis_data["observations"].get("diarization", [])
 
     # Extract speaker labels
-    speaker_labels = list(by_speaker.keys()) if by_speaker else analysis_data.get("speaker_labels", [])
+    speaker_labels = (
+        list(by_speaker.keys()) if by_speaker else analysis_data.get("speaker_labels", [])
+    )
 
     # Extract limitations
     limitations: list[Limitation] = []

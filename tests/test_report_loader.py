@@ -60,10 +60,17 @@ async def test_load_report_evidence_from_storage(tmp_path: Path) -> None:
             }
         },
         "limitations": [
-            {"code": "audio_warning", "scope": "audio", "message": "Low SNR", "affected_dimensions": []}
+            {
+                "code": "audio_warning",
+                "scope": "audio",
+                "message": "Low SNR",
+                "affected_dimensions": [],
+            }
         ],
     }
-    analysis_ref = await storage.upload_json(analysis_key, analysis_payload, artifact_id="01JANALYSIS00000000000001")
+    analysis_ref = await storage.upload_json(
+        analysis_key, analysis_payload, artifact_id="01JANALYSIS00000000000001"
+    )
 
     # 2. Upload sample qa.json
     qa_key = "ai/session/session_100/qa.json"
@@ -74,11 +81,11 @@ async def test_load_report_evidence_from_storage(tmp_path: Path) -> None:
         "answers": [
             {"question_id": "q1", "status": "submitted", "transcript": "Patented algorithms"}
         ],
-        "assessments": [
-            {"question_id": "q1", "score": 0.88, "evidence_ids": ["ev_1"]}
-        ],
+        "assessments": [{"question_id": "q1", "score": 0.88, "evidence_ids": ["ev_1"]}],
     }
-    qa_ref = await storage.upload_json(qa_key, qa_payload, artifact_id="01JQA0000000000000000000001")
+    qa_ref = await storage.upload_json(
+        qa_key, qa_payload, artifact_id="01JQA0000000000000000000001"
+    )
 
     # 3. Load evidence bundle
     bundle = await load_report_evidence(analysis_ref, qa_ref, storage=storage)

@@ -34,7 +34,9 @@ from app.contracts import (
     WorkerUpdate,
 )
 
-FIXTURES_DIR_BACKEND = Path(__file__).resolve().parent.parent.parent / "Backend" / "contracts" / "fixtures" / "ai"
+FIXTURES_DIR_BACKEND = (
+    Path(__file__).resolve().parent.parent.parent / "Backend" / "contracts" / "fixtures" / "ai"
+)
 FIXTURES_DIR_LOCAL = Path(__file__).resolve().parent / "fixtures" / "ai"
 
 

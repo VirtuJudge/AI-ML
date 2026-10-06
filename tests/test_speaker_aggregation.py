@@ -77,8 +77,12 @@ def test_clean_diarization_prunes_isolated_micro_noise() -> None:
     """Verify isolated acoustic noise bursts < min_duration_ms (e.g. 20ms or 80ms) are pruned."""
     segments = [
         SpeakerSegment(start_ms=0, end_ms=50, speaker_label="SPEAKER_00"),  # 50ms isolated noise
-        SpeakerSegment(start_ms=5000, end_ms=5080, speaker_label="SPEAKER_01"),  # 80ms isolated noise
-        SpeakerSegment(start_ms=10000, end_ms=12000, speaker_label="SPEAKER_00"),  # 2000ms real turn
+        SpeakerSegment(
+            start_ms=5000, end_ms=5080, speaker_label="SPEAKER_01"
+        ),  # 80ms isolated noise
+        SpeakerSegment(
+            start_ms=10000, end_ms=12000, speaker_label="SPEAKER_00"
+        ),  # 2000ms real turn
     ]
 
     cleaned = clean_diarization_turns(segments, min_duration_ms=100, merge_gap_ms=300)
@@ -295,7 +299,7 @@ def test_format_duration_ms() -> None:
 def test_extract_speaker_intervals() -> None:
     """Verify extraction of active speaking turns and total speaking duration."""
     cleaned_turns = [
-        SpeakerSegment(start_ms=0, end_ms=135000, speaker_label="SPEAKER_00"),      # 2m 15s
+        SpeakerSegment(start_ms=0, end_ms=135000, speaker_label="SPEAKER_00"),  # 2m 15s
         SpeakerSegment(start_ms=140000, end_ms=160000, speaker_label="SPEAKER_01"),  # 20s
         SpeakerSegment(start_ms=220000, end_ms=250000, speaker_label="SPEAKER_00"),  # 30s
     ]
@@ -349,36 +353,211 @@ def test_aggregate_speaker_observations_math() -> None:
 
     audio_obs = [
         # Window 0 (0-10s)
-        AudioObservation(start_ms=0, end_ms=5000, metric="speaking_rate_wpm", value=130.0, unit="wpm", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=5000, end_ms=10000, metric="speaking_rate_wpm", value=150.0, unit="wpm", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=0, end_ms=5000, metric="pitch_mean_hz", value=140.0, unit="hz", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=5000, end_ms=10000, metric="pitch_mean_hz", value=160.0, unit="hz", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=0, end_ms=5000, metric="pitch_std_hz", value=10.0, unit="hz", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=5000, end_ms=10000, metric="pitch_std_hz", value=20.0, unit="hz", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=0, end_ms=5000, metric="pause_duration_ms", value=200.0, unit="ms", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=5000, end_ms=10000, metric="pause_duration_ms", value=350.0, unit="ms", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=0, end_ms=5000, metric="pause_count", value=1.0, unit="count", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=5000, end_ms=10000, metric="pause_count", value=2.0, unit="count", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=0, end_ms=5000, metric="filler_count", value=0.0, unit="count", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=5000, end_ms=10000, metric="filler_count", value=1.0, unit="count", speaker_label="SPEAKER_00"),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="speaking_rate_wpm",
+            value=130.0,
+            unit="wpm",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="speaking_rate_wpm",
+            value=150.0,
+            unit="wpm",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pitch_mean_hz",
+            value=140.0,
+            unit="hz",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pitch_mean_hz",
+            value=160.0,
+            unit="hz",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pitch_std_hz",
+            value=10.0,
+            unit="hz",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pitch_std_hz",
+            value=20.0,
+            unit="hz",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pause_duration_ms",
+            value=200.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pause_duration_ms",
+            value=350.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pause_count",
+            value=2.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="filler_count",
+            value=0.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
         # Window 1 (10-20s)
-        AudioObservation(start_ms=10000, end_ms=15000, metric="speaking_rate_wpm", value=140.0, unit="wpm", speaker_label="SPEAKER_00"),
+        AudioObservation(
+            start_ms=10000,
+            end_ms=15000,
+            metric="speaking_rate_wpm",
+            value=140.0,
+            unit="wpm",
+            speaker_label="SPEAKER_00",
+        ),
     ]
 
     visual_obs = [
         # Window 0 (0-10s)
-        VisualObservation(start_ms=1000, end_ms=2000, metric="gaze_direction", value=1.0, unit="idx", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=5000, end_ms=6000, metric="gaze_direction", value=2.0, unit="idx", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=1000, end_ms=2000, metric="head_pitch_degrees", value=-2.0, unit="deg", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=5000, end_ms=6000, metric="head_pitch_degrees", value=4.0, unit="deg", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=1000, end_ms=2000, metric="head_yaw_degrees", value=-1.5, unit="deg", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=5000, end_ms=6000, metric="head_yaw_degrees", value=3.5, unit="deg", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=1000, end_ms=2000, metric="posture_openness", value=0.80, unit="ratio", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=5000, end_ms=6000, metric="posture_openness", value=0.90, unit="ratio", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=1000, end_ms=2000, metric="shoulder_symmetry_ratio", value=0.94, unit="ratio", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=5000, end_ms=6000, metric="shoulder_symmetry_ratio", value=0.98, unit="ratio", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=1000, end_ms=2000, metric="upper_body_movement_px", value=2.0, unit="px", speaker_label="SPEAKER_00"),
-        VisualObservation(start_ms=5000, end_ms=6000, metric="upper_body_movement_px", value=4.4, unit="px", speaker_label="SPEAKER_00"),
+        VisualObservation(
+            start_ms=1000,
+            end_ms=2000,
+            metric="gaze_direction",
+            value=1.0,
+            unit="idx",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=5000,
+            end_ms=6000,
+            metric="gaze_direction",
+            value=2.0,
+            unit="idx",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=1000,
+            end_ms=2000,
+            metric="head_pitch_degrees",
+            value=-2.0,
+            unit="deg",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=5000,
+            end_ms=6000,
+            metric="head_pitch_degrees",
+            value=4.0,
+            unit="deg",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=1000,
+            end_ms=2000,
+            metric="head_yaw_degrees",
+            value=-1.5,
+            unit="deg",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=5000,
+            end_ms=6000,
+            metric="head_yaw_degrees",
+            value=3.5,
+            unit="deg",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=1000,
+            end_ms=2000,
+            metric="posture_openness",
+            value=0.80,
+            unit="ratio",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=5000,
+            end_ms=6000,
+            metric="posture_openness",
+            value=0.90,
+            unit="ratio",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=1000,
+            end_ms=2000,
+            metric="shoulder_symmetry_ratio",
+            value=0.94,
+            unit="ratio",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=5000,
+            end_ms=6000,
+            metric="shoulder_symmetry_ratio",
+            value=0.98,
+            unit="ratio",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=1000,
+            end_ms=2000,
+            metric="upper_body_movement_px",
+            value=2.0,
+            unit="px",
+            speaker_label="SPEAKER_00",
+        ),
+        VisualObservation(
+            start_ms=5000,
+            end_ms=6000,
+            metric="upper_body_movement_px",
+            value=4.4,
+            unit="px",
+            speaker_label="SPEAKER_00",
+        ),
     ]
 
     by_speaker = aggregate_speaker_observations(visual_obs, audio_obs, diarization)
@@ -399,19 +578,19 @@ def test_aggregate_speaker_observations_math() -> None:
 
     ac0 = w0["acoustic"]
     assert ac0["speaking_rate_wpm"] == 140.0  # mean(130, 150)
-    assert ac0["pitch_mean_hz"] == 150.0      # mean(140, 160)
-    assert ac0["pitch_std_hz"] == 15.0       # mean(10, 20)
-    assert ac0["pause_duration_ms"] == 550   # sum(200, 350)
-    assert ac0["pause_count"] == 3           # sum(1, 2)
-    assert ac0["filler_count"] == 1          # sum(0, 1)
+    assert ac0["pitch_mean_hz"] == 150.0  # mean(140, 160)
+    assert ac0["pitch_std_hz"] == 15.0  # mean(10, 20)
+    assert ac0["pause_duration_ms"] == 550  # sum(200, 350)
+    assert ac0["pause_count"] == 3  # sum(1, 2)
+    assert ac0["filler_count"] == 1  # sum(0, 1)
 
     vs0 = w0["visual"]
-    assert vs0["gaze_direction"] == 1.50           # mean(1.0, 2.0)
-    assert vs0["head_pitch_degrees"] == 1.0        # mean(-2.0, 4.0)
-    assert vs0["head_yaw_degrees"] == 1.0          # mean(-1.5, 3.5)
-    assert vs0["posture_openness"] == 0.85         # mean(0.80, 0.90)
+    assert vs0["gaze_direction"] == 1.50  # mean(1.0, 2.0)
+    assert vs0["head_pitch_degrees"] == 1.0  # mean(-2.0, 4.0)
+    assert vs0["head_yaw_degrees"] == 1.0  # mean(-1.5, 3.5)
+    assert vs0["posture_openness"] == 0.85  # mean(0.80, 0.90)
     assert vs0["shoulder_symmetry_ratio"] == 0.96  # mean(0.94, 0.98)
-    assert vs0["upper_body_movement_px"] == 3.2    # mean(2.0, 4.4)
+    assert vs0["upper_body_movement_px"] == 3.2  # mean(2.0, 4.4)
 
     # Window 1: 10-20s (acoustic only, no visual)
     w1 = windows[1]
@@ -433,8 +612,22 @@ def test_aggregate_omits_empty_windows() -> None:
     )
 
     audio_obs = [
-        AudioObservation(start_ms=1000, end_ms=5000, metric="speaking_rate_wpm", value=135.0, unit="wpm", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=41000, end_ms=45000, metric="speaking_rate_wpm", value=142.0, unit="wpm", speaker_label="SPEAKER_00"),
+        AudioObservation(
+            start_ms=1000,
+            end_ms=5000,
+            metric="speaking_rate_wpm",
+            value=135.0,
+            unit="wpm",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=41000,
+            end_ms=45000,
+            metric="speaking_rate_wpm",
+            value=142.0,
+            unit="wpm",
+            speaker_label="SPEAKER_00",
+        ),
     ]
 
     by_speaker = aggregate_by_speaker([], audio_obs, diarization)
@@ -462,8 +655,22 @@ def test_aggregate_multiple_speakers_isolated_profiles() -> None:
     )
 
     audio_obs = [
-        AudioObservation(start_ms=2000, end_ms=4000, metric="speaking_rate_wpm", value=130.0, unit="wpm", speaker_label="SPEAKER_00"),
-        AudioObservation(start_ms=12000, end_ms=14000, metric="speaking_rate_wpm", value=160.0, unit="wpm", speaker_label="SPEAKER_01"),
+        AudioObservation(
+            start_ms=2000,
+            end_ms=4000,
+            metric="speaking_rate_wpm",
+            value=130.0,
+            unit="wpm",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=12000,
+            end_ms=14000,
+            metric="speaking_rate_wpm",
+            value=160.0,
+            unit="wpm",
+            speaker_label="SPEAKER_01",
+        ),
     ]
 
     by_speaker = aggregate_speaker_observations([], audio_obs, diarization)

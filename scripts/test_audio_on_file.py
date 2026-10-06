@@ -87,21 +87,21 @@ async def test_audio(file_path: Path, window_sec: float = 5.0, hop_sec: float = 
     print("\nMEASUREMENT BREAKDOWN:")
     if rates:
         print(
-            f"  Speaking Rate:       mean={sum(rates)/len(rates):.1f} WPM, "
+            f"  Speaking Rate:       mean={sum(rates) / len(rates):.1f} WPM, "
             f"min={min(rates):.1f}, max={max(rates):.1f} WPM"
         )
     if pitches:
         print(
-            f"  Fundamental Pitch:   mean={sum(pitches)/len(pitches):.1f} Hz, "
+            f"  Fundamental Pitch:   mean={sum(pitches) / len(pitches):.1f} Hz, "
             f"min={min(pitches):.1f}, max={max(pitches):.1f} Hz"
         )
     if pitch_stds:
-        print(f"  Pitch Variation:     mean std={sum(pitch_stds)/len(pitch_stds):.1f} Hz")
+        print(f"  Pitch Variation:     mean std={sum(pitch_stds) / len(pitch_stds):.1f} Hz")
     if pauses_ms:
         total_pause_s = sum(pauses_ms) / 1000.0
         print(
             f"  Total Silence/Pause: {total_pause_s:.2f}s "
-            f"({(total_pause_s / (duration_ms/1000.0))*100:.1f}% of total duration)"
+            f"({(total_pause_s / (duration_ms / 1000.0)) * 100:.1f}% of total duration)"
         )
     if pauses_cnt:
         print(f"  Significant Pauses:  {int(sum(pauses_cnt))} pause events (>= 250ms)")

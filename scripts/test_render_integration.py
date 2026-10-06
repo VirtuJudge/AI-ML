@@ -152,7 +152,7 @@ async def run_smoke_test() -> None:
     from app.backend_client import FakeBackendClient
     from app.queue_consumer import RedisQueueConsumer
 
-    pipeline = build_pipeline()
+    pipeline = await build_pipeline()
     backend_client = FakeBackendClient()
 
     consumer = RedisQueueConsumer(
