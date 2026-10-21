@@ -984,11 +984,11 @@ class FakePipeline:
         session_ids = list(dict.fromkeys(job.practice_session_ids))
         if job.scope == "practice_session":
             session_ids = [job.scope_id]
+        if (job.retention_only or job.scope == "asset") and self.document_store is not None:
+            deleted_records += await self.document_store.delete_by_asset_versions(
+                job.asset_version_ids
+            )
         if job.retention_only:
-            if self.document_store is not None:
-                deleted_records += await self.document_store.delete_by_asset_versions(
-                    job.asset_version_ids
-                )
             excluded = [
                 "report.md",
                 "evaluation.json",
