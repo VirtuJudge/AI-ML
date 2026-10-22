@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/Tests-pytest-success)](tests/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-brightgreen)](pyproject.toml)
 [![Compliance](https://img.shields.io/badge/ADR_0007-Compliant_Erasure-success)](tests/test_erasure.py)
-[![License](https://img.shields.io/badge/License-Proprietary-lightgrey.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Asynchronous AI worker for multimodal startup pitch evaluation, interactive Q&A assessment, and rubric-grounded report generation.
 
