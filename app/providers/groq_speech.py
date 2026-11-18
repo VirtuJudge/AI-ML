@@ -30,6 +30,19 @@ from app.providers.types import (
 class ProviderError(Exception):
     """Base exception for external AI provider failures."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+        is_timeout: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+        self.is_timeout = is_timeout
+
 
 class GroqSpeechProviderError(ProviderError):
     """Exception raised when GroqCloud Whisper API request fails."""
@@ -161,7 +174,8 @@ class GroqSpeechProvider:
         if file_size > self.max_file_size_bytes:
             raise GroqSpeechProviderError(
                 f"Audio file '{audio_path.name}' ({file_size / (1024 * 1024):.2f}MB) "
-                f"exceeds Groq's 25MB upload limit ({self.max_file_size_bytes} bytes)."
+                f"exceeds Groq's 25MB upload limit ({self.max_file_size_bytes} bytes).",
+                retryable=False,
             )
 
         # Audio uploads are capped at 25 MB. Read the bounded local file directly
@@ -188,11 +202,17 @@ class GroqSpeechProvider:
                 timeout=self.timeout,
             )
         except GroqPoolError as err:
-            raise GroqSpeechProviderError(str(err)) from err
+            raise GroqSpeechProviderError(
+                str(err),
+                status_code=err.status_code,
+                retryable=err.retryable,
+                is_timeout=err.is_timeout,
+            ) from err
 
         if not isinstance(resp_data, dict):
             raise GroqSpeechProviderError(
-                "Groq Whisper API returned a response that could not be parsed as JSON."
+                "Groq Whisper API returned a response that could not be parsed as JSON.",
+                retryable=False,
             )
 
         full_text = str(resp_data.get("text", "")).strip()

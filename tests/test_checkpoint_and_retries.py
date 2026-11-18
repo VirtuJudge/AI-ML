@@ -4,11 +4,21 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
+from app.contracts import ErrorCode
+from app.providers.groq_pool import AllKeysExhaustedError
+from app.providers.groq_speech import GroqSpeechProviderError
+from app.providers.http_embedding import HttpEmbeddingProviderError
 from app.stages.checkpoint import get_stage_checkpoint, save_stage_checkpoint
-from app.stages.common import StageTransientError, with_transient_retries
+from app.stages.common import (
+    StageProviderError,
+    StageTransientError,
+    classify_stage_error,
+    with_transient_retries,
+)
 from app.storage.local import LocalDiskObjectStorage
 
 
@@ -412,3 +422,125 @@ async def test_with_transient_retries_backoff_timing(monkeypatch: pytest.MonkeyP
     assert 1.0 <= recorded_delays[0] <= 1.1
     # Attempt 2 retry backoff: base_delay * (2 ** 1) + jitter [0, 0.1] -> [2.0, 2.1]
     assert 2.0 <= recorded_delays[1] <= 2.1
+
+
+@pytest.mark.asyncio
+async def test_with_transient_retries_retries_provider_429_5xx_timeout_and_pool_exhaustion() -> (
+    None
+):
+    """Verify retryable conditions (429/5xx, timeout, pool exhaustion) retry and recover."""
+    transient_errors: list[Exception] = [
+        GroqSpeechProviderError("HTTP 503 Service Unavailable"),
+        GroqSpeechProviderError("HTTP 429 Too Many Requests"),
+        AllKeysExhaustedError("All 3 configured Groq API keys are exhausted."),
+        httpx.ReadTimeout("Read timed out"),
+        httpx.ConnectError("Connection refused"),
+    ]
+
+    for exc in transient_errors:
+        calls = 0
+
+        async def op(err: Exception = exc) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise err
+            return "recovered"
+
+        res = await with_transient_retries(
+            op,
+            stage_name="speech",
+            max_attempts=3,
+            base_delay=0.001,
+        )
+        assert res == "recovered"
+        assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_with_transient_retries_maps_exhausted_timeout_to_stage_transient_error() -> None:
+    """Verify exhausted timeout errors raise StageTransientError with stage and PROVIDER_TIMEOUT."""
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("Timed out")
+
+    with pytest.raises(StageTransientError) as exc_info:
+        await with_transient_retries(
+            op,
+            stage_name="assessment",
+            max_attempts=3,
+            base_delay=0.001,
+        )
+
+    assert calls == 3
+    assert exc_info.value.stage == "assessment"
+    assert exc_info.value.code == ErrorCode.PROVIDER_TIMEOUT
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_with_transient_retries_does_not_retry_non_retryable_provider_errors() -> None:
+    """Verify non-retryable provider errors map to StageProviderError without retrying."""
+    non_retryable: list[Exception] = [
+        GroqSpeechProviderError("HTTP 400 Bad Request"),
+        GroqSpeechProviderError("Audio file exceeds 25MB upload limit", retryable=False),
+        GroqSpeechProviderError("HTTP 413 Payload Too Large"),
+        HttpEmbeddingProviderError("HTTP 401 Unauthorized", status_code=401, retryable=False),
+    ]
+
+    for exc in non_retryable:
+        calls = 0
+
+        async def op(err: Exception = exc) -> str:
+            nonlocal calls
+            calls += 1
+            raise err
+
+        with pytest.raises(StageProviderError) as exc_info:
+            await with_transient_retries(
+                op,
+                stage_name="speech",
+                max_attempts=3,
+                base_delay=0.001,
+            )
+
+        assert calls == 1
+        assert exc_info.value.stage == "speech"
+        assert exc_info.value.code == ErrorCode.PROVIDER_ERROR
+        assert exc_info.value.retryable is False
+
+
+def test_classify_stage_error_http_status_error() -> None:
+    """Verify httpx.HTTPStatusError maps 429/5xx as retryable and 4xx as non-retryable."""
+    req = httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions")
+    err_503 = httpx.HTTPStatusError(
+        "503",
+        request=req,
+        response=httpx.Response(503, request=req),
+    )
+    mapped_503 = classify_stage_error(err_503, stage_name="speech")
+    assert isinstance(mapped_503, StageTransientError)
+    assert mapped_503.stage == "speech"
+    assert mapped_503.code == ErrorCode.PROVIDER_ERROR
+
+    err_504 = httpx.HTTPStatusError(
+        "504",
+        request=req,
+        response=httpx.Response(504, request=req),
+    )
+    mapped_504 = classify_stage_error(err_504, stage_name="speech")
+    assert isinstance(mapped_504, StageTransientError)
+    assert mapped_504.code == ErrorCode.PROVIDER_TIMEOUT
+
+    err_400 = httpx.HTTPStatusError(
+        "400",
+        request=req,
+        response=httpx.Response(400, request=req),
+    )
+    mapped_400 = classify_stage_error(err_400, stage_name="speech")
+    assert isinstance(mapped_400, StageProviderError)
+    assert mapped_400.retryable is False
+    assert mapped_400.stage == "speech"

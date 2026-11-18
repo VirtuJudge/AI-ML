@@ -28,9 +28,37 @@ GROQ_ENV_KEYS = [
 class GroqPoolError(Exception):
     """Base exception for Groq key pool errors."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+        is_timeout: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+        self.is_timeout = is_timeout
+
 
 class GroqRateLimitError(GroqPoolError):
     """Raised when a Groq API request encounters rate limiting."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status_code: int | None = 429,
+        retryable: bool | None = True,
+        is_timeout: bool = False,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=status_code,
+            retryable=retryable,
+            is_timeout=is_timeout,
+        )
 
 
 class AllKeysExhaustedError(GroqPoolError):
@@ -186,6 +214,9 @@ class GroqKeyPool:
             payload["max_tokens"] = max_tokens
 
         last_error_code: int | None = None
+        network_error_count = 0
+        timeout_count = 0
+        saw_retryable = False
 
         for key_idx in attempt_indices:
             client = self._get_client_for_key(key_idx)
@@ -208,6 +239,9 @@ class GroqKeyPool:
                     timeout=req_timeout,
                 )
             except httpx.RequestError as req_err:
+                network_error_count += 1
+                if isinstance(req_err, httpx.TimeoutException):
+                    timeout_count += 1
                 logger.warning(
                     "Groq key index %d request network error: %s. Rotating to fallback.",
                     key_idx,
@@ -227,9 +261,11 @@ class GroqKeyPool:
                     )
                     continue
 
+            last_error_code = response.status_code
+
             # Transient / rate-limit failure codes that warrant rotation
             if response.status_code in (429, 503, 529):
-                last_error_code = response.status_code
+                saw_retryable = True
                 logger.warning(
                     "Groq key index %d exhausted (HTTP %d). Rotating to fallback key.",
                     key_idx,
@@ -247,6 +283,8 @@ class GroqKeyPool:
                 continue
 
             # Unhandled status code: rotate as well to preserve pipeline availability
+            if response.status_code == 408 or 500 <= response.status_code < 600:
+                saw_retryable = True
             logger.warning(
                 "Groq key index %d failed with HTTP %d. Rotating to fallback key.",
                 key_idx,
@@ -259,7 +297,14 @@ class GroqKeyPool:
             f"All {len(self._api_keys)} configured Groq API keys are exhausted "
             f"or unavailable{err_detail}."
         )
-        raise AllKeysExhaustedError(msg)
+        is_timeout = timeout_count > 0 and last_error_code is None
+        retryable = saw_retryable or network_error_count > 0 or last_error_code is None
+        raise AllKeysExhaustedError(
+            msg,
+            status_code=last_error_code,
+            retryable=retryable,
+            is_timeout=is_timeout,
+        )
 
     async def chat(
         self,
@@ -328,6 +373,8 @@ class GroqKeyPool:
         last_error_code: int | None = None
         last_reason: str = ""
         network_error_count = 0
+        timeout_count = 0
+        saw_retryable = False
 
         for key_idx in attempt_indices:
             client = self._get_client_for_key(key_idx)
@@ -353,6 +400,8 @@ class GroqKeyPool:
                 )
             except httpx.RequestError as req_err:
                 network_error_count += 1
+                if isinstance(req_err, httpx.TimeoutException):
+                    timeout_count += 1
                 logger.warning(
                     "Groq key index %d multipart network error: %s. Rotating to fallback.",
                     key_idx,
@@ -379,11 +428,14 @@ class GroqKeyPool:
             if response.status_code == 413:
                 raise GroqPoolError(
                     f"Groq API rejected upload: payload exceeds 25MB request limit "
-                    f"(status 413: {last_reason})"
+                    f"(status 413: {last_reason})",
+                    status_code=413,
+                    retryable=False,
                 )
 
             # 429, 503, 529: rate limits or capacity
             if response.status_code in (429, 503, 529):
+                saw_retryable = True
                 logger.warning(
                     "Groq key index %d exhausted during multipart (HTTP %d). Rotating to fallback.",
                     key_idx,
@@ -401,24 +453,36 @@ class GroqKeyPool:
                 continue
 
             # Other errors: rotate
+            if response.status_code == 408 or 500 <= response.status_code < 600:
+                saw_retryable = True
             logger.warning(
                 "Groq key index %d returned status %d during multipart request. Rotating.",
                 key_idx,
                 response.status_code,
             )
 
+        is_timeout = timeout_count > 0 and last_error_code is None
+        retryable = saw_retryable or network_error_count > 0 or last_error_code is None
+
         if network_error_count == len(attempt_indices):
             raise AllKeysExhaustedError(
-                f"Groq API request failed due to network error on all {len(self._api_keys)} keys."
+                f"Groq API request failed due to network error on all {len(self._api_keys)} keys.",
+                retryable=True,
+                is_timeout=timeout_count > 0,
             )
 
         if last_error_code is not None:
             raise AllKeysExhaustedError(
-                f"Groq API request failed with status {last_error_code}: {last_reason}"
+                f"Groq API request failed with status {last_error_code}: {last_reason}",
+                status_code=last_error_code,
+                retryable=retryable,
+                is_timeout=is_timeout,
             )
 
         raise AllKeysExhaustedError(
-            f"All Groq API keys ({len(self._api_keys)}) failed for multipart request."
+            f"All Groq API keys ({len(self._api_keys)}) failed for multipart request.",
+            retryable=retryable,
+            is_timeout=is_timeout,
         )
 
     async def transcribe_audio(
