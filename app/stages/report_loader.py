@@ -7,15 +7,23 @@ when running in test environments with mock artifact references.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from app.contracts import ArtifactRef, Limitation
 from app.stages.scoring import extract_assessment_score
-from app.storage.base import ObjectNotFoundError, ObjectStorageProtocol
+from app.storage.base import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    ObjectStorageProtocol,
+    verify_file_checksum,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -539,6 +547,48 @@ async def _recover_missing_assessment_scores(
                 )
 
 
+async def _load_verified_json_artifact(
+    ref: ArtifactRef,
+    storage: ObjectStorageProtocol,
+    *,
+    artifact_role: str,
+) -> dict[str, Any] | None:
+    """Download an artifact's raw bytes, verify its SHA-256 checksum, and parse JSON."""
+    with tempfile.TemporaryDirectory(prefix="virtujudge_report_") as tmpdir:
+        dest = Path(tmpdir) / f"{artifact_role}.json"
+        try:
+            await storage.download_file(ref.object_key, dest)
+            if not dest.is_file():
+                raise ObjectStorageError(
+                    f"Download succeeded but file not found for artifact '{ref.artifact_id}'."
+                )
+        except Exception as exc:
+            if os.getenv("AI_PROVIDER_MODE") == "live":
+                logger.error(
+                    "CRITICAL: Failed to load %s artifact '%s' in live mode (%s).",
+                    artifact_role,
+                    ref.artifact_id,
+                    type(exc).__name__,
+                )
+                raise
+            logger.debug(
+                "Could not load %s artifact '%s' from storage (%s). Using synthetic fallback.",
+                artifact_role,
+                ref.artifact_id,
+                type(exc).__name__,
+            )
+            return None
+
+        verify_file_checksum(
+            dest,
+            ref.checksum,
+            stage="ingestion",
+            artifact_id=ref.artifact_id,
+        )
+        data: dict[str, Any] = json.loads(dest.read_text(encoding="utf-8"))
+        return data
+
+
 async def load_report_evidence(
     analysis_ref: ArtifactRef,
     qa_ref: ArtifactRef,
@@ -556,42 +606,22 @@ async def load_report_evidence(
     """
     analysis_data: dict[str, Any] | None = None
     if storage is not None:
-        try:
-            analysis_data = await storage.read_json(analysis_ref.object_key)
-        except Exception as exc:
-            if os.getenv("AI_PROVIDER_MODE") == "live":
-                logger.error(
-                    "CRITICAL: Failed to load analysis artifact '%s' in live mode: %s",
-                    analysis_ref.object_key,
-                    exc,
-                )
-                raise
-            logger.debug(
-                "Could not load analysis artifact from storage (%s): %s. Using synthetic fallback.",
-                analysis_ref.object_key,
-                exc,
-            )
+        analysis_data = await _load_verified_json_artifact(
+            analysis_ref,
+            storage,
+            artifact_role="analysis",
+        )
 
     if analysis_data is None:
         analysis_data = build_synthetic_analysis_data(session_id=analysis_ref.artifact_id)
 
     qa_data: dict[str, Any] | None = None
     if storage is not None:
-        try:
-            qa_data = await storage.read_json(qa_ref.object_key)
-        except Exception as exc:
-            if os.getenv("AI_PROVIDER_MODE") == "live":
-                logger.error(
-                    "CRITICAL: Failed to load QA artifact '%s' in live mode: %s",
-                    qa_ref.object_key,
-                    exc,
-                )
-                raise
-            logger.debug(
-                "Could not load qa artifact from storage (%s): %s. Using synthetic fallback.",
-                qa_ref.object_key,
-                exc,
-            )
+        qa_data = await _load_verified_json_artifact(
+            qa_ref,
+            storage,
+            artifact_role="qa",
+        )
 
     if qa_data is None:
         qa_data = build_synthetic_qa_data(session_id=analysis_data.get("session_id", "session_001"))

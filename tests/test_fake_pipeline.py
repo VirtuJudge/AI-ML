@@ -28,7 +28,7 @@ from app.providers.types import (
     VisualObservation,
 )
 from app.stages.media import MediaSplitResult
-from app.storage.base import ObjectNotFoundError
+from app.storage.base import ObjectNotFoundError, compute_file_sha256
 from app.storage.local import LocalDiskObjectStorage
 
 
@@ -61,6 +61,7 @@ async def test_analyze_session_with_supporting_documents(
     """Test that analyze_session processes supporting documents and generates questions."""
     doc_path = tmp_path / "pitch_deck.pdf"
     doc_path.write_bytes(b"%PDF dummy")
+    doc_checksum = compute_file_sha256(doc_path)
 
     payload = AnalyzeSessionPayload(
         presentation=AssetInput(
@@ -73,7 +74,7 @@ async def test_analyze_session_with_supporting_documents(
             AssetInput(
                 artifact_id="01JTESTDOC0000000000000001",
                 object_key=str(doc_path),
-                checksum="sha256:" + "b" * 64,
+                checksum=doc_checksum,
                 media_type="application/pdf",
             )
         ],
@@ -96,7 +97,7 @@ async def test_analyze_session_downloads_supporting_documents_from_object_storag
     storage = LocalDiskObjectStorage(base_dir=tmp_path / "object-storage")
     source = tmp_path / "source-deck.pdf"
     source.write_bytes(b"%PDF synthetic supporting document")
-    await storage.upload_file("uploads/team/project/deck.pdf", source)
+    doc_ref = await storage.upload_file("uploads/team/project/deck.pdf", source)
 
     pipeline = FakePipeline(object_storage=storage)
     document_id = "01JTESTDOCREMOTE00000000001"
@@ -112,7 +113,7 @@ async def test_analyze_session_downloads_supporting_documents_from_object_storag
             AssetInput(
                 artifact_id=document_id,
                 object_key="uploads/team/project/deck.pdf",
-                checksum="sha256:" + "b" * 64,
+                checksum=doc_ref.checksum,
                 media_type="application/pdf",
             )
         ],
@@ -668,14 +669,14 @@ async def test_analyze_session_downloads_media_when_available_in_storage(tmp_pat
         wf.setframerate(16000)
         wf.writeframes(b"\x00\x00" * (16000 * 15))
 
-    await storage.upload_file("uploads/presentation.wav", pres_file)
+    pres_ref = await storage.upload_file("uploads/presentation.wav", pres_file)
 
     pipeline = FakePipeline(object_storage=storage)
     payload = AnalyzeSessionPayload(
         presentation=AssetInput(
             artifact_id="01JTEST0000000000000000099",
             object_key="uploads/presentation.wav",
-            checksum="sha256:" + "a" * 64,
+            checksum=pres_ref.checksum,
             media_type="audio/wav",
             duration_ms=15000,
         ),

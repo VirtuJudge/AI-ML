@@ -12,6 +12,7 @@ Validates:
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 import ulid
@@ -35,11 +36,13 @@ from app.stages.judge_panel import (
     JUDGE_PANEL,
     validate_panel_questions,
 )
+from app.storage.base import compute_file_sha256
 from app.worker import process_job
 
 
 @pytest.fixture
 def base_session_payload() -> AnalyzeSessionPayload:
+    doc_path = Path("tests/fixtures/documents/sample_2page.pdf")
     return AnalyzeSessionPayload(
         presentation=AssetInput(
             artifact_id="01JTESTART000000000000000001",
@@ -51,8 +54,8 @@ def base_session_payload() -> AnalyzeSessionPayload:
         supporting_documents=[
             AssetInput(
                 artifact_id="01JTESTDOC000000000000000001",
-                object_key="tests/fixtures/documents/sample_2page.pdf",
-                checksum="sha256:" + "b" * 64,
+                object_key=str(doc_path),
+                checksum=compute_file_sha256(doc_path),
                 media_type="application/pdf",
             )
         ],

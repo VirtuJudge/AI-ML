@@ -28,6 +28,7 @@ from app.contracts import (
     AnalyzeAnswerPayload,
     AnalyzeSessionPayload,
     CancelledPayload,
+    ChecksumMismatchError,
     EraseAIDataPayload,
     ErrorCode,
     FailedPayload,
@@ -389,6 +390,22 @@ async def process_job(
             trace_id=message.trace_id,
             payload=CancelledPayload(
                 stage=exc.stage,
+                message=exc.message,
+            ),
+        )
+    except ChecksumMismatchError as exc:
+        terminal_seq = tracker.next_sequence if tracker else 2
+        terminal_update = WorkerUpdate(
+            schema_version=1,
+            sequence=terminal_seq,
+            status=UpdateStatus.FAILED,
+            occurred_at=datetime.now(UTC),
+            trace_id=message.trace_id,
+            payload=FailedPayload(
+                stage=exc.stage,
+                code=ErrorCode.CHECKSUM_MISMATCH,
+                retryable=False,
+                attempts=message.analysis_attempt,
                 message=exc.message,
             ),
         )

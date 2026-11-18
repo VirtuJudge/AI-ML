@@ -62,6 +62,7 @@ class ErrorCode(StrEnum):
     INVALID_JOB_TYPE = "invalid_job_type"
     MALFORMED_PAYLOAD = "malformed_payload"
     INVALID_CHECKSUM = "invalid_checksum"
+    CHECKSUM_MISMATCH = "checksum_mismatch"
     MISSING_REQUIRED_FIELD = "missing_required_field"
     VALIDATION_ERROR = "validation_error"
     PROVIDER_TIMEOUT = "provider_timeout"
@@ -514,6 +515,22 @@ class JobCancelledError(Exception):
         self.message = message
 
 
+class ChecksumMismatchError(Exception):
+    """Raised when resolved input bytes do not match the declared SHA-256 checksum."""
+
+    def __init__(
+        self,
+        *,
+        stage: str = "ingestion",
+        artifact_id: str | None = None,
+        message: str = "Input artifact failed checksum integrity verification.",
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.artifact_id = artifact_id
+        self.message = message
+
+
 class QueueMessage(BaseModel):
     """Incoming queue message envelope."""
 
@@ -557,6 +574,7 @@ __all__ = [
     "AssetInput",
     "AudioAssetInput",
     "CancelledPayload",
+    "ChecksumMismatchError",
     "EraseAIDataPayload",
     "ErasureCompleted",
     "ErrorCode",

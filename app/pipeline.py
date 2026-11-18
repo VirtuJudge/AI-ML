@@ -21,6 +21,7 @@ from app.contracts import (
     AnalyzeSessionPayload,
     AnswerAnalysisCompleted,
     AssetInput,
+    ChecksumMismatchError,
     EraseAIDataPayload,
     ErasureCompleted,
     GenerateReportPayload,
@@ -68,6 +69,7 @@ from app.storage.base import (
     ObjectNotFoundError,
     ObjectStorageError,
     ObjectStorageProtocol,
+    verify_file_checksum,
 )
 from app.storage.local import LocalDiskObjectStorage
 
@@ -331,21 +333,111 @@ class FakePipeline:
             except Exception as exc:
                 logger.debug("Failed to emit progress update: %s", exc)
 
+    async def _resolve_and_verify_media(
+        self,
+        asset: AssetInput,
+        *,
+        media_role: str,
+    ) -> tuple[Path, bool]:
+        """Resolve local or remote media asset and verify its SHA-256 checksum."""
+        input_file = Path(asset.object_key)
+        if input_file.is_file():
+            verify_file_checksum(
+                input_file,
+                asset.checksum,
+                stage="ingestion",
+                artifact_id=asset.artifact_id,
+            )
+            return input_file, False
+
+        raw_name = Path(asset.object_key).name
+        object_name = "media" if raw_name in {"", ".", ".."} else raw_name
+        temp_dir = Path(".storage/temp_media") / asset.artifact_id
+        temp_dest = temp_dir / object_name
+        temp_dest.unlink(missing_ok=True)
+        skip_file_check = True
+
+        try:
+            await self.object_storage.download_file(asset.object_key, temp_dest)
+            if temp_dest.is_file():
+                input_file = temp_dest
+                skip_file_check = False
+            else:
+                raise ObjectStorageError(
+                    f"Download succeeded but file not found for artifact '{asset.artifact_id}'."
+                )
+        except ObjectNotFoundError:
+            if not self._is_synthetic_speech_run():
+                logger.error(
+                    "%s media artifact '%s' not found in object storage.",
+                    media_role,
+                    asset.artifact_id,
+                    exc_info=True,
+                )
+                raise
+            logger.warning(
+                "%s media artifact '%s' not found in storage; using synthetic inputs.",
+                media_role,
+                asset.artifact_id,
+            )
+        except Exception as exc:
+            if not self._is_synthetic_speech_run():
+                logger.error(
+                    "Failed to download %s media artifact '%s' from object storage (%s).",
+                    media_role.lower(),
+                    asset.artifact_id,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                msg = f"Failed to download media for artifact '{asset.artifact_id}'."
+                raise ObjectStorageError(msg) from exc
+            logger.warning(
+                "Error downloading %s media artifact '%s' from storage in synthetic mode (%s).",
+                media_role.lower(),
+                asset.artifact_id,
+                type(exc).__name__,
+            )
+
+        if not skip_file_check:
+            if not input_file.is_file():
+                raise FileNotFoundError(
+                    f"{media_role} media file for artifact '{asset.artifact_id}' does not exist."
+                )
+            try:
+                verify_file_checksum(
+                    input_file,
+                    asset.checksum,
+                    stage="ingestion",
+                    artifact_id=asset.artifact_id,
+                )
+            except ChecksumMismatchError:
+                temp_dest.unlink(missing_ok=True)
+                raise
+
+        return input_file, skip_file_check
+
     async def _resolve_supporting_documents(
         self,
         documents: list[AssetInput],
         practice_session_id: str,
     ) -> list[AssetInput]:
-        """Resolve remote Supporting Document object keys to local extraction paths."""
+        """Resolve Supporting Document paths and verify SHA-256 checksums."""
         resolved_documents: list[AssetInput] = []
 
         for document in documents:
             object_path = Path(document.object_key)
             if object_path.is_file():
+                verify_file_checksum(
+                    object_path,
+                    document.checksum,
+                    stage="ingestion",
+                    artifact_id=document.artifact_id,
+                )
                 resolved_documents.append(document)
                 continue
 
-            object_name = object_path.name or "supporting-document"
+            raw_name = object_path.name
+            object_name = "supporting-document" if raw_name in {"", ".", ".."} else raw_name
             artifact_dir = hashlib.sha256(document.artifact_id.encode("utf-8")).hexdigest()[:16]
             safe_session_dir = Path(practice_session_id).name
             if safe_session_dir in {"", ".", ".."} or safe_session_dir != practice_session_id:
@@ -359,8 +451,14 @@ class FakePipeline:
                 / artifact_dir
                 / object_name
             )
+            destination.unlink(missing_ok=True)
             try:
                 await self.object_storage.download_file(document.object_key, destination)
+                if not destination.is_file():
+                    raise ObjectStorageError(
+                        "Download succeeded but file not found for "
+                        f"artifact '{document.artifact_id}'."
+                    )
             except ObjectNotFoundError:
                 logger.warning(
                     "Supporting document was not found in object storage: artifact_id=%s",
@@ -376,6 +474,17 @@ class FakePipeline:
                 )
                 resolved_documents.append(document)
                 continue
+
+            try:
+                verify_file_checksum(
+                    destination,
+                    document.checksum,
+                    stage="ingestion",
+                    artifact_id=document.artifact_id,
+                )
+            except ChecksumMismatchError:
+                destination.unlink(missing_ok=True)
+                raise
 
             resolved_documents.append(document.model_copy(update={"object_key": str(destination)}))
 
@@ -402,53 +511,14 @@ class FakePipeline:
             "Ingesting presentation and validating inputs...",
         )
 
-        input_file = Path(job.presentation.object_key)
-        skip_file_check = not input_file.is_file()
-
-        # If object key is remote and not on local disk, download via object storage
-        if skip_file_check:
-            temp_dir = Path(".storage/temp_media") / job.presentation.artifact_id
-            temp_dest = temp_dir / Path(job.presentation.object_key).name
-            try:
-                await self.object_storage.download_file(job.presentation.object_key, temp_dest)
-                if temp_dest.is_file():
-                    input_file = temp_dest
-                    skip_file_check = False
-                else:
-                    raise ObjectStorageError(
-                        f"Download succeeded but file not found at destination '{temp_dest}'."
-                    )
-            except ObjectNotFoundError as err:
-                if not self._is_synthetic_speech_run():
-                    logger.error(
-                        "Presentation media '%s' not found in object storage: %s",
-                        job.presentation.object_key,
-                        err,
-                        exc_info=True,
-                    )
-                    raise
-                logger.warning(
-                    "Presentation media '%s' not found in storage; using synthetic inputs.",
-                    job.presentation.object_key,
-                )
-            except Exception as exc:
-                if not self._is_synthetic_speech_run():
-                    logger.error(
-                        "Failed to download presentation media '%s' from object storage: %s",
-                        job.presentation.object_key,
-                        exc,
-                        exc_info=True,
-                    )
-                    msg = f"Failed to download media '{job.presentation.object_key}': {exc}"
-                    raise ObjectStorageError(msg) from exc
-                logger.warning(
-                    "Error downloading media '%s' from storage in synthetic mode: %s",
-                    job.presentation.object_key,
-                    exc,
-                )
-
-        if not skip_file_check and not input_file.is_file():
-            raise FileNotFoundError(f"Presentation media file '{input_file}' does not exist.")
+        input_file, skip_file_check = await self._resolve_and_verify_media(
+            job.presentation,
+            media_role="Presentation",
+        )
+        supporting_documents = await self._resolve_supporting_documents(
+            job.supporting_documents,
+            session_id,
+        )
 
         if not skip_file_check:
             split_res = await split_media(input_file)
@@ -584,15 +654,6 @@ class FakePipeline:
             speech_res.diarization,
         )
 
-        session_id = (
-            job.practice_session_id
-            or getattr(job, "session_id", None)
-            or job.presentation.artifact_id
-        )
-        supporting_documents = await self._resolve_supporting_documents(
-            job.supporting_documents,
-            session_id,
-        )
         doc_stage_res = await run_document_stage(
             supporting_documents,
             self.document_provider,
@@ -709,58 +770,10 @@ class FakePipeline:
                 skip_normalization=True,
             )
         else:
-            input_file = Path(audio_asset.object_key)
-            skip_file_check = not input_file.is_file()
-
-            # If object key is remote and not on local disk, download via object storage
-            if skip_file_check:
-                temp_dir = Path(".storage/temp_media") / audio_asset.artifact_id
-                temp_dest = temp_dir / Path(audio_asset.object_key).name
-                try:
-                    await self.object_storage.download_file(audio_asset.object_key, temp_dest)
-                    if temp_dest.is_file():
-                        input_file = temp_dest
-                        skip_file_check = False
-                    else:
-                        raise ObjectStorageError(
-                            f"Download succeeded but file not found at destination '{temp_dest}'."
-                        )
-                except ObjectNotFoundError as err:
-                    if not self._is_synthetic_speech_run():
-                        logger.error(
-                            "Answer audio artifact '%s' not found in object storage: %s",
-                            audio_asset.artifact_id,
-                            err,
-                            exc_info=True,
-                        )
-                        raise
-                    logger.warning(
-                        "Answer audio artifact '%s' not found in storage; using synthetic inputs.",
-                        audio_asset.artifact_id,
-                    )
-                except Exception as exc:
-                    if not self._is_synthetic_speech_run():
-                        logger.error(
-                            "Failed to download answer audio artifact '%s' from object storage: %s",
-                            audio_asset.artifact_id,
-                            exc,
-                            exc_info=True,
-                        )
-                        msg = (
-                            f"Failed to download media for artifact "
-                            f"'{audio_asset.artifact_id}': {exc}"
-                        )
-                        raise ObjectStorageError(msg) from exc
-                    logger.warning(
-                        "Error downloading answer audio artifact '%s' from storage in "
-                        "synthetic mode: %s",
-                        audio_asset.artifact_id,
-                        exc,
-                    )
-
-            if not skip_file_check and not input_file.is_file():
-                raise FileNotFoundError(f"Answer audio file '{input_file}' does not exist.")
-
+            input_file, skip_file_check = await self._resolve_and_verify_media(
+                audio_asset,
+                media_role="Answer",
+            )
             duration_ms = audio_asset.duration_ms or 15000
 
             speech_res = await with_transient_retries(

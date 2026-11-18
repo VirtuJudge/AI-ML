@@ -1,5 +1,8 @@
 """Unit tests for app.stages.reporting (Report Stage Orchestration)."""
 
+import hashlib
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -227,27 +230,29 @@ async def test_run_report_stage_with_skipped_questions() -> None:
 
 @pytest.mark.asyncio
 async def test_run_report_stage_with_mock_storage() -> None:
-    """Verify report stage reads from object storage when available."""
+    """Verify report stage reads and checksum-verifies objects from object storage."""
     mock_storage = AsyncMock(spec=ObjectStorageProtocol)
     raw_analysis = build_synthetic_analysis_data(session_id="storage_sess_01")
     raw_qa = build_synthetic_qa_data(session_id="storage_sess_01")
+    analysis_bytes = json.dumps(raw_analysis).encode("utf-8")
+    qa_bytes = json.dumps(raw_qa).encode("utf-8")
 
-    async def mock_read_json(key: str) -> dict:
-        if "analysis" in key:
-            return raw_analysis
-        return raw_qa
+    async def mock_download_file(key: str, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(analysis_bytes if "analysis" in key else qa_bytes)
+        return destination
 
-    mock_storage.read_json.side_effect = mock_read_json
+    mock_storage.download_file.side_effect = mock_download_file
 
     analysis_ref = ArtifactRef(
         artifact_id="01JSTORAGE0000000000000001",
         object_key="artifacts/analysis.json",
-        checksum=FAKE_SHA256,
+        checksum="sha256:" + hashlib.sha256(analysis_bytes).hexdigest(),
     )
     qa_ref = ArtifactRef(
         artifact_id="01JSTORAGE0000000000000002",
         object_key="artifacts/qa.json",
-        checksum=FAKE_SHA256,
+        checksum="sha256:" + hashlib.sha256(qa_bytes).hexdigest(),
     )
 
     result = await run_report_stage(
@@ -259,7 +264,7 @@ async def test_run_report_stage_with_mock_storage() -> None:
     )
 
     assert result.evaluation.analysis_attempt_id == "storage_sess_01"
-    assert mock_storage.read_json.call_count == 2
+    assert mock_storage.download_file.call_count == 2
 
 
 @pytest.mark.asyncio

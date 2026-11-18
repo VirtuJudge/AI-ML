@@ -5,12 +5,15 @@ enabling swappable backends (Cloudflare R2, AWS S3, MinIO, or local disk).
 """
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from app.contracts import ArtifactRef
+from app.contracts import ArtifactRef, ChecksumMismatchError
+
+logger = logging.getLogger(__name__)
 
 
 class ObjectStorageError(Exception):
@@ -115,10 +118,36 @@ def compute_file_sha256(path: Path, chunk_size: int = 64 * 1024) -> str:
     return "sha256:" + hasher.hexdigest()
 
 
+def normalize_sha256_checksum(checksum: str) -> str:
+    """Normalize a SHA-256 checksum string for case-insensitive comparison."""
+    return checksum.strip().lower()
+
+
+def verify_file_checksum(
+    path: Path,
+    expected_checksum: str,
+    *,
+    stage: str = "ingestion",
+    artifact_id: str | None = None,
+) -> str:
+    """Hash a resolved file and verify it matches the declared SHA-256 checksum."""
+    actual_checksum = compute_file_sha256(path)
+    if normalize_sha256_checksum(actual_checksum) != normalize_sha256_checksum(expected_checksum):
+        logger.warning(
+            "Input checksum mismatch at stage=%s artifact_id=%s",
+            stage,
+            artifact_id or "unknown",
+        )
+        raise ChecksumMismatchError(stage=stage, artifact_id=artifact_id)
+    return actual_checksum
+
+
 __all__ = [
     "ObjectNotFoundError",
     "ObjectStorageError",
     "ObjectStorageProtocol",
     "S3StorageConfig",
     "compute_file_sha256",
+    "normalize_sha256_checksum",
+    "verify_file_checksum",
 ]
