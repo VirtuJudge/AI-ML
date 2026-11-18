@@ -17,6 +17,7 @@ from app.stages.report_loader import (
     build_synthetic_qa_data,
 )
 from app.stages.reporting import ReportStageResult, run_report_stage
+from app.stages.scoring import WEIGHTING_POLICY_VERSION
 from app.storage.base import ObjectStorageProtocol
 
 FAKE_SHA256 = "sha256:" + "a" * 64
@@ -78,6 +79,7 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
         "pipeline_version",
         "rubric_id",
         "rubric_version",
+        "weighting_policy_version",
         "prompt_versions",
         "contract_versions",
         "input_checksums",
@@ -90,6 +92,7 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
     ]
     for rf in required_repro_fields:
         assert rf in eval_model.reproducibility
+    assert eval_model.reproducibility["weighting_policy_version"] == WEIGHTING_POLICY_VERSION
 
     # Verify member feedback
     assert len(eval_model.member_feedback) >= 1
@@ -346,3 +349,139 @@ async def test_run_report_stage_zero_turn_presenter_has_no_delivery_feedback() -
     assert presenter.strengths == []
     assert presenter.improvements == []
     assert "No delivery data was recorded" in presenter.summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("missing_modality", "windows", "omit_technical_feasibility", "expected_not_evaluated"),
+    [
+        (
+            "vision",
+            [
+                {
+                    "start_ms": 0,
+                    "end_ms": 10000,
+                    "acoustic": {
+                        "speaking_rate_wpm": 140.0,
+                        "pause_duration_ms": 200,
+                        "filler_count": 0,
+                    },
+                }
+            ],
+            False,
+            {"delivery_and_body_language"},
+        ),
+        (
+            "audio",
+            [
+                {
+                    "start_ms": 0,
+                    "end_ms": 10000,
+                    "visual": {
+                        "gaze_direction": 1.0,
+                        "posture_openness": 0.85,
+                        "shoulder_symmetry_ratio": 0.96,
+                    },
+                }
+            ],
+            False,
+            {"timing_and_speech_mechanics"},
+        ),
+        (
+            "video_and_audio",
+            [],
+            False,
+            {"delivery_and_body_language", "timing_and_speech_mechanics"},
+        ),
+        (
+            "documents",
+            [
+                {
+                    "start_ms": 0,
+                    "end_ms": 10000,
+                    "acoustic": {
+                        "speaking_rate_wpm": 140.0,
+                        "pause_duration_ms": 200,
+                        "filler_count": 0,
+                    },
+                    "visual": {
+                        "gaze_direction": 1.0,
+                        "posture_openness": 0.85,
+                        "shoulder_symmetry_ratio": 0.96,
+                    },
+                }
+            ],
+            True,
+            {"technical_feasibility"},
+        ),
+    ],
+)
+async def test_run_report_stage_keeps_qa_at_20_percent_when_optional_modality_missing(
+    missing_modality: str,
+    windows: list[dict[str, object]],
+    omit_technical_feasibility: bool,
+    expected_not_evaluated: set[str],
+) -> None:
+    """Q&A effective weight stays 0.20 and remaining 0.80 redistributes for any missing modality."""
+
+    class PartialDimensionJudge(FakeJudgeModelProvider):
+        async def generate_report_feedback(self, **kwargs):  # type: ignore[override]
+            res = await super().generate_report_feedback(**kwargs)
+            if omit_technical_feasibility:
+                res.dimension_scores = {
+                    k: v for k, v in res.dimension_scores.items() if k != "technical_feasibility"
+                }
+            return res
+
+    bundle = ReportEvidenceBundle(
+        session_id=f"session_missing_{missing_modality}",
+        transcript_full_text="Founder pitch with partial modalities.",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 30000,
+                "intervals": [{"start_ms": 0, "end_ms": 30000, "formatted": "00:00 - 00:30"}],
+                "windows": windows,
+            }
+        },
+        questions=[
+            {"id": "q1", "text": "Question 1?", "rubric_dimension": "pitch_content_and_evidence"},
+        ],
+        answers=[
+            {"question_id": "q1", "status": "submitted", "transcript": "Detailed answer."},
+        ],
+        assessments=[
+            {"question_id": "q1", "score": 0.50, "assessment_text": "Adequate answer."},
+        ],
+    )
+
+    result = await run_report_stage(
+        report_id=f"01JREPORT_MODALITY_{missing_modality.upper()}",
+        evidence_bundle_override=bundle,
+        judge_provider=PartialDimensionJudge(),
+    )
+
+    eval_model = result.evaluation
+    assert eval_model.reproducibility["weighting_policy_version"] == WEIGHTING_POLICY_VERSION
+
+    by_dim = {c.dimension: c for c in eval_model.components}
+    for dim in expected_not_evaluated:
+        assert by_dim[dim].status == "not_evaluated"
+        assert by_dim[dim].effective_weight is None
+
+    qa_comp = by_dim["qa_quality"]
+    assert qa_comp.status == "scored"
+    assert qa_comp.effective_weight == 0.20
+
+    non_qa_scored = [
+        c
+        for c in eval_model.components
+        if c.status == "scored" and c.dimension != "qa_quality" and c.effective_weight is not None
+    ]
+    assert pytest.approx(sum(c.effective_weight or 0.0 for c in non_qa_scored), abs=1e-3) == 0.80
+    assert (
+        pytest.approx(
+            sum(c.effective_weight or 0.0 for c in eval_model.components if c.status == "scored"),
+            abs=1e-3,
+        )
+        == 1.0
+    )
