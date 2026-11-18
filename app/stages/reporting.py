@@ -28,6 +28,7 @@ from app.contracts import (
 )
 from app.providers.base import JudgeModelProvider
 from app.providers.fake_judge import FakeJudgeModelProvider
+from app.runtime_mode import RuntimeModePolicy
 from app.stages.aggregation import format_duration_ms
 from app.stages.report_loader import ReportEvidenceBundle, load_report_evidence
 from app.stages.report_markdown import generate_markdown_report
@@ -94,6 +95,8 @@ async def run_report_stage(
     rubric_id: str = "startup_pitch",
     rubric_version: int = 1,
     pipeline_version: str = "0.1.0",
+    mode_policy: RuntimeModePolicy | None = None,
+    allow_synthetic_fixtures: bool | None = None,
 ) -> ReportStageResult:
     """Execute the end-to-end evaluation and report generation stage.
 
@@ -114,10 +117,16 @@ async def run_report_stage(
     if evidence_bundle_override is not None:
         bundle = evidence_bundle_override
     else:
+        if analysis_ref is None or qa_ref is None:
+            raise ValueError(
+                "analysis_ref and qa_ref are required when evidence_bundle_override is not set."
+            )
         bundle = await load_report_evidence(
             analysis_ref=analysis_ref,
             qa_ref=qa_ref,
             storage=storage,
+            mode_policy=mode_policy,
+            allow_synthetic_fixtures=allow_synthetic_fixtures,
         )
 
     # 2. Query JudgeModelProvider for structured qualitative feedback
@@ -429,6 +438,13 @@ async def run_report_stage(
         "evaluator_provider": type(judge).__name__,
         "evaluated_at": completed_at,
     }
+    if bundle.metadata.get("is_synthetic_fixture") or any(
+        lim.code in {"synthetic_analysis_fixture", "synthetic_qa_fixture"}
+        for lim in bundle.limitations
+    ):
+        reproducibility["synthetic_fixtures"] = True
+        if bundle.metadata.get("synthetic_sources"):
+            reproducibility["synthetic_sources"] = list(bundle.metadata["synthetic_sources"])
 
     evaluation = Evaluation(
         id=eval_id,

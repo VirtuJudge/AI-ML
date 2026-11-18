@@ -13,6 +13,7 @@ from app.providers.fake_speech import FakeDiarizationProvider, FakeSpeechProvide
 from app.providers.fake_vision import FakeVisionProvider
 from app.providers.groq_judge import GroqJudgeModelProvider
 from app.providers.groq_speech import GroqSpeechProvider
+from app.runtime_mode import resolve_runtime_mode
 from app.storage import create_object_storage
 
 logging.basicConfig(
@@ -35,14 +36,14 @@ def _load_env() -> None:
 
 async def build_pipeline() -> FakePipeline:
     """Compose PitchAnalysisPipeline using configured environment providers."""
-    provider_mode = os.getenv("AI_PROVIDER_MODE", "fake").strip().lower()
-    live_modes = {"live", "groq"}
-    supported_modes = live_modes | {"fake", "mixed"}
-    if provider_mode not in supported_modes:
-        raise ValueError("AI_PROVIDER_MODE must be one of: fake, mixed, live, or groq.")
+    mode_policy = resolve_runtime_mode()
+    provider_mode = mode_policy.provider_mode
 
-    if provider_mode in live_modes:
-        logger.info("Initializing pipeline with LIVE Groq and ML providers...")
+    if mode_policy.is_live:
+        logger.info(
+            "Initializing pipeline with LIVE Groq and ML providers (AI_PROVIDER_MODE=%s)...",
+            provider_mode,
+        )
         speech_provider = GroqSpeechProvider()
         try:
             from app.providers.pyannote_diarization import PyannoteDiarizationProvider
@@ -107,7 +108,7 @@ async def build_pipeline() -> FakePipeline:
         audio_provider = FakeAudioMetricsProvider()
         doc_provider = FakeDocumentProvider()
         judge_provider = (
-            GroqJudgeModelProvider() if provider_mode == "mixed" else FakeJudgeModelProvider()
+            GroqJudgeModelProvider() if mode_policy.is_mixed else FakeJudgeModelProvider()
         )
         object_storage = create_object_storage()
 
@@ -127,6 +128,7 @@ async def build_pipeline() -> FakePipeline:
         judge_provider=judge_provider,
         document_store=doc_store,
         object_storage=object_storage,
+        mode_policy=mode_policy,
     )
 
 

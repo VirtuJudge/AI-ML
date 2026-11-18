@@ -183,6 +183,16 @@ def generate_markdown_report(
     out.append(f"- **Rubric:** `{evaluation.rubric.rubric_id}` (v{evaluation.rubric.version})")
     out.append(f"- **Overall Performance:** 🏆 **{score_badge}**")
     out.append("")
+    is_synthetic = bool(evaluation.reproducibility.get("synthetic_fixtures")) or any(
+        lim.code in {"synthetic_analysis_fixture", "synthetic_qa_fixture"}
+        for lim in evaluation.limitations
+    )
+    if is_synthetic:
+        out.append(
+            "> **Synthetic Fixture Notice:** This report was generated using synthetic "
+            "test/fake fixtures because one or more source artifacts were unavailable."
+        )
+        out.append("")
     out.append("---")
     out.append("")
     out.append("## Executive Summary")

@@ -1,22 +1,23 @@
 """Evidence and Q&A artifact loader for report generation (AI-07).
 
 Fetches and unpacks session analysis artifacts (`analysis.json`) and Q&A round
-artifacts (`qa.json`) from object storage. Provides deterministic synthetic defaults
-when running in test environments with mock artifact references.
+artifacts (`qa.json`) from object storage. Fails closed in live, mixed,
+production, or unconfigured environments; synthetic fixtures are permitted only
+under explicit test/fake configuration and are visibly marked.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.contracts import ArtifactRef, Limitation
+from app.contracts import ArtifactRef, ChecksumMismatchError, Limitation
+from app.runtime_mode import RuntimeModePolicy, resolve_runtime_mode
 from app.stages.scoring import extract_assessment_score
 from app.storage.base import (
     ObjectNotFoundError,
@@ -170,12 +171,20 @@ def build_synthetic_analysis_data(
             "has_vision": True,
             "has_audio": True,
         },
-        "limitations": [],
+        "limitations": [
+            Limitation(
+                code="synthetic_analysis_fixture",
+                scope="analysis",
+                message="Synthetic analysis fixture generated for test/fake execution.",
+                affected_dimensions=[],
+            ).model_dump()
+        ],
         "metadata": {
             "media_duration_ms": 15000,
             "has_documents": True,
             "has_vision": True,
             "has_audio": True,
+            "is_synthetic_fixture": True,
         },
     }
 
@@ -258,7 +267,17 @@ def build_synthetic_qa_data(session_id: str = "01JTESTSESSION0000000000001") -> 
                 "evidence_ids": ["ev_speech_001"],
             },
         ],
-        "limitations": [],
+        "limitations": [
+            Limitation(
+                code="synthetic_qa_fixture",
+                scope="qa",
+                message="Synthetic Q&A fixture generated for test/fake execution.",
+                affected_dimensions=[],
+            ).model_dump()
+        ],
+        "metadata": {
+            "is_synthetic_fixture": True,
+        },
     }
 
 
@@ -547,82 +566,153 @@ async def _recover_missing_assessment_scores(
                 )
 
 
-async def _load_verified_json_artifact(
+async def _download_verified_json(
     ref: ArtifactRef,
     storage: ObjectStorageProtocol,
     *,
     artifact_role: str,
-) -> dict[str, Any] | None:
-    """Download an artifact's raw bytes, verify its SHA-256 checksum, and parse JSON."""
+) -> Any:
+    """Download an artifact's raw bytes, verify its SHA-256 checksum, and parse JSON.
+
+    Raises on download failure and ChecksumMismatchError on an integrity mismatch; the
+    caller decides whether a download failure may fall back to a marked synthetic fixture.
+    """
     with tempfile.TemporaryDirectory(prefix="virtujudge_report_") as tmpdir:
         dest = Path(tmpdir) / f"{artifact_role}.json"
-        try:
-            await storage.download_file(ref.object_key, dest)
-            if not dest.is_file():
-                raise ObjectStorageError(
-                    f"Download succeeded but file not found for artifact '{ref.artifact_id}'."
-                )
-        except Exception as exc:
-            if os.getenv("AI_PROVIDER_MODE") == "live":
-                logger.error(
-                    "CRITICAL: Failed to load %s artifact '%s' in live mode (%s).",
-                    artifact_role,
-                    ref.artifact_id,
-                    type(exc).__name__,
-                )
-                raise
-            logger.debug(
-                "Could not load %s artifact '%s' from storage (%s). Using synthetic fallback.",
-                artifact_role,
-                ref.artifact_id,
-                type(exc).__name__,
+        await storage.download_file(ref.object_key, dest)
+        if not dest.is_file():
+            raise ObjectStorageError(
+                f"Download succeeded but file not found for artifact '{ref.artifact_id}'."
             )
-            return None
-
         verify_file_checksum(
             dest,
             ref.checksum,
             stage="ingestion",
             artifact_id=ref.artifact_id,
         )
-        data: dict[str, Any] = json.loads(dest.read_text(encoding="utf-8"))
-        return data
+        return json.loads(dest.read_text(encoding="utf-8"))
+
+
+def _resolve_loader_policy(
+    mode_policy: RuntimeModePolicy | None,
+    allow_synthetic_fixtures: bool | None,
+) -> RuntimeModePolicy:
+    """Resolve the shared mode policy for loading report artifacts."""
+    if mode_policy is None:
+        return resolve_runtime_mode(allow_synthetic_fixtures=allow_synthetic_fixtures)
+    if allow_synthetic_fixtures is not None:
+        return mode_policy.with_synthetic_fixtures(allow_synthetic_fixtures)
+    return mode_policy
+
+
+async def _read_required_artifact(
+    ref: ArtifactRef,
+    *,
+    artifact_kind: str,
+    storage: ObjectStorageProtocol | None,
+    policy: RuntimeModePolicy,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Read a required report artifact or fail closed unless test/fake fixtures are allowed."""
+    if storage is None:
+        if not policy.allow_synthetic_report_fixtures:
+            raise ObjectStorageError(
+                f"Object storage is required to load {artifact_kind} artifact "
+                f"'{ref.artifact_id}' in {policy.provider_mode} mode."
+            )
+        logger.warning(
+            "No object storage configured for %s artifact '%s' in %s mode; "
+            "using marked synthetic fixture.",
+            artifact_kind,
+            ref.artifact_id,
+            policy.provider_mode,
+        )
+        return None, True
+
+    try:
+        payload = await _download_verified_json(ref, storage, artifact_role=artifact_kind)
+    except ChecksumMismatchError:
+        raise
+    except Exception as exc:
+        if not policy.allow_synthetic_report_fixtures:
+            logger.error(
+                "Failed to load required %s artifact (artifact_id=%s, mode=%s, error_type=%s).",
+                artifact_kind,
+                ref.artifact_id,
+                policy.provider_mode,
+                type(exc).__name__,
+            )
+            raise
+        logger.warning(
+            "Could not load %s artifact '%s' in %s mode (%s); using marked synthetic fixture.",
+            artifact_kind,
+            ref.artifact_id,
+            policy.provider_mode,
+            type(exc).__name__,
+        )
+        return None, True
+
+    if not isinstance(payload, dict) or not payload:
+        if not policy.allow_synthetic_report_fixtures:
+            raise ObjectStorageError(
+                f"Unreadable or empty {artifact_kind} artifact '{ref.artifact_id}' "
+                f"in {policy.provider_mode} mode."
+            )
+        logger.warning(
+            "Empty or non-object %s artifact '%s' in %s mode; using marked synthetic fixture.",
+            artifact_kind,
+            ref.artifact_id,
+            policy.provider_mode,
+        )
+        return None, True
+
+    return payload, False
+
+
+def _append_limitation_once(limitations: list[Limitation], candidate: Limitation) -> None:
+    """Append a synthetic-fixture limitation unless that limitation code is already recorded."""
+    if not any(existing.code == candidate.code for existing in limitations):
+        limitations.append(candidate)
 
 
 async def load_report_evidence(
     analysis_ref: ArtifactRef,
     qa_ref: ArtifactRef,
     storage: ObjectStorageProtocol | None = None,
+    *,
+    mode_policy: RuntimeModePolicy | None = None,
+    allow_synthetic_fixtures: bool | None = None,
 ) -> ReportEvidenceBundle:
     """Fetch, parse, and validate session analysis and Q&A evidence for report generation.
 
     Args:
         analysis_ref: ArtifactRef for analysis.json.
         qa_ref: ArtifactRef for qa.json.
-        storage: ObjectStorage protocol implementation (or None for synthetic).
+        storage: ObjectStorage protocol implementation (or None only when synthetic
+            fixtures are explicitly enabled via test/fake configuration).
+        mode_policy: Optional pre-resolved runtime mode policy shared from startup.
+        allow_synthetic_fixtures: Optional explicit override (rejected in live,
+            mixed, or production modes).
 
     Returns:
         ReportEvidenceBundle with all evidence components resolved and normalized.
     """
-    analysis_data: dict[str, Any] | None = None
-    if storage is not None:
-        analysis_data = await _load_verified_json_artifact(
-            analysis_ref,
-            storage,
-            artifact_role="analysis",
-        )
+    policy = _resolve_loader_policy(mode_policy, allow_synthetic_fixtures)
 
+    analysis_data, used_synthetic_analysis = await _read_required_artifact(
+        analysis_ref,
+        artifact_kind="analysis",
+        storage=storage,
+        policy=policy,
+    )
     if analysis_data is None:
         analysis_data = build_synthetic_analysis_data(session_id=analysis_ref.artifact_id)
 
-    qa_data: dict[str, Any] | None = None
-    if storage is not None:
-        qa_data = await _load_verified_json_artifact(
-            qa_ref,
-            storage,
-            artifact_role="qa",
-        )
-
+    qa_data, used_synthetic_qa = await _read_required_artifact(
+        qa_ref,
+        artifact_kind="qa",
+        storage=storage,
+        policy=policy,
+    )
     if qa_data is None:
         qa_data = build_synthetic_qa_data(session_id=analysis_data.get("session_id", "session_001"))
 
@@ -683,6 +773,44 @@ async def load_report_evidence(
         elif isinstance(lim, Limitation):
             _append_unique_limitation(limitations, lim)
 
+    raw_analysis_metadata = analysis_data.get("metadata")
+    metadata: dict[str, Any] = (
+        dict(raw_analysis_metadata) if isinstance(raw_analysis_metadata, dict) else {}
+    )
+    raw_qa_metadata = qa_data.get("metadata")
+    qa_is_synthetic = isinstance(raw_qa_metadata, dict) and bool(
+        raw_qa_metadata.get("is_synthetic_fixture")
+    )
+
+    synthetic_sources: list[str] = []
+    if used_synthetic_analysis or metadata.get("is_synthetic_fixture"):
+        synthetic_sources.append("analysis")
+        metadata["synthetic_analysis_fixture"] = True
+        _append_limitation_once(
+            limitations,
+            Limitation(
+                code="synthetic_analysis_fixture",
+                scope="analysis",
+                message="Synthetic analysis fixture generated for test/fake execution.",
+                affected_dimensions=[],
+            ),
+        )
+    if used_synthetic_qa or qa_is_synthetic:
+        synthetic_sources.append("qa")
+        metadata["synthetic_qa_fixture"] = True
+        _append_limitation_once(
+            limitations,
+            Limitation(
+                code="synthetic_qa_fixture",
+                scope="qa",
+                message="Synthetic Q&A fixture generated for test/fake execution.",
+                affected_dimensions=[],
+            ),
+        )
+    if synthetic_sources:
+        metadata["is_synthetic_fixture"] = True
+        metadata["synthetic_sources"] = synthetic_sources
+
     # Extract Q&A elements
     questions = qa_data.get("questions", [])
     if not questions and "qa_round" in qa_data:
@@ -738,7 +866,7 @@ async def load_report_evidence(
         questions=questions,
         answers=answers,
         assessments=normalized_assessments,
-        metadata=analysis_data.get("metadata", {}),
+        metadata=metadata,
     )
 
 

@@ -52,6 +52,7 @@ from app.providers.types import (
     DiarizationResult,
     VisualObservation,
 )
+from app.runtime_mode import RuntimeModePolicy, resolve_runtime_mode
 from app.stages.aggregation import aggregate_speaker_observations
 from app.stages.answer_assessment import run_answer_assessment_stage
 from app.stages.answers import run_answer_speech_stage
@@ -272,6 +273,7 @@ class FakePipeline:
         judge_provider: JudgeModelProvider | None = None,
         document_store: DocumentStore | None = None,
         object_storage: ObjectStorageProtocol | None = None,
+        mode_policy: RuntimeModePolicy | None = None,
     ) -> None:
         self.speech_provider = speech_provider or FakeSpeechProvider()
         self.diarization_provider = diarization_provider or FakeDiarizationProvider()
@@ -280,6 +282,7 @@ class FakePipeline:
         self.document_provider = document_provider or FakeDocumentProvider()
         self.judge_provider = judge_provider or FakeJudgeModelProvider()
         self.document_store = document_store or FakeDocumentStore()
+        self.mode_policy = mode_policy
         if object_storage is not None:
             self.object_storage = object_storage
         elif os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
@@ -289,7 +292,20 @@ class FakePipeline:
 
     def _is_synthetic_speech_run(self) -> bool:
         """Check whether the pipeline is executing with purely fake/synthetic speech provider."""
+        if self.mode_policy is not None and (
+            self.mode_policy.is_live or self.mode_policy.is_production
+        ):
+            return False
         return isinstance(self.speech_provider, FakeSpeechProvider)
+
+    def _resolve_report_mode_policy(self) -> RuntimeModePolicy:
+        """Return the shared runtime policy for report artifact loading."""
+        policy = self.mode_policy if self.mode_policy is not None else resolve_runtime_mode()
+        if not isinstance(self.speech_provider, FakeSpeechProvider) or not isinstance(
+            self.judge_provider, FakeJudgeModelProvider
+        ):
+            return policy.with_synthetic_fixtures(False)
+        return policy
 
     async def _check_cancellation(
         self,
@@ -934,6 +950,7 @@ class FakePipeline:
                 rubric_id=job.rubric.rubric_id,
                 rubric_version=job.rubric.version,
                 pipeline_version=PRODUCER_VERSION,
+                mode_policy=self._resolve_report_mode_policy(),
             ),
             stage_name="reporting",
         )

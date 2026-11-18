@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from app.backend_client import BackendClient, BackendClientProtocol
+from app.runtime_mode import resolve_runtime_mode
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,19 @@ async def check_readiness(
     """Perform deep readiness check verifying all external dependencies and registered task."""
     queue_name = os.getenv("AI_QUEUE_NAME", DEFAULT_QUEUE_NAME)
     task_name = os.getenv("AI_TASK_NAME", DEFAULT_TASK_NAME)
-    provider_mode = os.getenv("AI_PROVIDER_MODE", "fake")
+    provider_mode: str
+    try:
+        mode_policy = resolve_runtime_mode()
+        provider_mode = mode_policy.provider_mode
+        is_prod = mode_policy.is_production
+        mode_valid = True
+    except ValueError:
+        provider_mode = os.getenv("AI_PROVIDER_MODE", "fake").strip().lower()
+        is_prod = os.getenv("APP_ENV", "").strip().lower() in (
+            "production",
+            "prod",
+        ) or bool(os.getenv("SPACE_ID", "").strip())
+        mode_valid = False
 
     # 1. Broker connectivity
     broker_url = (
@@ -94,17 +107,17 @@ async def check_readiness(
     object_storage_configured = bool(bucket or endpoint)
 
     # In dev/test with fake provider, relax broker/backend requirements for readiness if not configured
-    is_prod = os.getenv("APP_ENV") in ("production", "prod") or bool(os.getenv("SPACE_ID"))
     if is_prod:
         is_ready = bool(
-            broker_connected
+            mode_valid
+            and broker_connected
             and task_registered
             and backend_reachable
             and callback_credentials_configured
             and object_storage_configured
         )
     else:
-        is_ready = bool(task_registered and callback_credentials_configured)
+        is_ready = bool(mode_valid and task_registered and callback_credentials_configured)
 
     return {
         "status": "ready" if is_ready else "unready",
