@@ -67,7 +67,9 @@ from app.stages.reporting import (
     run_report_stage,
 )
 from app.stages.scoring import (
+    FIXED_WEIGHT_DIMENSIONS,
     STARTUP_PITCH_RUBRIC_V1,
+    WEIGHTING_POLICY_VERSION,
     calculate_individual_delivery_scores,
     calculate_overall_score,
     calculate_qa_score,
@@ -99,6 +101,7 @@ __all__ = [
     "EvidenceItem",
     "FFmpegExecutionError",
     "FFmpegNotFoundError",
+    "FIXED_WEIGHT_DIMENSIONS",
     "MediaNormalizationError",
     "MediaNormalizationResult",
     "MediaSplitResult",
@@ -109,6 +112,7 @@ __all__ = [
     "SpeakerIntervalResult",
     "SpeechStageResult",
     "VisionStageResult",
+    "WEIGHTING_POLICY_VERSION",
     "aggregate_by_speaker",
     "aggregate_speaker_observations",
     "build_evidence_bundle",

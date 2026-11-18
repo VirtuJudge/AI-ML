@@ -17,6 +17,10 @@ from app.contracts import (
 
 logger = logging.getLogger(__name__)
 
+# Weighting policy identifier recorded in Evaluation.reproducibility metadata
+WEIGHTING_POLICY_VERSION: str = "fixed_qa_20_v1"
+FIXED_WEIGHT_DIMENSIONS: frozenset[str] = frozenset({"qa_quality"})
+
 # Startup pitch v1 rubric definition (weights sum to 1.0)
 STARTUP_PITCH_RUBRIC_V1: dict[str, float] = {
     "pitch_content_and_evidence": 0.25,
@@ -79,23 +83,57 @@ def score_to_label(normalized_score: float | None) -> ScoreLabel | None:
 
 def normalize_effective_weights(
     components: list[ScoreComponent],
+    *,
+    fixed_dimensions: frozenset[str] | set[str] | tuple[str, ...] = FIXED_WEIGHT_DIMENSIONS,
 ) -> list[ScoreComponent]:
     """Calculate effective weights across scored dimensions.
 
-    When one or more dimensions cannot be evaluated (e.g. video unavailable),
-    effective weights are normalized only across available scored dimensions:
-        effective_weight_i = configured_weight_i / sum(configured_weights of scored dimensions)
+    Policy ``fixed_qa_20_v1``:
+    - Fixed dimensions (``qa_quality`` at 0.20) retain their configured weight
+      whenever they are ``scored`` and at least one non-fixed dimension is also
+      ``scored``.
+    - The remaining weight budget (``1.0 - sum(fixed_scored_weights)``) is
+      redistributed proportionally across the remaining ``scored`` dimensions.
+    - When no fixed dimension is ``scored`` (or no non-fixed dimension is
+      ``scored``), effective weights normalize proportionally across all
+      ``scored`` dimensions.
+    - Non-``scored`` dimensions always receive ``effective_weight = None``.
     """
-    scored_sum = sum(c.configured_weight for c in components if c.status == "scored")
+    fixed_canonical = {canonicalize_dimension(d) for d in fixed_dimensions}
 
+    scored_comps = [c for c in components if c.status == "scored"]
     for comp in components:
-        if comp.status == "scored":
+        if comp.status != "scored":
+            comp.effective_weight = None
+
+    if not scored_comps:
+        return components
+
+    fixed_scored = [
+        c for c in scored_comps if canonicalize_dimension(c.dimension) in fixed_canonical
+    ]
+    float_scored = [
+        c for c in scored_comps if canonicalize_dimension(c.dimension) not in fixed_canonical
+    ]
+
+    fixed_sum = sum(c.configured_weight for c in fixed_scored)
+    float_sum = sum(c.configured_weight for c in float_scored)
+
+    if fixed_scored and float_scored and 0.0 <= fixed_sum <= 1.0 and float_sum > 0:
+        remaining_budget = 1.0 - fixed_sum
+        for comp in fixed_scored:
+            comp.effective_weight = round(comp.configured_weight, 4)
+        for comp in float_scored:
+            comp.effective_weight = round(
+                (comp.configured_weight / float_sum) * remaining_budget, 4
+            )
+    else:
+        scored_sum = sum(c.configured_weight for c in scored_comps)
+        for comp in scored_comps:
             if scored_sum > 0:
                 comp.effective_weight = round(comp.configured_weight / scored_sum, 4)
             else:
                 comp.effective_weight = 0.0
-        else:
-            comp.effective_weight = None
 
     return components
 
@@ -471,8 +509,10 @@ def evaluate_rubric(
 
 __all__ = [
     "DIMENSION_ALIASES",
+    "FIXED_WEIGHT_DIMENSIONS",
     "RUBRIC_CONFIGS",
     "STARTUP_PITCH_RUBRIC_V1",
+    "WEIGHTING_POLICY_VERSION",
     "calculate_individual_delivery_scores",
     "calculate_overall_score",
     "calculate_qa_score",

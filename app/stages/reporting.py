@@ -32,6 +32,7 @@ from app.stages.aggregation import format_duration_ms
 from app.stages.report_loader import ReportEvidenceBundle, load_report_evidence
 from app.stages.report_markdown import generate_markdown_report
 from app.stages.scoring import (
+    WEIGHTING_POLICY_VERSION,
     calculate_individual_delivery_scores,
     calculate_qa_score,
     evaluate_rubric,
@@ -362,6 +363,7 @@ async def run_report_stage(
         "pipeline_version": pipeline_version,
         "rubric_id": rubric_id,
         "rubric_version": rubric_version,
+        "weighting_policy_version": WEIGHTING_POLICY_VERSION,
         "prompt_versions": {
             "reporting": "1.0.0",
             "scoring": "1.0.0",
