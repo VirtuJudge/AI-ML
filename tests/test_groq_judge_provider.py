@@ -510,3 +510,99 @@ async def test_groq_judge_generate_report_feedback_failure_emits_grounded_fallba
     assert "SPEAKER_01" in res.member_improvements
     assert len(res.team_strengths) >= 1
     assert len(res.team_improvements) >= 1
+
+
+@pytest.mark.asyncio
+async def test_generate_questions_rejects_and_replaces_over_length_question() -> None:
+    """Over-length primary questions are rejected and replaced via retry/fallback."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    long_text = "x" * 1200
+
+    async def mock_chat(model: str, messages: list[dict[str, str]], **kwargs: object) -> str:
+        role_pref = kwargs.get("preferred_key_index")
+        if role_pref == 0:
+            return (
+                f'{{"text": "{long_text}", '
+                '"reason": "Validates unit economics.", '
+                '"rubric_dimension": "market_and_business_model", '
+                '"evidence_ids": ["ev_speech_001"]}'
+            )
+        if role_pref == 3:
+            # Spare key fallback for Judge 0 also returns over-length -> deterministic fallback
+            return (
+                f'{{"text": "{long_text}", '
+                '"reason": "Validates unit economics.", '
+                '"rubric_dimension": "market_and_business_model", '
+                '"evidence_ids": ["ev_speech_001"]}'
+            )
+        if role_pref == 1:
+            return (
+                '{"text": "How does your engine scale?", '
+                '"reason": "Tests architecture.", '
+                '"rubric_dimension": "technology_and_moat", '
+                '"evidence_ids": ["ev_speech_002"]}'
+            )
+        return (
+            '{"text": "What secures pilot renewal?", '
+            '"reason": "Validates execution.", '
+            '"rubric_dimension": "execution_and_milestones", '
+            '"evidence_ids": ["ev_doc_001"]}'
+        )
+
+    mock_pool.chat.side_effect = mock_chat
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+    bundle = _make_test_bundle()
+
+    questions = await provider.generate_questions(
+        transcript=bundle.transcript_full_text,
+        rubric_id="startup_pitch",
+        evidence_bundle=bundle,
+    )
+
+    assert len(questions) == 3
+    assert all(len(q.text) <= 1000 for q in questions)
+    limitation_codes = [lim.code for lim in bundle.limitations]
+    assert "over_length_question_rejected" in limitation_codes
+    assert "judge_model_fallback_used" in limitation_codes
+
+
+@pytest.mark.asyncio
+async def test_groq_judge_drops_over_length_follow_up_with_limitation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Over-length follow-up (> 1,000 chars) is dropped with a limitation; assessment succeeds."""
+    import json
+    import logging
+
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    long_follow_up = "SECRET_LONG_FOLLOWUP " * 60  # > 1,000 chars
+    mock_pool.chat.return_value = json.dumps(
+        {
+            "assessment_text": "The answer clearly explained gross margin drivers.",
+            "score": 0.72,
+            "evidence_ids": ["ev_ans_01"],
+            "follow_up": {
+                "text": long_follow_up,
+                "reason": "Needs breakdown by cohort.",
+                "rubric_dimension": "market_and_business_model",
+                "evidence_ids": ["ev_ans_01"],
+            },
+        }
+    )
+    provider = GroqJudgeModelProvider(key_pool=mock_pool)
+
+    with caplog.at_level(logging.WARNING):
+        res = await provider.assess_answer(
+            answer_transcript="Our gross margin is 78 percent after hosting costs.",
+            question_text="What is your gross margin?",
+            rubric_dimension="market_and_business_model",
+            remaining_follow_ups=2,
+        )
+
+    assert res.follow_up is None
+    assert res.assessment_text == "The answer clearly explained gross margin drivers."
+    assert res.score == 0.72
+    assert res.evidence_ids == ["ev_ans_01"]
+    assert any(lim.code == "over_length_follow_up_dropped" for lim in res.limitations)
+    assert "SECRET_LONG_FOLLOWUP" not in caplog.text
+    assert all("SECRET_LONG_FOLLOWUP" not in lim.message for lim in res.limitations)

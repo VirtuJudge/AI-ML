@@ -387,6 +387,32 @@
         "path": "/trace_id",
         "message": "trace_id does not correlate with dispatched job trace_id"
       }
+    },
+    {
+      "id": "worker_update_question_text_too_long",
+      "path": "contracts/fixtures/ai/worker_update_question_text_too_long.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "text_length",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Session analysis completed update with primary question text exceeding 1,000 characters",
+      "expected_error": {
+        "path": "/payload/primary_questions/0/text",
+        "message": "is too long"
+      }
+    },
+    {
+      "id": "worker_update_follow_up_text_too_long",
+      "path": "contracts/fixtures/ai/worker_update_follow_up_text_too_long.json",
+      "schema": "contracts/schemas/ai_worker_update.schema.json",
+      "category": "text_length",
+      "valid": false,
+      "validation_level": "schema",
+      "description": "Answer analysis completed update with follow-up question text exceeding 1,000 characters",
+      "expected_error": {
+        "path": "/payload/follow_up/text",
+        "message": "is too long"
+      }
     }
   ]
 }

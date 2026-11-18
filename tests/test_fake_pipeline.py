@@ -1,5 +1,6 @@
 """Unit tests for FakePipeline implementation."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from app.contracts import (
 )
 from app.pipeline import FakePipeline, combine_timed_evidence
 from app.providers.fake_speech import FakeSpeechProvider
+from app.providers.groq_judge import GroqJudgeModelProvider
+from app.providers.groq_pool import GroqKeyPool
 from app.providers.types import (
     AudioObservation,
     DiarizationResult,
@@ -1013,3 +1016,126 @@ async def test_generate_report_recovers_scores_from_analyze_answer_with_backend_
     assert qa_comp["status"] == "scored"
     assert qa_comp["normalized_score"] == round((0.85 + 0.65 + 0.65) / 3, 4)
     assert qa_comp["label"] == "good"
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_over_length_follow_up_dropped_and_completion_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Over-length follow-up is dropped with a limitation and answer completion succeeds."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    mock_pool.chat.return_value = json.dumps(
+        {
+            "assessment_text": "Clear explanation of CAC payback period.",
+            "score": 0.78,
+            "evidence_ids": ["ev_ans_01"],
+            "follow_up": {
+                "text": "f" * 1200,
+                "reason": "Clarify enterprise sales cycle.",
+                "rubric_dimension": "market_and_business_model",
+                "evidence_ids": ["ev_ans_01"],
+            },
+        }
+    )
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    pipeline = FakePipeline(
+        object_storage=storage,
+        judge_provider=GroqJudgeModelProvider(key_pool=mock_pool),
+    )
+
+    payload = AnalyzeAnswerPayload(
+        qa_round_id="01JTEST0000000000000000010",
+        question_id="01JTEST0000000000000000011",
+        answer_id="01JTEST0000000000000000120",
+        answered_by="01JTEST0000000000000000013",
+        practice_session_id="01JTEST0000000000000000009",
+        audio=AudioAssetInput(
+            artifact_id="01JTEST0000000000000000121",
+            object_key="audio/answer.wav",
+            checksum="sha256:" + "b" * 64,
+            media_type="audio/wav",
+            duration_ms=25000,
+        ),
+        question_text="What supports the acquisition-cost claim?",
+        rubric_dimension="market_and_business_model",
+        question_evidence_ids=["ev_speech_001"],
+        remaining_follow_ups=2,
+    )
+
+    result = await pipeline.analyze_answer(payload)
+    assert result.answer_id == payload.answer_id
+    assert result.transcript_artifact_id
+    assert result.assessment_artifact_id
+    assert result.follow_up is None
+
+    assessment_data = await storage.read_json(
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
+    )
+    assert assessment_data["assessment"]["text"] == "Clear explanation of CAC payback period."
+    assert assessment_data["assessment"]["score"] == 0.78
+    assert assessment_data["follow_up"] is None
+    assert any(
+        lim["code"] == "over_length_follow_up_dropped" for lim in assessment_data["limitations"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_over_length_primary_question_replaced(
+    tmp_path: Path,
+) -> None:
+    """Over-length primary question is rejected and replaced during analyze_session."""
+    mock_pool = AsyncMock(spec=GroqKeyPool)
+    long_q = "q" * 1200
+
+    async def mock_chat(model: str, messages: list[dict[str, str]], **kwargs: object) -> str:
+        role_pref = kwargs.get("preferred_key_index")
+        if role_pref in (0, 3):
+            return json.dumps(
+                {
+                    "text": long_q,
+                    "reason": "Clarifies unit economics.",
+                    "rubric_dimension": "market_and_business_model",
+                    "evidence_ids": ["ev_speech_001"],
+                }
+            )
+        if role_pref == 1:
+            return json.dumps(
+                {
+                    "text": "How does your architecture handle failover?",
+                    "reason": "Tests technical feasibility.",
+                    "rubric_dimension": "technology_and_moat",
+                    "evidence_ids": ["ev_speech_001"],
+                }
+            )
+        return json.dumps(
+            {
+                "text": "What milestones remain before general availability?",
+                "reason": "Evaluates execution timeline.",
+                "rubric_dimension": "execution_and_milestones",
+                "evidence_ids": ["ev_speech_001"],
+            }
+        )
+
+    mock_pool.chat.side_effect = mock_chat
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    pipeline = FakePipeline(
+        object_storage=storage,
+        judge_provider=GroqJudgeModelProvider(key_pool=mock_pool),
+    )
+
+    payload = AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JTESTLONGQ0000000000001",
+            object_key="uploads/presentation.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+        ),
+        supporting_documents=[],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "questions"],
+    )
+
+    result = await pipeline.analyze_session(payload)
+    assert len(result.primary_questions) == 3
+    assert all(1 <= len(q.text) <= 1000 for q in result.primary_questions)
+    assert any(lim.code == "over_length_question_rejected" for lim in result.limitations)

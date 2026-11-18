@@ -10,11 +10,13 @@ conformance to PrimaryQuestion data contracts.
 """
 
 import re
+from collections.abc import Mapping
+from typing import Any
 
 import ulid
 from pydantic import BaseModel
 
-from app.contracts import Limitation, PrimaryQuestion
+from app.contracts import MAX_QUESTION_TEXT_LENGTH, Limitation, PrimaryQuestion
 from app.prompts.judges import (
     BANNED_REGEX,
     BANNED_SUBJECTIVE_TERMS,
@@ -173,8 +175,36 @@ def create_fallback_question(judge: JudgeSpec, bundle: EvidenceBundle) -> Primar
     )
 
 
+def _extract_question_fields(
+    question: PrimaryQuestion | Mapping[str, Any],
+) -> tuple[str, str, str, str, list[str]]:
+    """Extract normalized candidate fields from a PrimaryQuestion or raw judge dict."""
+    if isinstance(question, Mapping):
+        raw_cand = question.get("candidate_id")
+        cand_id = str(raw_cand).strip() if raw_cand is not None else ""
+        text = str(question.get("text") or "").strip()
+        reason = str(question.get("reason") or "").strip()
+        rubric_dim = str(question.get("rubric_dimension") or "").strip()
+        raw_eids = question.get("evidence_ids")
+        evidence_ids = (
+            [str(ev_id).strip() for ev_id in raw_eids if str(ev_id).strip()]
+            if isinstance(raw_eids, list)
+            else []
+        )
+        return cand_id, text, reason, rubric_dim, evidence_ids
+
+    cand_id = question.candidate_id.strip() if question.candidate_id else ""
+    return (
+        cand_id,
+        (question.text or "").strip(),
+        (question.reason or "").strip(),
+        (question.rubric_dimension or "").strip(),
+        [str(ev_id).strip() for ev_id in (question.evidence_ids or []) if str(ev_id).strip()],
+    )
+
+
 def validate_judge_question(
-    question: PrimaryQuestion,
+    question: PrimaryQuestion | Mapping[str, Any],
     judge: JudgeSpec,
     bundle: EvidenceBundle,
 ) -> tuple[PrimaryQuestion | None, list[Limitation]]:
@@ -185,10 +215,13 @@ def validate_judge_question(
         If validation fails, validated_question is None with explanatory limitation.
     """
     limitations: list[Limitation] = []
+    cand_id, raw_text, raw_reason, raw_rubric_dim, raw_evidence_ids = _extract_question_fields(
+        question
+    )
 
-    # 1. Text and reason non-empty. Evidence identifiers are metadata, not words
-    # for the candidate to see or hear.
-    cleaned_question_text = strip_evidence_ids_from_question_text(question.text)
+    # 1. Text non-empty and within contract length. Evidence identifiers are metadata,
+    # not words for the candidate to see or hear.
+    cleaned_question_text = strip_evidence_ids_from_question_text(raw_text)
     if not cleaned_question_text:
         limitations.append(
             Limitation(
@@ -200,7 +233,21 @@ def validate_judge_question(
         )
         return None, limitations
 
-    if not question.reason or not question.reason.strip():
+    if len(cleaned_question_text) > MAX_QUESTION_TEXT_LENGTH:
+        limitations.append(
+            Limitation(
+                code="over_length_question_rejected",
+                scope="question_generation",
+                message=(
+                    f"Judge {judge.role} generated a question exceeding "
+                    f"{MAX_QUESTION_TEXT_LENGTH} characters."
+                ),
+                affected_dimensions=[raw_rubric_dim or judge.default_rubric_dimension],
+            )
+        )
+        return None, limitations
+
+    if not raw_reason:
         limitations.append(
             Limitation(
                 code="empty_question_reason",
@@ -212,7 +259,7 @@ def validate_judge_question(
         return None, limitations
 
     # 2. Check for subjective/emotional claims
-    combined_text = f"{question.text} {question.reason}"
+    combined_text = f"{raw_text} {raw_reason}"
     banned_match = check_for_subjective_emotional_claims(combined_text)
     if banned_match:
         limitations.append(
@@ -223,33 +270,31 @@ def validate_judge_question(
                     f"Question from judge {judge.role} rejected for prohibited "
                     f"subjective/emotional claim: '{banned_match}'."
                 ),
-                affected_dimensions=[question.rubric_dimension or judge.default_rubric_dimension],
+                affected_dimensions=[raw_rubric_dim or judge.default_rubric_dimension],
             )
         )
         return None, limitations
 
     # 3. Rubric dimension validation
-    rubric_dim = question.rubric_dimension.strip()
-    if rubric_dim not in judge.rubric_dimensions:
+    if raw_rubric_dim not in judge.rubric_dimensions:
         # Try normalizing or defaulting if closely aligned
-        if rubric_dim:
+        if raw_rubric_dim:
             # Check if valid dimension in another persona
             all_valid_dimensions = {d for j in JUDGE_PANEL for d in j.rubric_dimensions}
-            if rubric_dim in all_valid_dimensions:
-                dim_to_use = rubric_dim
+            if raw_rubric_dim in all_valid_dimensions:
+                dim_to_use = raw_rubric_dim
             else:
                 dim_to_use = judge.default_rubric_dimension
         else:
             dim_to_use = judge.default_rubric_dimension
     else:
-        dim_to_use = rubric_dim
+        dim_to_use = raw_rubric_dim
 
     # 4. Evidence IDs validation
     valid_evidence_ids: list[str] = []
-    for ev_id in question.evidence_ids:
-        ev_id_clean = ev_id.strip()
-        if bundle.has_evidence_id(ev_id_clean):
-            valid_evidence_ids.append(ev_id_clean)
+    for ev_id in raw_evidence_ids:
+        if bundle.has_evidence_id(ev_id):
+            valid_evidence_ids.append(ev_id)
 
     if not valid_evidence_ids:
         limitations.append(
@@ -258,7 +303,7 @@ def validate_judge_question(
                 scope="question_grounding",
                 message=(
                     f"Judge {judge.role} question cited unknown or unsupported "
-                    f"evidence IDs {question.evidence_ids}."
+                    f"evidence IDs {raw_evidence_ids}."
                 ),
                 affected_dimensions=[dim_to_use],
             )
@@ -266,13 +311,12 @@ def validate_judge_question(
         return None, limitations
 
     # 5. Ensure non-empty candidate_id
-    cand_id = question.candidate_id.strip() if question.candidate_id else ""
     final_cand_id = cand_id if cand_id else ulid.new().str
 
     validated = PrimaryQuestion(
         candidate_id=final_cand_id,
         text=cleaned_question_text,
-        reason=question.reason.strip(),
+        reason=raw_reason,
         rubric_dimension=dim_to_use,
         evidence_ids=valid_evidence_ids,
     )
@@ -296,19 +340,38 @@ def validate_panel_questions(
     deduped: list[PrimaryQuestion] = []
 
     for q in questions:
-        normalized_text = " ".join(q.text.lower().split())
+        cleaned_text = strip_evidence_ids_from_question_text(q.text)
+        if not cleaned_text or len(cleaned_text) > MAX_QUESTION_TEXT_LENGTH:
+            is_over_length = len(cleaned_text) > MAX_QUESTION_TEXT_LENGTH
+            limitations.append(
+                Limitation(
+                    code=(
+                        "over_length_question_rejected" if is_over_length else "empty_question_text"
+                    ),
+                    scope="question_panel",
+                    message=(
+                        f"Question rejected because text exceeded "
+                        f"{MAX_QUESTION_TEXT_LENGTH} characters."
+                        if is_over_length
+                        else "Question rejected because text was empty."
+                    ),
+                    affected_dimensions=[q.rubric_dimension] if q.rubric_dimension else [],
+                )
+            )
+            continue
+        normalized_text = " ".join(cleaned_text.lower().split())
         if normalized_text in seen_texts:
             limitations.append(
                 Limitation(
                     code="duplicate_question_filtered",
                     scope="question_panel",
-                    message=f"Duplicate question filtered: '{q.text[:60]}...'",
+                    message=f"Duplicate question filtered: '{cleaned_text[:60]}...'",
                     affected_dimensions=[q.rubric_dimension],
                 )
             )
             continue
         seen_texts.add(normalized_text)
-        deduped.append(q)
+        deduped.append(q if cleaned_text == q.text else q.model_copy(update={"text": cleaned_text}))
 
     # Ensure exactly 3 questions
     if len(deduped) < 3:

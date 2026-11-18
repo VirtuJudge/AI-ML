@@ -6,10 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.contracts import (
+    MAX_QUESTION_TEXT_LENGTH,
     ArtifactRef,
     Evaluation,
     FeedbackSection,
     Finding,
+    FollowUpQuestion,
     JobType,
     Limitation,
     MemberFeedback,
@@ -432,3 +434,66 @@ def test_speaker_mapping_optional_display_name() -> None:
     # Without display_name (defaults to None)
     m2 = SpeakerMapping(speaker_label="SPEAKER_01", user_id="u2")
     assert m2.display_name is None
+
+
+def test_question_models_enforce_length_bounds() -> None:
+    """PrimaryQuestion and FollowUpQuestion enforce min_length=1 and max_length=1000."""
+    # Exact boundary of 1000 characters succeeds
+    pq_ok = PrimaryQuestion(
+        candidate_id="q-1",
+        text="x" * MAX_QUESTION_TEXT_LENGTH,
+        reason="Valid reason",
+        rubric_dimension="business_reasoning",
+        evidence_ids=["ev_1"],
+    )
+    assert len(pq_ok.text) == MAX_QUESTION_TEXT_LENGTH
+
+    fu_ok = FollowUpQuestion(
+        text="y" * MAX_QUESTION_TEXT_LENGTH,
+        reason="Valid follow-up reason",
+        rubric_dimension="business_reasoning",
+        evidence_ids=["ev_1"],
+    )
+    assert len(fu_ok.text) == MAX_QUESTION_TEXT_LENGTH
+
+    # Over-length text (> 1000) is rejected
+    with pytest.raises(ValidationError):
+        PrimaryQuestion(
+            candidate_id="q-1",
+            text="x" * (MAX_QUESTION_TEXT_LENGTH + 1),
+            reason="Valid reason",
+            rubric_dimension="business_reasoning",
+            evidence_ids=["ev_1"],
+        )
+
+    with pytest.raises(ValidationError):
+        FollowUpQuestion(
+            text="y" * (MAX_QUESTION_TEXT_LENGTH + 1),
+            reason="Valid follow-up reason",
+            rubric_dimension="business_reasoning",
+            evidence_ids=["ev_1"],
+        )
+
+    # Empty required string fields (min_length=1) are rejected
+    for field_name in ("candidate_id", "text", "reason", "rubric_dimension"):
+        kwargs: dict[str, object] = {
+            "candidate_id": "q-1",
+            "text": "Valid question?",
+            "reason": "Valid reason",
+            "rubric_dimension": "business_reasoning",
+            "evidence_ids": ["ev_1"],
+        }
+        kwargs[field_name] = ""
+        with pytest.raises(ValidationError):
+            PrimaryQuestion.model_validate(kwargs)
+
+    for field_name in ("text", "reason", "rubric_dimension"):
+        fu_kwargs: dict[str, object] = {
+            "text": "Valid follow-up?",
+            "reason": "Valid reason",
+            "rubric_dimension": "business_reasoning",
+            "evidence_ids": ["ev_1"],
+        }
+        fu_kwargs[field_name] = ""
+        with pytest.raises(ValidationError):
+            FollowUpQuestion.model_validate(fu_kwargs)

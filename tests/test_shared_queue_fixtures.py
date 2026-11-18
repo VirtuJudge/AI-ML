@@ -3,8 +3,8 @@
 Ensures cross-repository queue message compatibility between Backend producers and AI consumers.
 """
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -23,7 +23,6 @@ from app.contracts import (
     FailedPayload,
     GenerateReportPayload,
     JobType,
-    PrimaryQuestion,
     ProgressPayload,
     QueueMessage,
     ReportCompleted,
@@ -266,6 +265,18 @@ def test_worker_update_negative_fixtures():
     up_neg = WorkerUpdate.model_validate(data_neg)
     with pytest.raises(ValidationError):
         ErasureCompleted.model_validate(up_neg.payload)
+
+    # over-length primary question text (> 1000 chars)
+    data_q_long = _load_fixture("worker_update_question_text_too_long.json")
+    up_q_long = WorkerUpdate.model_validate(data_q_long)
+    with pytest.raises(ValidationError):
+        SessionAnalysisCompleted.model_validate(up_q_long.payload)
+
+    # over-length follow-up question text (> 1000 chars)
+    data_fu_long = _load_fixture("worker_update_follow_up_text_too_long.json")
+    up_fu_long = WorkerUpdate.model_validate(data_fu_long)
+    with pytest.raises(ValidationError):
+        AnswerAnalysisCompleted.model_validate(up_fu_long.payload)
 
 
 def test_backend_uuid_and_trace_format_fixtures():

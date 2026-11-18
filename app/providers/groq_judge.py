@@ -17,7 +17,13 @@ from typing import Any
 
 import ulid
 
-from app.contracts import Finding, FollowUpQuestion, Limitation, PrimaryQuestion
+from app.contracts import (
+    MAX_QUESTION_TEXT_LENGTH,
+    Finding,
+    FollowUpQuestion,
+    Limitation,
+    PrimaryQuestion,
+)
 from app.prompts.judges import ANSWER_ASSESSMENT_PROMPT, BANNED_REGEX
 from app.prompts.reporting import (
     REPORT_EVALUATION_SYSTEM_PROMPT,
@@ -26,6 +32,7 @@ from app.prompts.reporting import (
 from app.providers.base import AnswerAssessment, ReportFeedbackResult
 from app.providers.groq_pool import GroqKeyPool, GroqPoolError
 from app.providers.types import DocumentChunk
+from app.stages.common import build_over_length_follow_up_limitation
 from app.stages.evidence import EvidenceBundle, build_evidence_bundle
 from app.stages.judge_panel import (
     JUDGE_PANEL,
@@ -117,14 +124,7 @@ class GroqJudgeModelProvider:
                 )
             ]
 
-        candidate = PrimaryQuestion(
-            candidate_id=parsed.get("candidate_id") or ulid.new().str,
-            text=str(parsed.get("text", "")).strip(),
-            reason=str(parsed.get("reason", "")).strip(),
-            rubric_dimension=str(parsed.get("rubric_dimension", "")).strip(),
-            evidence_ids=list(parsed.get("evidence_ids") or []),
-        )
-        return validate_judge_question(candidate, judge, bundle)
+        return validate_judge_question(parsed, judge, bundle)
 
     async def _ask_judge(
         self,
@@ -268,6 +268,7 @@ class GroqJudgeModelProvider:
         )
 
         follow_up: FollowUpQuestion | None = None
+        limitations: list[Limitation] = []
         if remaining_follow_ups > 0:
             raw_fu = parsed.get("follow_up")
             if isinstance(raw_fu, dict) and raw_fu.get("text"):
@@ -282,9 +283,16 @@ class GroqJudgeModelProvider:
                 if not fu_eids:
                     fu_eids = list(evidence_ids)
 
-                if (
+                if len(fu_text) > MAX_QUESTION_TEXT_LENGTH:
+                    logger.warning(
+                        "Follow-up question text exceeded %d characters; dropping follow-up.",
+                        MAX_QUESTION_TEXT_LENGTH,
+                    )
+                    limitations.append(build_over_length_follow_up_limitation(fu_dim))
+                elif (
                     fu_text
                     and fu_reason
+                    and fu_dim
                     and not BANNED_REGEX.search(fu_text)
                     and not BANNED_REGEX.search(fu_reason)
                 ):
@@ -300,6 +308,7 @@ class GroqJudgeModelProvider:
             score=score,
             evidence_ids=evidence_ids,
             follow_up=follow_up,
+            limitations=limitations,
         )
 
     def _create_fallback_assessment(

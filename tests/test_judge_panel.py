@@ -128,7 +128,7 @@ def test_validate_judge_question_preserves_custom_candidate_ids() -> None:
     assert val_custom.candidate_id == "q-1"
 
     # Case 2: Empty candidate ID automatically gets a new ULID
-    q_empty = PrimaryQuestion(
+    q_empty = PrimaryQuestion.model_construct(
         candidate_id="",
         text="What is the gross margin on the $50/mo subscription?",
         reason="Assesses unit economics feasibility.",
@@ -268,3 +268,58 @@ def test_validate_panel_questions_with_judges_argument() -> None:
     # Call with canonical signature and explicit judges argument
     final_questions, _ = validate_panel_questions([q], bundle, judges=JUDGE_PANEL)
     assert len(final_questions) == 3
+
+
+def test_validate_judge_question_rejects_over_length_text() -> None:
+    """Over-length primary questions (> 1,000 chars) are rejected with a limitation."""
+    bundle = _make_test_bundle()
+
+    # Exact 1,000-character boundary succeeds
+    ok_q = {
+        "candidate_id": "q-ok",
+        "text": "a" * 1000,
+        "reason": "Assesses unit economics.",
+        "rubric_dimension": "market_and_business_model",
+        "evidence_ids": ["ev_speech_001"],
+    }
+    validated_ok, lims_ok = validate_judge_question(ok_q, JUDGE_PANEL[0], bundle)
+    assert validated_ok is not None
+    assert len(validated_ok.text) == 1000
+    assert lims_ok == []
+
+    # 1,200-character question is rejected
+    long_q = {
+        "candidate_id": "q-long",
+        "text": "a" * 1200,
+        "reason": "Assesses unit economics.",
+        "rubric_dimension": "market_and_business_model",
+        "evidence_ids": ["ev_speech_001"],
+    }
+    validated_long, lims_long = validate_judge_question(long_q, JUDGE_PANEL[0], bundle)
+    assert validated_long is None
+    assert len(lims_long) == 1
+    assert lims_long[0].code == "over_length_question_rejected"
+
+
+def test_validate_panel_questions_rejects_and_replaces_over_length() -> None:
+    """Over-length panel questions are filtered and replaced with deterministic fallbacks."""
+    bundle = _make_test_bundle()
+    q_long = PrimaryQuestion.model_construct(
+        candidate_id=ulid.new().str,
+        text="x" * 1200,
+        reason="Assesses financial model.",
+        rubric_dimension="market_and_business_model",
+        evidence_ids=["ev_speech_001"],
+    )
+    q_valid = PrimaryQuestion(
+        candidate_id=ulid.new().str,
+        text="How will the C++ engine scale under peak load?",
+        reason="Assesses technical feasibility.",
+        rubric_dimension="technology_and_moat",
+        evidence_ids=["ev_speech_002"],
+    )
+
+    final_questions, lims = validate_panel_questions([q_long, q_valid], bundle)
+    assert len(final_questions) == 3
+    assert all(len(q.text) <= 1000 for q in final_questions)
+    assert any(lim.code == "over_length_question_rejected" for lim in lims)

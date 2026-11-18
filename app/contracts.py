@@ -12,7 +12,7 @@ except ImportError:
         pass
 
 
-from typing import Any, Literal, TypeGuard
+from typing import Annotated, Any, Literal, TypeGuard
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -35,6 +35,9 @@ def is_valid_job_id(value: Any) -> TypeGuard[str]:
 def is_safe_identifier(value: Any) -> TypeGuard[str]:
     """Return True if value is a bounded, log- and path-safe identifier string."""
     return isinstance(value, str) and bool(SAFE_IDENTIFIER_PATTERN.fullmatch(value))
+
+
+MAX_QUESTION_TEXT_LENGTH = 1000
 
 
 class JobType(StrEnum):
@@ -127,20 +130,20 @@ class SpeakerMapping(BaseModel):
 class PrimaryQuestion(BaseModel):
     """Primary grounded question generated from pitch session analysis."""
 
-    candidate_id: str
-    text: str
-    reason: str
-    rubric_dimension: str
-    evidence_ids: list[str] = Field(default_factory=list)
+    candidate_id: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=MAX_QUESTION_TEXT_LENGTH)
+    reason: str = Field(min_length=1)
+    rubric_dimension: str = Field(min_length=1)
+    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
 
 
 class FollowUpQuestion(BaseModel):
     """Follow-up question generated during QA rounds."""
 
-    text: str
-    reason: str
-    rubric_dimension: str
-    evidence_ids: list[str] = Field(default_factory=list)
+    text: str = Field(min_length=1, max_length=MAX_QUESTION_TEXT_LENGTH)
+    reason: str = Field(min_length=1)
+    rubric_dimension: str = Field(min_length=1)
+    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
 
 
 class Limitation(BaseModel):
@@ -562,6 +565,7 @@ class WorkerUpdate(BaseModel):
 
 
 __all__ = [
+    "MAX_QUESTION_TEXT_LENGTH",
     "SAFE_IDENTIFIER_PATTERN",
     "ULID_PATTERN",
     "UUID_PATTERN",

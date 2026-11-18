@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "sequence": 2,
+  "status": "completed",
+  "occurred_at": "2026-09-10T12:06:00Z",
+  "trace_id": "trc_test_002",
+  "payload": {
+    "answer_id": "ans_001",
+    "transcript_artifact_id": "01JEXAMPLE0000000000000061",
+    "assessment_artifact_id": "01JEXAMPLE0000000000000062",
+    "follow_up": {
+      "text": "Can you break down your customer acquisition cost assumptions across each marketing channel and explain how onboarding engineering hours, paid search experiments, partner referral commissions, sales engineering support, implementation timelines, renewal discounts, multi-year contract structures, customer success staffing ratios, regional compliance reviews, security questionnaire turnaround, procurement cycles, pilot conversion rates, expansion revenue targets, cohort retention curves, gross margin sensitivity, support ticket escalation costs, infrastructure scaling tiers, third-party API licensing fees, data migration tooling, and executive sponsorship impact unit economics across both SMB and enterprise cohorts? Can you break down your customer acquisition cost assumptions across each marketing channel and explain how onboarding engineering hours, paid search experiments, partner referral commissions, sales engineering support, implementation timelines, renewal discounts, multi-year contract structures, customer success staffing ratios, regional compliance reviews, security questionnaire turnaround, procurement cycles, pilot conversion rates, expansion revenue targets, cohort retention curves, gross margin sensitivity, support?",
+      "reason": "Validates retention trends and unit economics mentioned in previous response",
+      "rubric_dimension": "customer_retention",
+      "evidence_ids": [
+        "ev_answer_001"
+      ]
+    }
+  }
+}

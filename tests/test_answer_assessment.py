@@ -2,7 +2,8 @@
 
 import pytest
 
-from app.contracts import FollowUpQuestion
+from app.contracts import FollowUpQuestion, Limitation
+from app.providers.base import AnswerAssessment, JudgeModelProvider
 from app.providers.fake_judge import FakeJudgeModelProvider
 from app.stages.answer_assessment import AnswerAssessmentResult, run_answer_assessment_stage
 
@@ -147,3 +148,53 @@ async def test_run_answer_assessment_stage_disqualifies_direct_judge_abuse() -> 
     assert result.assessment.score == 0.0
     assert result.assessment.follow_up is None
     assert result.metadata["disqualified_for_judge_directed_abuse"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_answer_assessment_stage_drops_over_length_follow_up() -> None:
+    """Over-length follow-up from a provider is dropped with a limitation and valid metadata."""
+
+    class OverLengthFollowUpJudge:
+        async def generate_questions(self, *args: object, **kwargs: object) -> list:
+            return []
+
+        async def assess_answer(
+            self,
+            answer_transcript: str,
+            question_text: str,
+            rubric_dimension: str,
+            *,
+            remaining_follow_ups: int = 0,
+        ) -> AnswerAssessment:
+            return AnswerAssessment(
+                assessment_text="Solid answer with specific pilot metrics.",
+                score=0.75,
+                evidence_ids=["ev_ans_01"],
+                follow_up=FollowUpQuestion.model_construct(
+                    text="z" * 1200,
+                    reason="Clarify churn assumptions.",
+                    rubric_dimension=rubric_dimension,
+                    evidence_ids=["ev_ans_01"],
+                ),
+            )
+
+        async def generate_report_feedback(self, *args: object, **kwargs: object) -> object:
+            raise NotImplementedError
+
+    judge: JudgeModelProvider = OverLengthFollowUpJudge()  # type: ignore[assignment]
+    result = await run_answer_assessment_stage(
+        answer_transcript="We have 95 percent retention across three pilots.",
+        question_text="What is your retention?",
+        rubric_dimension="customer_retention",
+        judge_provider=judge,
+        remaining_follow_ups=2,
+    )
+
+    assert result.assessment.follow_up is None
+    assert result.assessment.assessment_text == "Solid answer with specific pilot metrics."
+    assert result.assessment.score == 0.75
+    assert result.metadata["has_follow_up"] is False
+    assert any(
+        isinstance(lim, Limitation) and lim.code == "over_length_follow_up_dropped"
+        for lim in result.limitations
+    )

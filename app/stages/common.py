@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 
 import httpx
 
-from app.contracts import ErrorCode, Limitation
+from app.contracts import MAX_QUESTION_TEXT_LENGTH, ErrorCode, Limitation
 from app.providers.groq_pool import (
     AllKeysExhaustedError,
     GroqPoolError,
@@ -395,10 +395,25 @@ async def with_transient_retries(
     raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
 
 
+def build_over_length_follow_up_limitation(rubric_dimension: str | None = None) -> Limitation:
+    """Build a log-safe limitation when a generated follow-up exceeds the text length cap."""
+    dim = rubric_dimension.strip() if rubric_dimension else ""
+    return Limitation(
+        code="over_length_follow_up_dropped",
+        scope="answer_assessment",
+        message=(
+            f"Generated follow-up question exceeded {MAX_QUESTION_TEXT_LENGTH} "
+            "characters and was dropped."
+        ),
+        affected_dimensions=[dim] if dim else [],
+    )
+
+
 __all__ = [
     "StageError",
     "StageProviderError",
     "StageTransientError",
+    "build_over_length_follow_up_limitation",
     "classify_stage_error",
     "validate_observation_timestamps",
     "with_transient_retries",

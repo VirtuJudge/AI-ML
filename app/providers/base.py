@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from app.contracts import Finding, FollowUpQuestion, PrimaryQuestion
+from app.contracts import Finding, FollowUpQuestion, Limitation, PrimaryQuestion
 from app.providers.types import (
     AudioObservation,
     DiarizationResult,
@@ -38,6 +38,7 @@ class AnswerAssessment(BaseModel):
     score: float = Field(default=0.0, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
     follow_up: FollowUpQuestion | None = None
+    limitations: list[Limitation] = Field(default_factory=list)
 
 
 class SpeechProvider(Protocol):
