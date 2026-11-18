@@ -864,3 +864,151 @@ async def test_analyze_session_embeds_by_speaker_in_analysis_artifact(
     assert spk1["intervals"][0]["formatted"] == "00:09 - 00:14"
     assert spk1["intervals"][0]["start_ms"] == 9300
     assert spk1["intervals"][0]["end_ms"] == 14000
+
+
+@pytest.mark.asyncio
+async def test_generate_report_recovers_scores_from_analyze_answer_with_backend_qa_json(
+    tmp_path: Path,
+) -> None:
+    """Issue #74 reproduction: Backend-shaped qa.json without score reads assessment.json."""
+
+    class TranscriptVaryingSpeechProvider(FakeSpeechProvider):
+        async def transcribe(self, audio_path: Path, **kwargs: Any) -> TranscriptionResult:
+            if "comprehensive" in audio_path.name:
+                return TranscriptionResult(
+                    segments=[],
+                    full_text="This is a comprehensive answer covering CAC and payback.",
+                )
+            return TranscriptionResult(
+                segments=[],
+                full_text="Standard response covering the main point.",
+            )
+
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    pipeline = FakePipeline(
+        speech_provider=TranscriptVaryingSpeechProvider(),
+        object_storage=storage,
+    )
+    session_id = "01JISSUE74SESSION000000001"
+
+    session_res = await pipeline.analyze_session(
+        AnalyzeSessionPayload(
+            presentation=AssetInput(
+                artifact_id="01JISSUE74PRES000000000001",
+                object_key="uploads/presentation.mp4",
+                checksum="sha256:" + "a" * 64,
+                media_type="video/mp4",
+            ),
+            supporting_documents=[],
+            rubric=RubricRef(rubric_id="startup_pitch", version=1),
+            requested_capabilities=["speech", "questions"],
+            practice_session_id=session_id,
+        )
+    )
+
+    answer_results = []
+    answer_ids = [
+        "01JISSUE74ANS0000000000001",
+        "01JISSUE74ANS0000000000002",
+        "01JISSUE74ANS0000000000003",
+    ]
+    audio_keys = ["answers/comprehensive_1.wav", "answers/normal_2.wav", "answers/normal_3.wav"]
+    for idx, (question, ans_id, audio_key) in enumerate(
+        zip(session_res.primary_questions, answer_ids, audio_keys, strict=True)
+    ):
+        ans_res = await pipeline.analyze_answer(
+            AnalyzeAnswerPayload(
+                qa_round_id="01JISSUE74ROUND00000000001",
+                question_id=question.candidate_id,
+                answer_id=ans_id,
+                answered_by="01JUSER0000000000000000001",
+                practice_session_id=session_id,
+                audio=AudioAssetInput(
+                    artifact_id=f"01JISSUE74AUD000000000000{idx}",
+                    object_key=audio_key,
+                    checksum="sha256:" + "b" * 64,
+                    media_type="audio/wav",
+                    duration_ms=25000,
+                ),
+                question_text=question.text,
+                rubric_dimension=question.rubric_dimension,
+                question_evidence_ids=question.evidence_ids,
+                remaining_follow_ups=1,
+            )
+        )
+        answer_results.append(ans_res)
+
+    # Construct Backend-shaped qa.json (omitting score from assessments)
+    qa_payload = {
+        "schema_version": 1,
+        "artifact_id": "01JISSUE74QA00000000000001",
+        "practice_session_id": session_id,
+        "qa_round_id": "01JISSUE74ROUND00000000001",
+        "analysis_attempt": 1,
+        "questions": [
+            {
+                "id": q.candidate_id,
+                "kind": "primary",
+                "position": idx + 1,
+                "text": q.text,
+                "reason": q.reason,
+                "rubric_dimension": q.rubric_dimension,
+                "evidence_ids": q.evidence_ids,
+                "answer_id": ans_id,
+                "parent_answer_id": None,
+                "state": "answered",
+            }
+            for idx, (q, ans_id) in enumerate(
+                zip(session_res.primary_questions, answer_ids, strict=True)
+            )
+        ],
+        "answers": [
+            {
+                "id": ans_res.answer_id,
+                "question_id": q.candidate_id,
+                "answered_by": "01JUSER0000000000000000001",
+                "status": "submitted",
+                "transcript_artifact_id": ans_res.transcript_artifact_id,
+                "assessment_artifact_id": ans_res.assessment_artifact_id,
+                "transcript": "Submitted answer",
+            }
+            for q, ans_res in zip(session_res.primary_questions, answer_results, strict=True)
+        ],
+        "assessments": [
+            {
+                "assessment_artifact_id": ans_res.assessment_artifact_id,
+                "assessment_text": "Grounded assessment summary.",
+                "evidence_ids": ["ev_speech_001"],
+                "question_id": q.candidate_id,
+            }
+            for q, ans_res in zip(session_res.primary_questions, answer_results, strict=True)
+        ],
+    }
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        qa_payload,
+        artifact_id=qa_payload["artifact_id"],
+    )
+
+    report_res = await pipeline.generate_report(
+        GenerateReportPayload(
+            report_id="01JISSUE74REPORT0000000001",
+            analysis_artifact=session_res.analysis_artifact,
+            qa_artifact=qa_ref,
+            speaker_mappings=[
+                SpeakerMapping(
+                    speaker_label="SPEAKER_00",
+                    user_id="01JUSER0000000000000000001",
+                    display_name="Jane Founder",
+                )
+            ],
+        ),
+        practice_session_id=session_id,
+    )
+
+    evaluation = await storage.read_json(report_res.evaluation_artifact.object_key)
+    qa_comp = next(c for c in evaluation["components"] if c["dimension"] == "qa_quality")
+    # FakeJudgeModelProvider gives 0.85 for comprehensive and 0.65 for standard -> mean 0.7167
+    assert qa_comp["status"] == "scored"
+    assert qa_comp["normalized_score"] == round((0.85 + 0.65 + 0.65) / 3, 4)
+    assert qa_comp["label"] == "good"

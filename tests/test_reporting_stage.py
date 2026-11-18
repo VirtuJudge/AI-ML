@@ -19,6 +19,8 @@ from app.stages.report_loader import (
 from app.stages.reporting import ReportStageResult, run_report_stage
 from app.stages.scoring import WEIGHTING_POLICY_VERSION
 from app.storage.base import ObjectStorageProtocol
+from app.storage.local import LocalDiskObjectStorage
+from tests.conftest import load_json_fixture
 
 FAKE_SHA256 = "sha256:" + "a" * 64
 
@@ -485,3 +487,98 @@ async def test_run_report_stage_keeps_qa_at_20_percent_when_optional_modality_mi
         )
         == 1.0
     )
+
+
+async def test_run_report_stage_backend_shaped_qa_artifact_scores_mean(tmp_path) -> None:
+    """Backend-shaped qa.json with 3 valid assessments yields qa_quality equal to mean score."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    qa_payload = load_json_fixture("ai/qa_artifact_valid.json")
+    session_id = qa_payload["practice_session_id"]
+
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        build_synthetic_analysis_data(session_id=session_id),
+        artifact_id="01JANALYSIS_BACKEND_QA_01",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        qa_payload,
+        artifact_id=qa_payload["artifact_id"],
+    )
+
+    scores = [0.85, 0.72, 0.68]  # mean = 0.75
+    for idx, (ans, score) in enumerate(zip(qa_payload["answers"], scores, strict=True)):
+        await storage.upload_json(
+            f"ai/session/{session_id}/answers/{ans['id']}/assessment.json",
+            {
+                "artifact_id": ans["assessment_artifact_id"],
+                "answer_id": ans["id"],
+                "practice_session_id": session_id,
+                "question_id": ans["question_id"],
+                "kind": "answer_assessment",
+                "schema_version": 1,
+                "assessment": {
+                    "text": qa_payload["assessments"][idx]["assessment_text"],
+                    "score": score,
+                    "evidence_ids": qa_payload["assessments"][idx]["evidence_ids"],
+                },
+                "limitations": [],
+            },
+            artifact_id=ans["assessment_artifact_id"],
+        )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_BACKEND_QA_01",
+        analysis_ref=analysis_ref,
+        qa_ref=qa_ref,
+        storage=storage,
+        judge_provider=FakeJudgeModelProvider(),
+    )
+
+    qa_comp = next(c for c in result.evaluation.components if c.dimension == "qa_quality")
+    assert qa_comp.status == "scored"
+    assert qa_comp.normalized_score == 0.75
+    assert qa_comp.display_score == 75
+    assert qa_comp.label == "good"
+    assert qa_comp.configured_weight == 0.20
+    assert qa_comp.effective_weight == 0.20
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_unrecoverable_qa_scores_become_not_evaluated(tmp_path) -> None:
+    """Answered questions with no recoverable score become not_evaluated with limitation."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    qa_payload = load_json_fixture("ai/qa_artifact_valid.json")
+    session_id = qa_payload["practice_session_id"]
+
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        build_synthetic_analysis_data(session_id=session_id),
+        artifact_id="01JANALYSIS_MISSING_ASMT_01",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        qa_payload,
+        artifact_id=qa_payload["artifact_id"],
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_MISSING_ASMT_01",
+        analysis_ref=analysis_ref,
+        qa_ref=qa_ref,
+        storage=storage,
+        judge_provider=FakeJudgeModelProvider(),
+    )
+
+    qa_comp = next(c for c in result.evaluation.components if c.dimension == "qa_quality")
+    assert qa_comp.status == "not_evaluated"
+    assert qa_comp.normalized_score is None
+    assert qa_comp.display_score is None
+    assert qa_comp.effective_weight is None
+    assert qa_comp.limitation_code == "qa_assessment_unavailable"
+    assert any(
+        lim.code == "qa_assessment_unavailable" and "qa_quality" in lim.affected_dimensions
+        for lim in result.evaluation.limitations
+    )
+    assert "- **Assessment Score:** Not Evaluated" in result.report_markdown
+    assert "0/100" not in result.report_markdown

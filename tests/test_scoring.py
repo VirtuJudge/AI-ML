@@ -10,6 +10,7 @@ from app.stages.scoring import (
     calculate_overall_score,
     calculate_qa_score,
     canonicalize_dimension,
+    evaluate_qa_scores,
     evaluate_rubric,
     normalize_effective_weights,
     score_to_display,
@@ -358,15 +359,69 @@ def test_calculate_qa_score_all_skipped() -> None:
     assert score_to_label(qa_score) == "needs_work"
 
 
-def test_calculate_qa_score_missing_assessment_score_awards_no_credit() -> None:
-    """A transcript alone must not silently earn the historical 75% fallback."""
+def test_calculate_qa_score_missing_assessment_score_is_not_evaluated() -> None:
+    """An answered question with no recoverable score becomes not_evaluated, never 0.0."""
     questions = [{"id": "q1", "text": "Q1"}]
     answers = [{"question_id": "q1", "status": "submitted", "transcript": "A response"}]
     assessments = [{"question_id": "q1", "assessment_text": "Incomplete response."}]
 
     qa_score, _ = calculate_qa_score(questions, answers, assessments)
+    result = evaluate_qa_scores(questions, answers, assessments)
 
-    assert qa_score == 0.0
+    assert qa_score is None
+    assert result.score is None
+    assert result.not_evaluated_question_ids == ["q1"]
+    assert len(result.limitations) == 1
+    assert result.limitations[0].code == "qa_assessment_unavailable"
+    assert "qa_quality" in result.limitations[0].affected_dimensions
+
+
+def test_evaluate_qa_scores_partial_missing_excludes_unevaluated_question() -> None:
+    """One unrecoverable answer score becomes not_evaluated with limitation, never 0.0."""
+    questions = [
+        {"id": "q1", "text": "Q1"},
+        {"id": "q2", "text": "Q2"},
+        {"id": "q3", "text": "Q3"},
+    ]
+    answers = [
+        {"question_id": "q1", "status": "submitted", "transcript": "Ans 1"},
+        {"question_id": "q2", "status": "submitted", "transcript": "Ans 2"},
+        {"question_id": "q3", "status": "submitted", "transcript": "Ans 3"},
+    ]
+    assessments = [
+        {"question_id": "q1", "score": 0.90, "evidence_ids": ["ev_1"]},
+        {"question_id": "q2", "score": 0.80, "evidence_ids": ["ev_2"]},
+        {"question_id": "q3", "assessment_text": "No score present."},
+    ]
+
+    result = evaluate_qa_scores(questions, answers, assessments)
+
+    assert result.score == 0.85
+    assert result.not_evaluated_question_ids == ["q3"]
+    assert len(result.limitations) == 1
+    assert result.limitations[0].code == "qa_assessment_unavailable"
+
+
+def test_evaluate_qa_scores_respects_explicit_not_evaluated_and_explicit_zero() -> None:
+    """Explicit not_evaluated status is never scored 0.0; explicit scored 0.0 remains 0.0."""
+    questions = [{"id": "q1", "text": "Q1"}]
+    answers = [{"question_id": "q1", "status": "submitted", "transcript": "Ans 1"}]
+
+    not_eval_res = evaluate_qa_scores(
+        questions,
+        answers,
+        [{"question_id": "q1", "status": "not_evaluated", "score": 0.0}],
+    )
+    assert not_eval_res.score is None
+    assert not_eval_res.not_evaluated_question_ids == ["q1"]
+
+    explicit_zero_res = evaluate_qa_scores(
+        questions,
+        answers,
+        [{"question_id": "q1", "status": "scored", "score": 0.0}],
+    )
+    assert explicit_zero_res.score == 0.0
+    assert explicit_zero_res.not_evaluated_question_ids == []
 
 
 def test_calculate_qa_score_empty_questions() -> None:

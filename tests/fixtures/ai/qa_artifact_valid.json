@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "artifact_id": "01JEXAMPLE0000000000000030",
+  "practice_session_id": "01JEXAMPLE0000000000000002",
+  "qa_round_id": "01JEXAMPLE0000000000000031",
+  "analysis_attempt": 1,
+  "questions": [
+    {
+      "id": "01JEXAMPLE000000000000001A",
+      "kind": "primary",
+      "position": 1,
+      "text": "What is your projected customer acquisition cost at scale?",
+      "reason": "Validates go-to-market unit economics.",
+      "rubric_dimension": "business_and_problem_solution_reasoning",
+      "evidence_ids": ["ev_speech_001"],
+      "answer_id": "01JEXAMPLE0000000000000041",
+      "parent_answer_id": null,
+      "state": "answered"
+    },
+    {
+      "id": "01JEXAMPLE000000000000001B",
+      "kind": "primary",
+      "position": 2,
+      "text": "How does your core architecture defend against incumbent fast-followers?",
+      "reason": "Assesses technical defensibility and moat.",
+      "rubric_dimension": "technical_feasibility",
+      "evidence_ids": ["ev_speech_001"],
+      "answer_id": "01JEXAMPLE0000000000000042",
+      "parent_answer_id": null,
+      "state": "answered"
+    },
+    {
+      "id": "01JEXAMPLE000000000000001C",
+      "kind": "primary",
+      "position": 3,
+      "text": "What pilot validation evidence supports your conversion assumption?",
+      "reason": "Verifies empirical traction claims.",
+      "rubric_dimension": "pitch_content_and_evidence",
+      "evidence_ids": ["ev_doc_slide_01"],
+      "answer_id": "01JEXAMPLE0000000000000043",
+      "parent_answer_id": null,
+      "state": "answered"
+    }
+  ],
+  "answers": [
+    {
+      "id": "01JEXAMPLE0000000000000041",
+      "question_id": "01JEXAMPLE000000000000001A",
+      "answered_by": "user_founder_01",
+      "status": "submitted",
+      "audio_asset_version_id": "01JEXAMPLE0000000000000051",
+      "transcript_artifact_id": "01JEXAMPLE0000000000000061",
+      "assessment_artifact_id": "01JEXAMPLE0000000000000071",
+      "duration_ms": 34000,
+      "submitted_at": "2026-09-10T12:04:00Z",
+      "transcript": "Our blended CAC is $180 with a 6-month payback via accelerator channels."
+    },
+    {
+      "id": "01JEXAMPLE0000000000000042",
+      "question_id": "01JEXAMPLE000000000000001B",
+      "answered_by": "user_founder_01",
+      "status": "submitted",
+      "audio_asset_version_id": "01JEXAMPLE0000000000000052",
+      "transcript_artifact_id": "01JEXAMPLE0000000000000062",
+      "assessment_artifact_id": "01JEXAMPLE0000000000000072",
+      "duration_ms": 41000,
+      "submitted_at": "2026-09-10T12:06:00Z",
+      "transcript": "We combine multimodal alignment with deterministic rubric scoring pipelines."
+    },
+    {
+      "id": "01JEXAMPLE0000000000000043",
+      "question_id": "01JEXAMPLE000000000000001C",
+      "answered_by": "user_founder_02",
+      "status": "submitted",
+      "audio_asset_version_id": "01JEXAMPLE0000000000000053",
+      "transcript_artifact_id": "01JEXAMPLE0000000000000063",
+      "assessment_artifact_id": "01JEXAMPLE0000000000000073",
+      "duration_ms": 29000,
+      "submitted_at": "2026-09-10T12:08:00Z",
+      "transcript": "Twelve teams in our paid pilot renewed after three practice rounds."
+    }
+  ],
+  "assessments": [
+    {
+      "assessment_artifact_id": "01JEXAMPLE0000000000000071",
+      "assessment_text": "Specific CAC and payback numbers tied to channel economics.",
+      "evidence_ids": ["ev_ans_01"],
+      "question_id": "01JEXAMPLE000000000000001A"
+    },
+    {
+      "assessment_artifact_id": "01JEXAMPLE0000000000000072",
+      "assessment_text": "Clear explanation of multimodal alignment moat.",
+      "evidence_ids": ["ev_ans_02"],
+      "question_id": "01JEXAMPLE000000000000001B"
+    },
+    {
+      "assessment_artifact_id": "01JEXAMPLE0000000000000073",
+      "assessment_text": "Concrete pilot renewal evidence supporting conversion claims.",
+      "evidence_ids": ["ev_ans_03"],
+      "question_id": "01JEXAMPLE000000000000001C"
+    }
+  ],
+  "metadata": {
+    "completed_at": "2026-09-10T12:09:00Z",
+    "question_count": 3,
+    "round_state": "completed"
+  }
+}

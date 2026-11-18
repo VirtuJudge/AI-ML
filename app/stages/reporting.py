@@ -34,7 +34,7 @@ from app.stages.report_markdown import generate_markdown_report
 from app.stages.scoring import (
     WEIGHTING_POLICY_VERSION,
     calculate_individual_delivery_scores,
-    calculate_qa_score,
+    evaluate_qa_scores,
     evaluate_rubric,
 )
 from app.storage.base import ObjectStorageProtocol
@@ -130,12 +130,25 @@ async def run_report_stage(
     )
 
     # 3. Deterministic Rubric Calculations
-    # Calculate deterministic Q&A score (20% rubric weight; skipped questions score 0.0)
-    qa_score, qa_evidence_ids = calculate_qa_score(
+    # Calculate deterministic Q&A score (20% rubric weight; skipped questions score 0.0;
+    # answered questions without a recoverable score become not_evaluated with a limitation)
+    qa_result = evaluate_qa_scores(
         questions=bundle.questions,
         answers=bundle.answers,
         assessments=bundle.assessments,
     )
+    qa_score = qa_result.score
+    qa_evidence_ids = qa_result.evidence_ids
+
+    limitations = list(bundle.limitations)
+    has_qa_limitation = any(
+        "qa_quality" in lim.affected_dimensions
+        and lim.code in ("qa_assessment_unavailable", "qa_assessment_verification_failed")
+        for lim in limitations
+    )
+    if not has_qa_limitation:
+        for lim in qa_result.limitations:
+            limitations.append(lim)
 
     # Calculate average delivery scores across all active speakers for the
     # team-level rubric components
@@ -184,7 +197,18 @@ async def run_report_stage(
 
     # Rationales
     dimension_rationales = dict(feedback_result.dimension_rationales)
-    if "qa_quality" not in dimension_rationales:
+    if bundle.questions and qa_score is None:
+        dimension_rationales["qa_quality"] = (
+            "Q&A responses could not be scored because assessment scores were unavailable."
+        )
+    elif qa_result.not_evaluated_question_ids:
+        evaluated_count = len(bundle.questions) - len(qa_result.not_evaluated_question_ids)
+        dimension_rationales["qa_quality"] = (
+            f"Evaluated across {evaluated_count} scored or skipped question(s); "
+            f"{len(qa_result.not_evaluated_question_ids)} answered question(s) could not be "
+            "evaluated."
+        )
+    elif "qa_quality" not in dimension_rationales:
         skipped_count = len([a for a in bundle.answers if a.get("status") == "skipped"])
         total_q = len(bundle.questions)
         dimension_rationales["qa_quality"] = (
@@ -221,7 +245,7 @@ async def run_report_stage(
         rubric_id=rubric_id,
         evidence_by_dimension=evidence_by_dim,
         rationales=dimension_rationales,
-        limitations=bundle.limitations,
+        limitations=limitations,
     )
 
     # 4. Map Individual Presenter MemberFeedback
@@ -341,7 +365,7 @@ async def run_report_stage(
         strengths=feedback_result.team_strengths,
         improvements=feedback_result.team_improvements,
         score_components=rubric_components,
-        limitations=bundle.limitations,
+        limitations=limitations,
     )
 
     all_findings: list[Finding] = list(feedback_result.team_strengths) + list(
@@ -414,15 +438,31 @@ async def run_report_stage(
         findings=all_findings,
         team_feedback=team_feedback,
         member_feedback=member_feedbacks,
-        limitations=bundle.limitations,
+        limitations=limitations,
         reproducibility=reproducibility,
     )
 
     # 7. Generate Canonical Markdown Report
+    md_assessments = [dict(a) for a in bundle.assessments]
+    if qa_result.not_evaluated_question_ids:
+        not_eval_set = set(qa_result.not_evaluated_question_ids)
+        seen_md_qids: set[str] = set()
+        for asm in md_assessments:
+            asm_qid = str(asm.get("question_id") or asm.get("candidate_id") or "")
+            if asm_qid in not_eval_set:
+                asm["status"] = "not_evaluated"
+                asm["score"] = None
+                seen_md_qids.add(asm_qid)
+        for missing_qid in qa_result.not_evaluated_question_ids:
+            if missing_qid not in seen_md_qids and missing_qid != "<unknown>":
+                md_assessments.append(
+                    {"question_id": missing_qid, "status": "not_evaluated", "score": None}
+                )
+
     qa_data = {
         "questions": bundle.questions,
         "answers": bundle.answers,
-        "assessments": bundle.assessments,
+        "assessments": md_assessments,
     }
     report_markdown = generate_markdown_report(
         evaluation,
@@ -435,7 +475,7 @@ async def run_report_stage(
         evaluation=evaluation,
         report_markdown=report_markdown,
         member_feedback_user_ids=member_user_ids,
-        limitations=bundle.limitations,
+        limitations=limitations,
     )
 
 

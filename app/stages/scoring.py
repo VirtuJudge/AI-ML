@@ -6,8 +6,9 @@ individual presenter delivery scoring.
 """
 
 import logging
+import math
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.contracts import (
     Limitation,
@@ -159,39 +160,83 @@ def calculate_overall_score(components: list[ScoreComponent]) -> float | None:
     return round(total, 4)
 
 
-def calculate_qa_score(
+class QAScoreResult(NamedTuple):
+    """Structured result of deterministic Q&A round scoring."""
+
+    score: float | None
+    evidence_ids: list[str]
+    limitations: list[Limitation]
+    not_evaluated_question_ids: list[str]
+
+
+def extract_assessment_score(asm: dict[str, Any] | None) -> float | None:
+    """Return a validated normalized score [0.0, 1.0] from an assessment entry, or None."""
+    if not asm or asm.get("status") == "not_evaluated":
+        return None
+
+    raw_score: Any = None
+    if "score" in asm and asm["score"] is not None:
+        raw_score = asm["score"]
+    elif "normalized_score" in asm and asm["normalized_score"] is not None:
+        raw_score = asm["normalized_score"]
+    else:
+        nested = asm.get("assessment")
+        if isinstance(nested, dict):
+            if nested.get("status") == "not_evaluated":
+                return None
+            if nested.get("score") is not None:
+                raw_score = nested["score"]
+
+    if (
+        isinstance(raw_score, (int, float))
+        and not isinstance(raw_score, bool)
+        and math.isfinite(float(raw_score))
+    ):
+        val = float(raw_score)
+        if 0.0 <= val <= 1.0:
+            return val
+    return None
+
+
+def evaluate_qa_scores(
     questions: Sequence[dict[str, Any]],
     answers: Sequence[dict[str, Any]],
     assessments: Sequence[dict[str, Any]] | None = None,
-) -> tuple[float, list[str]]:
-    """Calculate team Q&A score and gather evidence IDs.
+) -> QAScoreResult:
+    """Calculate team Q&A score, evidence IDs, and limitations for unrecoverable scores.
 
     Rules:
-    - Q&A contributes to the team evaluation.
     - Answered questions score only from an explicit structured assessment score.
-    - Skipped questions score strictly 0.0.
-    - Skipped questions do NOT remove the question from the denominator or drop Q&A weight.
+    - Explicitly skipped questions (or questions with no answer) score strictly 0.0
+      and remain in the denominator.
+    - Answered questions with no recoverable score become `not_evaluated` with an
+      explicit limitation, never an ordinary 0.0.
     """
     if not questions:
-        return 0.0, []
+        return QAScoreResult(
+            score=0.0,
+            evidence_ids=[],
+            limitations=[],
+            not_evaluated_question_ids=[],
+        )
 
-    # Map answers by question_id
     answers_by_qid: dict[str, dict[str, Any]] = {}
-    for a in answers:
-        qid = a.get("question_id")
-        if qid:
-            answers_by_qid[qid] = a
+    for raw_ans in answers:
+        qid_raw = raw_ans.get("question_id") or raw_ans.get("candidate_id")
+        if qid_raw:
+            answers_by_qid[str(qid_raw)] = raw_ans
 
-    # Map assessments by question_id if available
     assessments_by_qid: dict[str, dict[str, Any]] = {}
     if assessments:
         for asmt in assessments:
-            qid = asmt.get("question_id")
-            if qid:
-                assessments_by_qid[qid] = asmt
+            qid_raw = asmt.get("question_id") or asmt.get("candidate_id")
+            if qid_raw:
+                assessments_by_qid[str(qid_raw)] = asmt
 
     question_scores: list[float] = []
     evidence_ids: list[str] = []
+    not_evaluated_qids: list[str] = []
+    scored_answered_count = 0
 
     for q in questions:
         qid_raw = q.get("id") or q.get("question_id") or q.get("candidate_id")
@@ -199,41 +244,78 @@ def calculate_qa_score(
         ans = answers_by_qid.get(qid) if qid else None
 
         if not ans or ans.get("status") == "skipped":
-            # Skipped answer contributes 0.0
             question_scores.append(0.0)
             continue
 
-        # Check for explicit assessment score
-        score = None
-        asm = assessments_by_qid.get(qid) if qid else None
-        if asm:
-            if "score" in asm and asm["score"] is not None:
-                score = float(asm["score"])
-            elif "normalized_score" in asm and asm["normalized_score"] is not None:
-                score = float(asm["normalized_score"])
-
-            # Extract evidence
-            e_ids = asm.get("evidence_ids", [])
-            for eid in e_ids:
-                if eid not in evidence_ids:
-                    evidence_ids.append(eid)
-
-        if score is None:
-            # A transcript proves that the candidate spoke, not that the answer met the
-            # rubric. Never invent credit when an assessment artifact lacks a score.
-            score = 0.0
-
-        question_scores.append(max(0.0, min(1.0, score)))
-
-        # Also collect answer evidence if present
-        ans_eids = ans.get("evidence_ids", [])
-        for eid in ans_eids:
+        for eid in ans.get("evidence_ids", []):
             if eid not in evidence_ids:
                 evidence_ids.append(eid)
 
-    total_q = len(question_scores)
-    final_score = sum(question_scores) / total_q if total_q > 0 else 0.0
-    return round(final_score, 4), evidence_ids
+        asm = assessments_by_qid.get(qid) if qid else None
+        if asm:
+            for eid in asm.get("evidence_ids", []):
+                if eid not in evidence_ids:
+                    evidence_ids.append(eid)
+
+        score = extract_assessment_score(asm)
+        if score is None:
+            # Missing or unverified assessment score must not become an ordinary 0.0.
+            not_evaluated_qids.append(qid or "<unknown>")
+            continue
+
+        scored_answered_count += 1
+        question_scores.append(score)
+
+    limitations: list[Limitation] = []
+    if not_evaluated_qids:
+        limitations.append(
+            Limitation(
+                code="qa_assessment_unavailable",
+                scope="qa_quality",
+                message=(
+                    f"Assessment score was unavailable for {len(not_evaluated_qids)} "
+                    "answered Q&A question(s); excluded from Q&A scoring."
+                ),
+                affected_dimensions=["qa_quality"],
+            )
+        )
+
+    if not_evaluated_qids and scored_answered_count == 0:
+        return QAScoreResult(
+            score=None,
+            evidence_ids=evidence_ids,
+            limitations=limitations,
+            not_evaluated_question_ids=not_evaluated_qids,
+        )
+
+    if not question_scores:
+        return QAScoreResult(
+            score=None,
+            evidence_ids=evidence_ids,
+            limitations=limitations,
+            not_evaluated_question_ids=not_evaluated_qids,
+        )
+
+    final_score = round(sum(question_scores) / len(question_scores), 4)
+    return QAScoreResult(
+        score=final_score,
+        evidence_ids=evidence_ids,
+        limitations=limitations,
+        not_evaluated_question_ids=not_evaluated_qids,
+    )
+
+
+def calculate_qa_score(
+    questions: Sequence[dict[str, Any]],
+    answers: Sequence[dict[str, Any]],
+    assessments: Sequence[dict[str, Any]] | None = None,
+) -> tuple[float | None, list[str]]:
+    """Calculate team Q&A score and gather evidence IDs.
+
+    Returns (None, evidence_ids) when answered questions have no recoverable score.
+    """
+    result = evaluate_qa_scores(questions=questions, answers=answers, assessments=assessments)
+    return result.score, result.evidence_ids
 
 
 def calculate_individual_delivery_scores(
@@ -513,11 +595,14 @@ __all__ = [
     "RUBRIC_CONFIGS",
     "STARTUP_PITCH_RUBRIC_V1",
     "WEIGHTING_POLICY_VERSION",
+    "QAScoreResult",
     "calculate_individual_delivery_scores",
     "calculate_overall_score",
     "calculate_qa_score",
     "canonicalize_dimension",
+    "evaluate_qa_scores",
     "evaluate_rubric",
+    "extract_assessment_score",
     "normalize_effective_weights",
     "score_to_display",
     "score_to_label",

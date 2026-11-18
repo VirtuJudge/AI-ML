@@ -353,7 +353,9 @@ def generate_markdown_report(
                     out.append(f'- **Response:** *"{ans_transcript}"*')
 
             ass_score = ass.get("score")
-            if ass_score is not None:
+            if ass.get("status") == "not_evaluated" and ans_status != "skipped":
+                out.append("- **Assessment Score:** Not Evaluated")
+            elif ass_score is not None:
                 ass_disp = score_to_display(float(ass_score))
                 ass_label = _label_title(score_to_label(float(ass_score)))
                 out.append(f"- **Assessment Score:** {ass_label} ({ass_disp}/100)")

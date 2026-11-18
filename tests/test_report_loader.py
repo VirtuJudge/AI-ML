@@ -1,10 +1,11 @@
 """Unit tests for report evidence and Q&A loader (app.stages.report_loader)."""
 
+import logging
 from pathlib import Path
 
 import pytest
 
-from app.contracts import ArtifactRef, Limitation
+from app.contracts import ArtifactRef
 from app.stages.report_loader import (
     ReportEvidenceBundle,
     build_synthetic_analysis_data,
@@ -12,6 +13,7 @@ from app.stages.report_loader import (
     load_report_evidence,
 )
 from app.storage.local import LocalDiskObjectStorage
+from tests.conftest import load_json_fixture
 
 FAKE_SHA256 = "sha256:" + "0" * 64
 
@@ -194,3 +196,98 @@ async def test_load_report_evidence_none_storage() -> None:
     assert isinstance(bundle, ReportEvidenceBundle)
     assert bundle.session_id == "01JTEST00000000000000000001"
     assert len(bundle.questions) == 3
+
+
+@pytest.mark.asyncio
+async def test_load_report_evidence_recovers_scores_from_assessment_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Backend-shaped qa.json without scores recovers verified scores from assessment.json."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    qa_payload = load_json_fixture("ai/qa_artifact_valid.json")
+    session_id = qa_payload["practice_session_id"]
+
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        build_synthetic_analysis_data(session_id=session_id),
+        artifact_id="01JANALYSIS00000000000010",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        qa_payload,
+        artifact_id=qa_payload["artifact_id"],
+    )
+
+    expected_scores = [0.85, 0.72, 0.68]
+    for idx, (ans, score) in enumerate(zip(qa_payload["answers"], expected_scores, strict=True)):
+        await storage.upload_json(
+            f"ai/session/{session_id}/answers/{ans['id']}/assessment.json",
+            {
+                "artifact_id": ans["assessment_artifact_id"],
+                "answer_id": ans["id"],
+                "practice_session_id": session_id,
+                "question_id": ans["question_id"],
+                "kind": "answer_assessment",
+                "schema_version": 1,
+                "assessment": {
+                    "text": qa_payload["assessments"][idx]["assessment_text"],
+                    "score": score,
+                    "evidence_ids": qa_payload["assessments"][idx]["evidence_ids"],
+                },
+                "limitations": [],
+            },
+            artifact_id=ans["assessment_artifact_id"],
+        )
+
+    bundle = await load_report_evidence(analysis_ref, qa_ref, storage=storage)
+
+    assert [a["score"] for a in bundle.assessments] == expected_scores
+    assert all(a["status"] == "scored" for a in bundle.assessments)
+    assert bundle.limitations == []
+
+
+@pytest.mark.asyncio
+async def test_load_report_evidence_rejects_mismatched_assessment_artifact(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verification failure on assessment.json marks answer not_evaluated with safe limitation."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    qa_payload = load_json_fixture("ai/qa_artifact_valid.json")
+    session_id = qa_payload["practice_session_id"]
+
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        build_synthetic_analysis_data(session_id=session_id),
+        artifact_id="01JANALYSIS00000000000011",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        qa_payload,
+        artifact_id=qa_payload["artifact_id"],
+    )
+
+    first_ans = qa_payload["answers"][0]
+    secret_key = f"ai/session/{session_id}/answers/{first_ans['id']}/assessment.json"
+    await storage.upload_json(
+        secret_key,
+        {
+            "artifact_id": "01JWRONGARTIFACT000000000",
+            "answer_id": first_ans["id"],
+            "practice_session_id": session_id,
+            "question_id": first_ans["question_id"],
+            "kind": "answer_assessment",
+            "schema_version": 1,
+            "assessment": {"text": "TAMPERED_SECRET_TEXT", "score": 0.99, "evidence_ids": []},
+        },
+    )
+
+    caplog.set_level(logging.WARNING)
+    bundle = await load_report_evidence(analysis_ref, qa_ref, storage=storage)
+
+    assert all(a["status"] == "not_evaluated" for a in bundle.assessments)
+    assert all(a["score"] is None for a in bundle.assessments)
+    codes = {lim.code for lim in bundle.limitations}
+    assert "qa_assessment_verification_failed" in codes
+    assert "qa_assessment_unavailable" in codes
+    assert secret_key not in caplog.text
+    assert "TAMPERED_SECRET_TEXT" not in caplog.text

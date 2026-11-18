@@ -14,7 +14,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.contracts import ArtifactRef, Limitation
-from app.storage.base import ObjectStorageProtocol
+from app.stages.scoring import extract_assessment_score
+from app.storage.base import ObjectNotFoundError, ObjectStorageProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,291 @@ def build_synthetic_qa_data(session_id: str = "01JTESTSESSION0000000000001") -> 
     }
 
 
+def _append_unique_limitation(limitations: list[Limitation], lim: Limitation) -> None:
+    """Append a Limitation unless an equivalent code/scope/dimension entry is already present."""
+    key = (lim.code, lim.scope, tuple(lim.affected_dimensions))
+    existing = {(item.code, item.scope, tuple(item.affected_dimensions)) for item in limitations}
+    if key not in existing:
+        limitations.append(lim)
+
+
+def _candidate_assessment_keys(answer_id: str, session_ids: list[str]) -> list[str]:
+    """Return ordered, deduplicated object keys for an answer's assessment artifact."""
+    keys: list[str] = []
+    for sid in session_ids:
+        if sid:
+            candidate = f"ai/session/{sid}/answers/{answer_id}/assessment.json"
+            if candidate not in keys:
+                keys.append(candidate)
+    fallback = f"ai/answer/{answer_id}/assessment.json"
+    if fallback not in keys:
+        keys.append(fallback)
+    return keys
+
+
+def _verify_assessment_artifact(
+    payload: Any,
+    *,
+    expected_artifact_id: str | None,
+    expected_answer_id: str,
+    expected_question_id: str,
+    expected_session_id: str,
+) -> tuple[bool, float | None, str | None, list[str], list[Limitation], str | None]:
+    """Verify an assessment.json payload and extract its score, text, evidence, and limitations.
+
+    Returns:
+        (verified, score, assessment_text, evidence_ids, limitations, status)
+    """
+    if not isinstance(payload, dict):
+        return False, None, None, [], [], None
+
+    kind = payload.get("kind")
+    if kind is not None and kind != "answer_assessment":
+        return False, None, None, [], [], None
+
+    if expected_artifact_id:
+        artifact_id = payload.get("artifact_id")
+        if str(artifact_id or "") != expected_artifact_id:
+            return False, None, None, [], [], None
+
+    payload_answer_id = payload.get("answer_id")
+    if payload_answer_id is not None and str(payload_answer_id) != expected_answer_id:
+        return False, None, None, [], [], None
+
+    payload_question_id = payload.get("question_id")
+    if (
+        payload_question_id is not None
+        and expected_question_id
+        and str(payload_question_id) != expected_question_id
+    ):
+        return False, None, None, [], [], None
+
+    payload_session_id = payload.get("practice_session_id")
+    if (
+        payload_session_id is not None
+        and expected_session_id
+        and str(payload_session_id) != expected_session_id
+    ):
+        return False, None, None, [], [], None
+
+    inner = payload.get("assessment")
+    if inner is not None and not isinstance(inner, dict):
+        return False, None, None, [], [], None
+
+    source_dict = inner if isinstance(inner, dict) else payload
+    status_raw = source_dict.get("status") or payload.get("status")
+    status = str(status_raw) if status_raw is not None else None
+
+    raw_text = source_dict.get("text")
+    if raw_text is None:
+        raw_text = payload.get("assessment_text")
+    text = str(raw_text) if isinstance(raw_text, str) else None
+
+    raw_evidence_ids = source_dict.get("evidence_ids")
+    if raw_evidence_ids is None:
+        raw_evidence_ids = payload.get("evidence_ids")
+    evidence_ids = (
+        [str(eid) for eid in raw_evidence_ids if str(eid)]
+        if isinstance(raw_evidence_ids, list)
+        else []
+    )
+
+    artifact_limitations: list[Limitation] = []
+    for raw_lim in payload.get("limitations", []):
+        if isinstance(raw_lim, dict):
+            artifact_limitations.append(Limitation.model_validate(raw_lim))
+        elif isinstance(raw_lim, Limitation):
+            artifact_limitations.append(raw_lim)
+
+    if status == "not_evaluated":
+        return True, None, text, evidence_ids, artifact_limitations, "not_evaluated"
+
+    score = extract_assessment_score(payload)
+    if score is None:
+        return False, None, text, evidence_ids, artifact_limitations, None
+
+    return True, score, text, evidence_ids, artifact_limitations, "scored"
+
+
+async def _recover_missing_assessment_scores(
+    *,
+    questions: list[dict[str, Any]],
+    answers: list[dict[str, Any]],
+    normalized_assessments: list[dict[str, Any]],
+    limitations: list[Limitation],
+    storage: ObjectStorageProtocol | None,
+    session_ids: list[str],
+    expected_session_id: str,
+) -> None:
+    """Read and verify assessment.json artifacts when qa.json omits assessment scores."""
+    answers_by_qid: dict[str, dict[str, Any]] = {}
+    for raw_ans in answers:
+        if not isinstance(raw_ans, dict):
+            continue
+        qid_raw = raw_ans.get("question_id") or raw_ans.get("candidate_id")
+        if qid_raw:
+            answers_by_qid[str(qid_raw)] = raw_ans
+
+    assessments_by_qid: dict[str, dict[str, Any]] = {}
+    for asmt in normalized_assessments:
+        qid_raw = asmt.get("question_id") or asmt.get("candidate_id")
+        if qid_raw:
+            assessments_by_qid[str(qid_raw)] = asmt
+
+    # Build ordered list of (question_id, question_dict, answer_dict) for all non-skipped answers
+    ordered_targets: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    seen_qids: set[str] = set()
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qid_raw = q.get("id") or q.get("question_id") or q.get("candidate_id")
+        if not qid_raw:
+            continue
+        qid = str(qid_raw)
+        seen_qids.add(qid)
+        ans = answers_by_qid.get(qid)
+        if ans and ans.get("status") != "skipped":
+            ordered_targets.append((qid, q, ans))
+
+    for qid, ans in answers_by_qid.items():
+        if qid not in seen_qids and ans.get("status") != "skipped":
+            ordered_targets.append((qid, {}, ans))
+
+    for qid, q, ans in ordered_targets:
+        existing_asm = assessments_by_qid.get(qid)
+        if existing_asm is not None and extract_assessment_score(existing_asm) is not None:
+            continue
+
+        if existing_asm is not None and existing_asm.get("status") == "not_evaluated":
+            _append_unique_limitation(
+                limitations,
+                Limitation(
+                    code="qa_assessment_unavailable",
+                    scope="qa_quality",
+                    message="One or more answered Q&A responses were marked not_evaluated.",
+                    affected_dimensions=["qa_quality"],
+                ),
+            )
+            continue
+
+        answer_id_raw = ans.get("id") or ans.get("answer_id") or q.get("answer_id")
+        answer_id = str(answer_id_raw) if answer_id_raw else ""
+        expected_artifact_id_raw = ans.get("assessment_artifact_id") or (
+            existing_asm.get("assessment_artifact_id") if existing_asm else None
+        )
+        expected_artifact_id = str(expected_artifact_id_raw) if expected_artifact_id_raw else None
+
+        recovered = False
+        verification_failed = False
+
+        if storage is not None and answer_id:
+            for key in _candidate_assessment_keys(answer_id, session_ids):
+                try:
+                    artifact_payload = await storage.read_json(key)
+                except ObjectNotFoundError:
+                    continue
+                except Exception as exc:
+                    logger.warning(
+                        "Failed reading assessment artifact for answer '%s' (%s).",
+                        answer_id,
+                        type(exc).__name__,
+                    )
+                    break
+
+                (
+                    verified,
+                    score,
+                    text,
+                    evidence_ids,
+                    artifact_lims,
+                    art_status,
+                ) = _verify_assessment_artifact(
+                    artifact_payload,
+                    expected_artifact_id=expected_artifact_id,
+                    expected_answer_id=answer_id,
+                    expected_question_id=qid,
+                    expected_session_id=expected_session_id,
+                )
+                for lim in artifact_lims:
+                    _append_unique_limitation(limitations, lim)
+
+                if not verified:
+                    verification_failed = True
+                    logger.warning(
+                        "Assessment artifact verification failed for answer '%s'.",
+                        answer_id,
+                    )
+                    break
+
+                target_asm = existing_asm
+                if target_asm is None:
+                    target_asm = {"question_id": qid}
+                    normalized_assessments.append(target_asm)
+                    assessments_by_qid[qid] = target_asm
+
+                target_asm["answer_id"] = answer_id
+                if expected_artifact_id and not target_asm.get("assessment_artifact_id"):
+                    target_asm["assessment_artifact_id"] = expected_artifact_id
+                elif not target_asm.get("assessment_artifact_id") and isinstance(
+                    artifact_payload, dict
+                ):
+                    art_id = artifact_payload.get("artifact_id")
+                    if art_id:
+                        target_asm["assessment_artifact_id"] = str(art_id)
+
+                if not target_asm.get("assessment_text") and text:
+                    target_asm["assessment_text"] = text
+                if not target_asm.get("evidence_ids") and evidence_ids:
+                    target_asm["evidence_ids"] = evidence_ids
+
+                if art_status == "not_evaluated" or score is None:
+                    target_asm["score"] = None
+                    target_asm["status"] = "not_evaluated"
+                else:
+                    target_asm["score"] = score
+                    target_asm["status"] = "scored"
+                    recovered = True
+                break
+
+        if not recovered:
+            target_asm = existing_asm
+            if target_asm is None:
+                target_asm = {"question_id": qid}
+                normalized_assessments.append(target_asm)
+                assessments_by_qid[qid] = target_asm
+            target_asm["score"] = None
+            target_asm["status"] = "not_evaluated"
+            if answer_id and not target_asm.get("answer_id"):
+                target_asm["answer_id"] = answer_id
+
+            if verification_failed:
+                _append_unique_limitation(
+                    limitations,
+                    Limitation(
+                        code="qa_assessment_verification_failed",
+                        scope="qa_quality",
+                        message=(
+                            "Answer assessment artifact failed verification for one or more "
+                            "answered Q&A responses."
+                        ),
+                        affected_dimensions=["qa_quality"],
+                    ),
+                )
+            else:
+                _append_unique_limitation(
+                    limitations,
+                    Limitation(
+                        code="qa_assessment_unavailable",
+                        scope="qa_quality",
+                        message=(
+                            "Answer assessment score was unavailable for one or more "
+                            "answered Q&A responses."
+                        ),
+                        affected_dimensions=["qa_quality"],
+                    ),
+                )
+
+
 async def load_report_evidence(
     analysis_ref: ArtifactRef,
     qa_ref: ArtifactRef,
@@ -311,12 +597,21 @@ async def load_report_evidence(
         qa_data = build_synthetic_qa_data(session_id=analysis_data.get("session_id", "session_001"))
 
     # Extract session identifiers
+    analysis_key_parts = analysis_ref.object_key.split("/")
+    analysis_session_from_key = (
+        analysis_key_parts[2]
+        if analysis_ref.object_key.startswith("ai/session/") and len(analysis_key_parts) >= 4
+        else ""
+    )
+    qa_session_id = str(qa_data.get("practice_session_id") or "")
     session_id = (
         analysis_data.get("session_id")
         or analysis_data.get("practice_session_id")
+        or qa_session_id
+        or analysis_session_from_key
         or analysis_ref.artifact_id
     )
-    practice_session_id = analysis_data.get("practice_session_id", session_id)
+    practice_session_id = analysis_data.get("practice_session_id") or qa_session_id or session_id
 
     # Extract transcript
     transcript_info = analysis_data.get("transcript", {})
@@ -348,15 +643,15 @@ async def load_report_evidence(
     limitations: list[Limitation] = []
     for lim in analysis_data.get("limitations", []):
         if isinstance(lim, dict):
-            limitations.append(Limitation.model_validate(lim))
+            _append_unique_limitation(limitations, Limitation.model_validate(lim))
         elif isinstance(lim, Limitation):
-            limitations.append(lim)
+            _append_unique_limitation(limitations, lim)
 
     for lim in qa_data.get("limitations", []):
         if isinstance(lim, dict):
-            limitations.append(Limitation.model_validate(lim))
+            _append_unique_limitation(limitations, Limitation.model_validate(lim))
         elif isinstance(lim, Limitation):
-            limitations.append(lim)
+            _append_unique_limitation(limitations, lim)
 
     # Extract Q&A elements
     questions = qa_data.get("questions", [])
@@ -384,6 +679,21 @@ async def load_report_evidence(
             if not normalized.get("evidence_ids"):
                 normalized["evidence_ids"] = nested.get("evidence_ids", [])
         normalized_assessments.append(normalized)
+
+    candidate_session_ids = [
+        sid
+        for sid in (qa_session_id, practice_session_id, session_id, analysis_session_from_key)
+        if sid
+    ]
+    await _recover_missing_assessment_scores(
+        questions=questions,
+        answers=answers,
+        normalized_assessments=normalized_assessments,
+        limitations=limitations,
+        storage=storage,
+        session_ids=candidate_session_ids,
+        expected_session_id=qa_session_id,
+    )
 
     return ReportEvidenceBundle(
         session_id=session_id,

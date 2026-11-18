@@ -332,6 +332,107 @@ class Evaluation(BaseModel):
     reproducibility: dict[str, Any] = Field(default_factory=dict)
 
 
+class QAArtifactQuestion(BaseModel):
+    """Question entry inside a serialized qa.json artifact."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    kind: Literal["primary", "follow_up"] | str = "primary"
+    position: int = 1
+    text: str
+    reason: str = ""
+    rubric_dimension: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    answer_id: str | None = None
+    parent_answer_id: str | None = None
+    state: str = "answered"
+
+
+class QAArtifactAnswer(BaseModel):
+    """Answer entry inside a serialized qa.json artifact."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    question_id: str
+    answered_by: str = ""
+    status: str = "submitted"
+    audio_asset_version_id: str | None = None
+    transcript_artifact_id: str | None = None
+    assessment_artifact_id: str | None = None
+    duration_ms: int | None = None
+    submitted_at: str | None = None
+    transcript: str | None = None
+
+
+class QAArtifactAssessment(BaseModel):
+    """Assessment entry inside a serialized qa.json artifact.
+
+    Backend currently serializes question_id, assessment_artifact_id,
+    assessment_text, and evidence_ids without score or status; the report
+    stage recovers score/status from the verified assessment.json artifact
+    when absent.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    question_id: str
+    assessment_artifact_id: str | None = None
+    assessment_text: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: ScoreStatus | None = None
+    answer_id: str | None = None
+
+
+class QAArtifact(BaseModel):
+    """Serialized qa.json round artifact consumed by generate_report."""
+
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: int = 1
+    artifact_id: str
+    qa_round_id: str
+    practice_session_id: str
+    analysis_attempt: int | None = None
+    questions: list[QAArtifactQuestion] = Field(default_factory=list)
+    answers: list[QAArtifactAnswer] = Field(default_factory=list)
+    assessments: list[QAArtifactAssessment] = Field(default_factory=list)
+    limitations: list[Limitation] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnswerAssessmentDetail(BaseModel):
+    """Inner assessment payload persisted in assessment.json."""
+
+    model_config = ConfigDict(extra="allow")
+
+    text: str = ""
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: ScoreStatus | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AnswerAssessmentArtifact(BaseModel):
+    """Derived answer_assessment artifact persisted at assessment.json."""
+
+    model_config = ConfigDict(extra="allow")
+
+    artifact_id: str
+    answer_id: str
+    practice_session_id: str | None = None
+    question_id: str
+    kind: Literal["answer_assessment"] = "answer_assessment"
+    schema_version: int = 1
+    producer_version: str = ""
+    source_artifact_ids: list[str] = Field(default_factory=list)
+    created_at: str = ""
+    assessment: AnswerAssessmentDetail
+    follow_up: FollowUpQuestion | None = None
+    limitations: list[Limitation] = Field(default_factory=list)
+
+
 class ErasureCompleted(BaseModel):
     """Completed payload for AI data erasure."""
 
@@ -429,6 +530,8 @@ __all__ = [
     "AnalyzeAnswerPayload",
     "AnalyzeSessionPayload",
     "AnswerAnalysisCompleted",
+    "AnswerAssessmentArtifact",
+    "AnswerAssessmentDetail",
     "ArtifactRef",
     "AssetInput",
     "AudioAssetInput",
@@ -449,6 +552,10 @@ __all__ = [
     "MemberFeedback",
     "PrimaryQuestion",
     "ProgressPayload",
+    "QAArtifact",
+    "QAArtifactAnswer",
+    "QAArtifactAssessment",
+    "QAArtifactQuestion",
     "QueueMessage",
     "ReportCompleted",
     "RubricRef",

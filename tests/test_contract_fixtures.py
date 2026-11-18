@@ -14,6 +14,7 @@ from app.contracts import (
     FailedPayload,
     GenerateReportPayload,
     ProgressPayload,
+    QAArtifact,
     QueueMessage,
     ReportCompleted,
     SessionAnalysisCompleted,
@@ -151,3 +152,15 @@ def test_fixtures_dir_fixture(fixtures_dir: Path) -> None:
     """Ensure fixtures_dir points to existing directory containing json files."""
     assert fixtures_dir.is_dir()
     assert (fixtures_dir / "queue_messages" / "analyze_session.json").is_file()
+
+
+def test_qa_artifact_backend_fixture() -> None:
+    """Validate Backend-shaped qa.json shared fixture against QAArtifact contract."""
+    raw = load_json_fixture_text("ai/qa_artifact_valid.json")
+    qa = QAArtifact.model_validate_json(raw)
+    assert qa.schema_version == 1
+    assert len(qa.questions) == 3
+    assert len(qa.answers) == 3
+    assert len(qa.assessments) == 3
+    assert all(a.status == "submitted" for a in qa.answers)
+    assert all(asmt.score is None for asmt in qa.assessments)
