@@ -42,7 +42,8 @@ from app.contracts import (
     WorkerUpdate,
 )
 from app.pipeline import PitchAnalysisPipeline
-from app.stages.common import StageTransientError
+from app.providers.groq_speech import GroqSpeechProviderError
+from app.stages.common import StageError, classify_stage_error
 
 logger = logging.getLogger(__name__)
 
@@ -228,12 +229,39 @@ def create_started_update(message: QueueMessage, pipeline_version: str = "1.0.0"
     )
 
 
+def _default_stage_for_error(exc: BaseException) -> str:
+    """Infer the default pipeline stage when a provider error escapes without stage metadata."""
+    if isinstance(exc, GroqSpeechProviderError):
+        return "speech"
+    return "dispatch"
+
+
+def _failed_payload_for_stage_error(exc: StageError, execution_attempt: int) -> FailedPayload:
+    """Build a safe FailedPayload from a typed StageError."""
+    if exc.retryable:
+        safe_message = (
+            "External provider request timed out before completing the stage."
+            if exc.code == ErrorCode.PROVIDER_TIMEOUT
+            else "A transient external provider error occurred."
+        )
+    else:
+        safe_message = "A non-retryable external provider error occurred."
+    return FailedPayload(
+        stage=exc.stage,
+        code=exc.code,
+        retryable=exc.retryable,
+        attempts=execution_attempt,
+        message=safe_message,
+    )
+
+
 async def process_job(
     message: QueueMessage,
     pipeline: PitchAnalysisPipeline,
     backend_client: BackendClientProtocol | None = None,
     *,
     publish_terminal_update: bool = True,
+    execution_attempt: int = 1,
 ) -> WorkerUpdate:
     """Process an incoming QueueMessage and return the terminal WorkerUpdate."""
     tracker: MonotonicUpdateTracker | None = None
@@ -321,7 +349,7 @@ async def process_job(
                     stage="dispatch",
                     code=ErrorCode.INVALID_JOB_TYPE,
                     retryable=False,
-                    attempts=message.analysis_attempt,
+                    attempts=execution_attempt,
                     message=f"Unsupported job type: {message.job_type}",
                 ),
             )
@@ -377,11 +405,11 @@ async def process_job(
                 stage="validation",
                 code=code,
                 retryable=False,
-                attempts=message.analysis_attempt,
+                attempts=execution_attempt,
                 message=safe_message,
             ),
         )
-    except StageTransientError as exc:
+    except StageError as exc:
         terminal_seq = tracker.next_sequence if tracker else 2
         terminal_update = WorkerUpdate(
             schema_version=1,
@@ -389,31 +417,34 @@ async def process_job(
             status=UpdateStatus.FAILED,
             occurred_at=datetime.now(UTC),
             trace_id=message.trace_id,
-            payload=FailedPayload(
-                stage=getattr(exc, "stage", "speech"),
-                code=ErrorCode.PROVIDER_ERROR,
-                retryable=True,
-                attempts=message.analysis_attempt,
-                message="A transient external provider error occurred.",
-            ),
+            payload=_failed_payload_for_stage_error(exc, execution_attempt),
         )
     except (BackendUnavailableError, BackendUnauthorizedError, JobNotFoundError, JobConflictError):
         raise
-    except Exception:
+    except Exception as exc:
         terminal_seq = tracker.next_sequence if tracker else 2
+        mapped_stage_error = classify_stage_error(
+            exc,
+            stage_name=_default_stage_for_error(exc),
+        )
+        failed_payload = (
+            _failed_payload_for_stage_error(mapped_stage_error, execution_attempt)
+            if mapped_stage_error is not None
+            else FailedPayload(
+                stage="dispatch",
+                code=ErrorCode.INTERNAL_ERROR,
+                retryable=False,
+                attempts=execution_attempt,
+                message="An internal error occurred during job processing.",
+            )
+        )
         terminal_update = WorkerUpdate(
             schema_version=1,
             sequence=terminal_seq,
             status=UpdateStatus.FAILED,
             occurred_at=datetime.now(UTC),
             trace_id=message.trace_id,
-            payload=FailedPayload(
-                stage="dispatch",
-                code=ErrorCode.INTERNAL_ERROR,
-                retryable=False,
-                attempts=message.analysis_attempt,
-                message="An internal error occurred during job processing.",
-            ),
+            payload=failed_payload,
         )
 
     if client_to_use is not None and publish_terminal_update:
@@ -433,8 +464,21 @@ async def _async_process_job_task(
     if backend_client is None:
         backend_client = get_or_create_backend_client()
 
-    retries = getattr(getattr(task, "request", None), "retries", 0)
-    max_retries = getattr(task, "max_retries", 3) if task is not None else 0
+    raw_retries = getattr(getattr(task, "request", None), "retries", 0)
+    retries = (
+        raw_retries
+        if isinstance(raw_retries, int) and not isinstance(raw_retries, bool) and raw_retries >= 0
+        else 0
+    )
+    raw_max_retries = getattr(task, "max_retries", MAX_PROVIDER_RETRIES) if task is not None else 0
+    max_retries = (
+        raw_max_retries
+        if isinstance(raw_max_retries, int)
+        and not isinstance(raw_max_retries, bool)
+        and raw_max_retries >= 0
+        else MAX_PROVIDER_RETRIES
+    )
+    execution_attempt = retries + 1
 
     def retry_or_quarantine(
         *,
@@ -532,14 +576,6 @@ async def _async_process_job_task(
             if isinstance(raw_trace_id, str) and ULID_PATTERN.fullmatch(raw_trace_id)
             else raw_job_id
         )
-        raw_attempt = envelope.get("analysis_attempt", 1)
-        attempt = (
-            raw_attempt
-            if isinstance(raw_attempt, int)
-            and not isinstance(raw_attempt, bool)
-            and raw_attempt >= 0
-            else 1
-        )
         try:
             sequence = await backend_client.get_last_update_sequence(raw_job_id)
         except BackendUnauthorizedError:
@@ -579,7 +615,7 @@ async def _async_process_job_task(
                 stage="validation",
                 code=code,
                 retryable=False,
-                attempts=attempt,
+                attempts=execution_attempt,
                 message=safe_msg,
             ),
         )
@@ -628,6 +664,7 @@ async def _async_process_job_task(
             pipeline,
             backend_client,
             publish_terminal_update=False,
+            execution_attempt=execution_attempt,
         )
         if (
             update is not None
@@ -635,7 +672,7 @@ async def _async_process_job_task(
             and isinstance(update.payload, FailedPayload)
             and update.payload.retryable
             and task is not None
-            and retries < MAX_PROVIDER_RETRIES
+            and retries < min(MAX_PROVIDER_RETRIES, max_retries)
         ):
             countdown = int(min(60, (2**retries) * 5 + random.uniform(0, 2)))
             logger.warning(

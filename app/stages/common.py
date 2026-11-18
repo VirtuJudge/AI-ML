@@ -3,10 +3,19 @@
 import asyncio
 import logging
 import random
+import re
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
-from app.contracts import Limitation
+import httpx
+
+from app.contracts import ErrorCode, Limitation
+from app.providers.groq_pool import (
+    AllKeysExhaustedError,
+    GroqPoolError,
+    GroqRateLimitError,
+)
+from app.providers.groq_speech import ProviderError
 from app.providers.types import AudioObservation, VisualObservation
 
 logger = logging.getLogger(__name__)
@@ -14,9 +23,230 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", VisualObservation, AudioObservation)
 R = TypeVar("R")
 
+_STATUS_CODE_RE = re.compile(
+    r"(?:http\s*|status\s*(?:code)?\s*[:=]?\s*|code\s*[:=]?\s*)\b(\d{3})\b"
+    r"|\b(400|401|403|404|408|413|422|429|500|502|503|504|529)\b"
+)
+_TIMEOUT_KEYWORDS = (
+    "timeout",
+    "timed out",
+    "deadline exceeded",
+    "readtimeout",
+    "connecttimeout",
+    "pooltimeout",
+    "writetimeout",
+)
+_TRANSIENT_KEYWORDS = (
+    "exhausted",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "service unavailable",
+    "temporarily unavailable",
+    "bad gateway",
+    "network error",
+    "connection",
+    "temporarily",
+    "try again",
+    "overloaded",
+)
 
-class StageTransientError(Exception):
+
+class StageError(Exception):
+    """Base error raised by a pipeline stage carrying safe reporting metadata."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        stage: str | None = None,
+        code: ErrorCode = ErrorCode.PROVIDER_ERROR,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self._stage = stage
+        self.code = code
+        self.retryable = retryable
+
+    @property
+    def stage(self) -> str:
+        return self._stage or "speech"
+
+    @stage.setter
+    def stage(self, value: str) -> None:
+        self._stage = value
+
+    @property
+    def has_explicit_stage(self) -> bool:
+        return self._stage is not None
+
+
+class StageTransientError(StageError):
     """Raised when an external provider or I/O operation experiences a transient failure."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        stage: str | None = None,
+        code: ErrorCode = ErrorCode.PROVIDER_ERROR,
+    ) -> None:
+        super().__init__(message, stage=stage, code=code, retryable=True)
+
+
+class StageProviderError(StageError):
+    """Raised when an external provider fails with a non-retryable error."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        stage: str | None = None,
+        code: ErrorCode = ErrorCode.PROVIDER_ERROR,
+    ) -> None:
+        super().__init__(message, stage=stage, code=code, retryable=False)
+
+
+def _stage_error_from_status(
+    status_code: int,
+    *,
+    stage_name: str,
+    exc: BaseException,
+) -> StageError:
+    if status_code in (408, 504):
+        return StageTransientError(
+            f"Stage '{stage_name}' provider HTTP {status_code} timeout ({type(exc).__name__}).",
+            stage=stage_name,
+            code=ErrorCode.PROVIDER_TIMEOUT,
+        )
+    if status_code == 429 or 500 <= status_code < 600:
+        return StageTransientError(
+            f"Stage '{stage_name}' transient HTTP {status_code} failure ({type(exc).__name__}).",
+            stage=stage_name,
+            code=ErrorCode.PROVIDER_ERROR,
+        )
+    return StageProviderError(
+        f"Stage '{stage_name}' non-retryable HTTP {status_code} failure ({type(exc).__name__}).",
+        stage=stage_name,
+        code=ErrorCode.PROVIDER_ERROR,
+    )
+
+
+def classify_stage_error(
+    exc: BaseException,
+    *,
+    stage_name: str,
+    _depth: int = 0,
+) -> StageError | None:
+    """Map provider, timeout, network, and pool failures to typed StageError instances."""
+    if _depth > 5:
+        return None
+
+    if isinstance(exc, StageError):
+        if not exc.has_explicit_stage:
+            exc.stage = stage_name
+        return exc
+
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return StageTransientError(
+            f"Stage '{stage_name}' timed out ({type(exc).__name__}).",
+            stage=stage_name,
+            code=ErrorCode.PROVIDER_TIMEOUT,
+        )
+
+    if isinstance(exc, (ConnectionError, httpx.TransportError, httpx.RequestError)):
+        return StageTransientError(
+            f"Stage '{stage_name}' network failure ({type(exc).__name__}).",
+            stage=stage_name,
+            code=ErrorCode.PROVIDER_ERROR,
+        )
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return _stage_error_from_status(
+            exc.response.status_code,
+            stage_name=stage_name,
+            exc=exc,
+        )
+
+    if isinstance(exc, (ProviderError, GroqPoolError)):
+        if exc.is_timeout:
+            return StageTransientError(
+                f"Stage '{stage_name}' provider timeout ({type(exc).__name__}).",
+                stage=stage_name,
+                code=ErrorCode.PROVIDER_TIMEOUT,
+            )
+        if exc.retryable is True:
+            code = (
+                ErrorCode.PROVIDER_TIMEOUT
+                if exc.status_code in (408, 504)
+                else ErrorCode.PROVIDER_ERROR
+            )
+            return StageTransientError(
+                f"Stage '{stage_name}' transient provider failure ({type(exc).__name__}).",
+                stage=stage_name,
+                code=code,
+            )
+        if exc.retryable is False:
+            return StageProviderError(
+                f"Stage '{stage_name}' non-retryable provider failure ({type(exc).__name__}).",
+                stage=stage_name,
+                code=ErrorCode.PROVIDER_ERROR,
+            )
+        if exc.status_code is not None:
+            return _stage_error_from_status(
+                exc.status_code,
+                stage_name=stage_name,
+                exc=exc,
+            )
+        if exc.__cause__ is not None:
+            cause_mapped = classify_stage_error(
+                exc.__cause__,
+                stage_name=stage_name,
+                _depth=_depth + 1,
+            )
+            if cause_mapped is not None:
+                return cause_mapped
+
+        msg = str(exc).lower()
+        codes = [int(a or b) for a, b in _STATUS_CODE_RE.findall(msg)]
+        if any(kw in msg for kw in _TIMEOUT_KEYWORDS) or any(c in (408, 504) for c in codes):
+            return StageTransientError(
+                f"Stage '{stage_name}' provider timeout ({type(exc).__name__}).",
+                stage=stage_name,
+                code=ErrorCode.PROVIDER_TIMEOUT,
+            )
+        if codes:
+            for status_code in codes:
+                if status_code == 429 or 500 <= status_code < 600:
+                    return _stage_error_from_status(
+                        status_code,
+                        stage_name=stage_name,
+                        exc=exc,
+                    )
+            return _stage_error_from_status(
+                codes[-1],
+                stage_name=stage_name,
+                exc=exc,
+            )
+        if any(kw in msg for kw in _TRANSIENT_KEYWORDS):
+            return StageTransientError(
+                f"Stage '{stage_name}' transient provider failure ({type(exc).__name__}).",
+                stage=stage_name,
+                code=ErrorCode.PROVIDER_ERROR,
+            )
+        if isinstance(exc, (GroqRateLimitError, AllKeysExhaustedError)):
+            return StageTransientError(
+                f"Stage '{stage_name}' provider pool exhausted ({type(exc).__name__}).",
+                stage=stage_name,
+                code=ErrorCode.PROVIDER_ERROR,
+            )
+        return StageProviderError(
+            f"Stage '{stage_name}' non-retryable provider failure ({type(exc).__name__}).",
+            stage=stage_name,
+            code=ErrorCode.PROVIDER_ERROR,
+        )
+
+    return None
 
 
 def validate_observation_timestamps(
@@ -121,7 +351,21 @@ async def with_transient_retries(
     for attempt in range(1, max_attempts + 1):
         try:
             return await operation()
-        except retryable_exceptions as exc:
+        except Exception as exc:
+            if isinstance(exc, StageProviderError):
+                if not exc.has_explicit_stage:
+                    exc.stage = stage_name
+                raise
+
+            mapped = classify_stage_error(exc, stage_name=stage_name)
+            is_retryable = isinstance(exc, retryable_exceptions) or (
+                mapped is not None and mapped.retryable
+            )
+            if not is_retryable:
+                if mapped is not None:
+                    raise mapped from exc
+                raise
+
             if attempt >= max_attempts:
                 logger.warning(
                     "Stage '%s' exhausted all %d retry attempts (%s)",
@@ -129,7 +373,14 @@ async def with_transient_retries(
                     max_attempts,
                     type(exc).__name__,
                 )
+                if isinstance(exc, StageTransientError):
+                    if not exc.has_explicit_stage:
+                        exc.stage = stage_name
+                    raise
+                if mapped is not None:
+                    raise mapped from exc
                 raise
+
             delay = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.1)
             logger.info(
                 "Stage '%s' transient error on attempt %d/%d (%s); retrying in %.2fs",
@@ -145,7 +396,10 @@ async def with_transient_retries(
 
 
 __all__ = [
+    "StageError",
+    "StageProviderError",
     "StageTransientError",
+    "classify_stage_error",
     "validate_observation_timestamps",
     "with_transient_retries",
 ]

@@ -24,6 +24,7 @@ from app.contracts import (
     ArtifactRef,
     EraseAIDataPayload,
     ErasureCompleted,
+    ErrorCode,
     FailedPayload,
     GenerateReportPayload,
     PrimaryQuestion,
@@ -32,6 +33,10 @@ from app.contracts import (
     UpdateStatus,
     WorkerUpdate,
 )
+from app.pipeline import FakePipeline
+from app.providers.fake_speech import FakeSpeechProvider
+from app.providers.groq_speech import GroqSpeechProviderError
+from app.providers.types import TranscriptionResult
 from app.stages.common import StageTransientError
 from app.worker import (
     _async_process_job_task,
@@ -352,3 +357,145 @@ async def test_celery_task_all_job_types_round_trip():
     res_era = await _async_process_job_task(None, era_env, pipeline=pipeline, backend_client=client)
     assert res_era is not None
     assert res_era.status == UpdateStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_celery_task_provider_transient_success_after_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify transient provider error triggers Celery retry and succeeds on next execution."""
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class FlakySpeechProvider(FakeSpeechProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            self.calls += 1
+            # Fail all 3 stage-level attempts on the first worker execution, then succeed.
+            if self.calls <= 3:
+                raise GroqSpeechProviderError("HTTP 503")
+            return await super().transcribe(audio_path)
+
+    envelope = _load_fixture("job_analyze_answer_valid.json")
+    envelope["analysis_attempt"] = 2
+    client = MockBackendClient()
+    pipeline = FakePipeline(speech_provider=FlakySpeechProvider())
+
+    # First worker execution (retries=0 -> attempt 1) triggers Celery task.retry
+    first_task = MagicMock()
+    first_task.request.retries = 0
+    first_task.max_retries = 3
+    first_task.retry.side_effect = RuntimeError("CeleryRetryRaised")
+
+    with pytest.raises(RuntimeError, match="CeleryRetryRaised"):
+        await _async_process_job_task(
+            task=first_task,
+            envelope=envelope,
+            pipeline=pipeline,
+            backend_client=client,
+        )
+    first_task.retry.assert_called_once()
+    assert all(u.status != UpdateStatus.FAILED for _, u in client.updates)
+
+    # Second worker execution (retries=1 -> attempt 2) succeeds and emits COMPLETED
+    second_task = MagicMock()
+    second_task.request.retries = 1
+    second_task.max_retries = 3
+    res = await _async_process_job_task(
+        task=second_task,
+        envelope=envelope,
+        pipeline=pipeline,
+        backend_client=client,
+    )
+    assert res is not None
+    assert res.status == UpdateStatus.COMPLETED
+    assert client.updates[-1][1].status == UpdateStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_celery_task_provider_exhausted_retries_reports_stage_and_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify exhausted transient retries post non-retryable failed with real stage and attempts."""
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class AlwaysFailingSpeechProvider(FakeSpeechProvider):
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            raise GroqSpeechProviderError("HTTP 503")
+
+    envelope = _load_fixture("job_analyze_answer_valid.json")
+    envelope["analysis_attempt"] = 2
+    client = MockBackendClient()
+    pipeline = FakePipeline(speech_provider=AlwaysFailingSpeechProvider())
+
+    exhausted_task = MagicMock()
+    exhausted_task.request.retries = 3
+    exhausted_task.max_retries = 6
+
+    res = await _async_process_job_task(
+        task=exhausted_task,
+        envelope=envelope,
+        pipeline=pipeline,
+        backend_client=client,
+    )
+    exhausted_task.retry.assert_not_called()
+    assert res is not None
+    assert res.status == UpdateStatus.FAILED
+    assert isinstance(res.payload, FailedPayload)
+    assert res.payload.stage == "speech"
+    assert res.payload.code == ErrorCode.PROVIDER_ERROR
+    assert res.payload.retryable is False
+    assert res.payload.attempts == 4
+    assert res.payload.message == "Transient retries exhausted."
+
+
+@pytest.mark.asyncio
+async def test_celery_task_non_retryable_provider_error_skips_retry_and_uses_exec_attempts() -> (
+    None
+):
+    """Verify non-retryable provider failure does not retry and uses request.retries + 1."""
+
+    class NonRetryableSpeechProvider(FakeSpeechProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            self.calls += 1
+            raise GroqSpeechProviderError("HTTP 400 Bad Request")
+
+    speech_provider = NonRetryableSpeechProvider()
+    envelope = _load_fixture("job_analyze_answer_valid.json")
+    envelope["analysis_attempt"] = 2
+    client = MockBackendClient()
+    pipeline = FakePipeline(speech_provider=speech_provider)
+
+    celery_task = MagicMock()
+    celery_task.request.retries = 0
+    celery_task.max_retries = 6
+
+    res = await _async_process_job_task(
+        task=celery_task,
+        envelope=envelope,
+        pipeline=pipeline,
+        backend_client=client,
+    )
+    assert speech_provider.calls == 1
+    celery_task.retry.assert_not_called()
+    assert res is not None
+    assert res.status == UpdateStatus.FAILED
+    assert isinstance(res.payload, FailedPayload)
+    assert res.payload.stage == "speech"
+    assert res.payload.code == ErrorCode.PROVIDER_ERROR
+    assert res.payload.retryable is False
+    assert res.payload.attempts == 1

@@ -260,3 +260,44 @@ async def test_groq_pool_post_multipart_failover() -> None:
 
     assert res == {"text": "transcribed speech"}
     assert client.post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_groq_pool_error_metadata_classification() -> None:
+    """Verify GroqPoolError carries timeout/status/retryable metadata accurately."""
+    from app.providers.groq_pool import GroqPoolError
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.base_url = httpx.URL("https://api.groq.com/openai/v1")
+
+    # 1. Timeout across all keys
+    client.post.side_effect = httpx.ReadTimeout("Timed out")
+    pool = GroqKeyPool(api_keys=["k1", "k2"], http_client=client)
+    with pytest.raises(AllKeysExhaustedError) as timeout_exc:
+        await pool.post_multipart("/audio/transcriptions", data={}, files={})
+    assert timeout_exc.value.is_timeout is True
+    assert timeout_exc.value.retryable is True
+
+    # 2. HTTP 413 non-retryable
+    client.post.side_effect = None
+    client.post.return_value = httpx.Response(
+        status_code=413,
+        text="Too Large",
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+    with pytest.raises(GroqPoolError) as err_413:
+        await pool.post_multipart("/audio/transcriptions", data={}, files={})
+    assert err_413.value.status_code == 413
+    assert err_413.value.retryable is False
+
+    # 3. HTTP 400 across all keys -> non-retryable
+    client.post.return_value = httpx.Response(
+        status_code=400,
+        text="Bad Request",
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+    with pytest.raises(AllKeysExhaustedError) as err_400:
+        await pool.call(model="openai/gpt-oss-120b", messages=[{"role": "user", "content": "hi"}])
+    assert err_400.value.status_code == 400
+    assert err_400.value.retryable is False
+    assert err_400.value.is_timeout is False

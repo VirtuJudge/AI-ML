@@ -619,16 +619,19 @@ class FakePipeline:
             backend_client, job_id, "questions", 0.95, "Generating primary evaluation questions..."
         )
 
-        question_stage_res = await run_question_stage(
-            self.judge_provider,
-            speech_result=speech_res,
-            vision_result=vision_res,
-            audio_result=audio_res,
-            document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
-            visual_observations=updated_visual,
-            audio_observations=updated_audio,
-            rubric_id=job.rubric.rubric_id,
-            extra_limitations=corr_limitations + doc_stage_res.limitations,
+        question_stage_res = await with_transient_retries(
+            lambda: run_question_stage(
+                self.judge_provider,
+                speech_result=speech_res,
+                vision_result=vision_res,
+                audio_result=audio_res,
+                document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
+                visual_observations=updated_visual,
+                audio_observations=updated_audio,
+                rubric_id=job.rubric.rubric_id,
+                extra_limitations=corr_limitations + doc_stage_res.limitations,
+            ),
+            stage_name="questions",
         )
 
         # Inspection point 5: Before final analysis.json upload
@@ -907,16 +910,19 @@ class FakePipeline:
         )
 
         # 1. Run the report stage
-        stage_res = await run_report_stage(
-            report_id=job.report_id,
-            analysis_ref=job.analysis_artifact,
-            qa_ref=job.qa_artifact,
-            speaker_mappings=job.speaker_mappings,
-            storage=self.object_storage,
-            judge_provider=self.judge_provider,
-            rubric_id=job.rubric.rubric_id,
-            rubric_version=job.rubric.version,
-            pipeline_version=PRODUCER_VERSION,
+        stage_res = await with_transient_retries(
+            lambda: run_report_stage(
+                report_id=job.report_id,
+                analysis_ref=job.analysis_artifact,
+                qa_ref=job.qa_artifact,
+                speaker_mappings=job.speaker_mappings,
+                storage=self.object_storage,
+                judge_provider=self.judge_provider,
+                rubric_id=job.rubric.rubric_id,
+                rubric_version=job.rubric.version,
+                pipeline_version=PRODUCER_VERSION,
+            ),
+            stage_name="reporting",
         )
 
         # Inspection point 3: Before final report.md / evaluation.json upload
