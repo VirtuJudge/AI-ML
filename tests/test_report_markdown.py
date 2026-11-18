@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import pytest
+
 from app.contracts import (
     Evaluation,
     FeedbackSection,
@@ -13,8 +15,16 @@ from app.contracts import (
     SpeakingInterval,
 )
 from app.stages.report_markdown import (
+    SCORE_LABEL_DISPLAY,
     format_speaker_metrics_highlight,
     generate_markdown_report,
+)
+from app.stages.scoring import (
+    RUBRIC_DEFINITIONS,
+    STARTUP_PITCH_RUBRIC_V1,
+    LabelBands,
+    RubricDefinition,
+    score_to_label,
 )
 
 
@@ -628,3 +638,67 @@ def test_generate_markdown_report_question_id_candidate_id_lookup() -> None:
     assert "Alex CTO" in md
     assert "Our gross margin is 82% at current cloud volume." in md
     assert "Clear software-like margin economics." in md
+
+
+def test_generate_markdown_report_computes_labels_via_score_to_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Markdown and evaluation.json derive all score labels from score_to_label."""
+    evaluation = _make_sample_evaluation()
+    # Boundary and reproduction scores across components and overall score
+    evaluation.overall_score = 0.80
+    evaluation.components[0].normalized_score = 0.39
+    evaluation.components[0].display_score = 39
+    evaluation.components[0].label = "developing"  # stale label should not win over score_to_label
+    evaluation.components[1].normalized_score = 0.40
+    evaluation.components[1].display_score = 40
+    evaluation.components[2].normalized_score = 0.59
+    evaluation.components[2].display_score = 59
+    evaluation.components[3].normalized_score = 0.60
+    evaluation.components[3].display_score = 60
+    evaluation.components[4].normalized_score = 0.79
+    evaluation.components[4].display_score = 79
+    evaluation.components[5].normalized_score = 0.82
+    evaluation.components[5].display_score = 82
+
+    evaluation.member_feedback[0].delivery_components[0].normalized_score = 0.62
+    evaluation.member_feedback[0].delivery_components[0].display_score = 62
+    evaluation.member_feedback[0].delivery_components[1].normalized_score = 0.80
+    evaluation.member_feedback[0].delivery_components[1].display_score = 80
+
+    qa_data = _make_sample_qa_data()
+    qa_data["assessments"][0]["score"] = 0.62
+    qa_data["assessments"][1]["score"] = 0.80
+
+    md = generate_markdown_report(evaluation, qa_data=qa_data)
+
+    assert "**Strong (80/100)**" in md
+    assert "| Pitch Content & Evidence | 25% | 25% | 39 / 100 | Needs Work | `scored` |" in md
+    assert (
+        "| Business & Problem-Solution Reasoning | 20% | 20% | 40 / 100 | Developing | `scored` |"
+        in md
+    )
+    assert "| Technical Feasibility | 15% | 15% | 59 / 100 | Developing | `scored` |" in md
+    assert "| Delivery & Body Language | 15% | 15% | 60 / 100 | Good | `scored` |" in md
+    assert "| Timing & Speech Mechanics | 5% | 5% | 79 / 100 | Good | `scored` |" in md
+    assert "| Q&A Quality | 20% | 20% | 82 / 100 | Strong | `scored` |" in md
+    assert "| Delivery & Body Language | 62 / 100 | Good |" in md
+    assert "| Timing & Speech Mechanics | 80 / 100 | Strong |" in md
+    assert "- **Assessment Score:** Good (62/100)" in md
+    assert "- **Assessment Score:** Strong (80/100)" in md
+
+    # Rubric-defined custom bands also flow identically into Markdown
+    custom_rubric = RubricDefinition(
+        rubric_id="custom_pitch",
+        version=1,
+        weights=STARTUP_PITCH_RUBRIC_V1,
+        label_bands=LabelBands(developing=50, good=70, strong=90),
+    )
+    monkeypatch.setitem(RUBRIC_DEFINITIONS, "custom_pitch", custom_rubric)
+    evaluation.rubric = RubricRef(rubric_id="custom_pitch", version=1)
+
+    custom_md = generate_markdown_report(evaluation, qa_data=qa_data)
+    expected_overall = SCORE_LABEL_DISPLAY[score_to_label(0.80, rubric_id="custom_pitch") or ""]
+    assert f"**{expected_overall} (80/100)**" in custom_md
+    assert "- **Assessment Score:** Developing (62/100)" in custom_md
+    assert "- **Assessment Score:** Good (80/100)" in custom_md

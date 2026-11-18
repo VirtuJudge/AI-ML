@@ -1,22 +1,27 @@
 """Unit tests for deterministic rubric scoring engine and Q&A integration."""
 
 import pytest
+from pydantic import ValidationError
 
 from app.contracts import Limitation, ScoreComponent
 from app.stages.scoring import (
+    DEFAULT_LABEL_BANDS,
+    RUBRIC_DEFINITIONS,
     STARTUP_PITCH_RUBRIC_V1,
     WEIGHTING_POLICY_VERSION,
+    LabelBands,
+    RubricDefinition,
     calculate_individual_delivery_scores,
     calculate_overall_score,
     calculate_qa_score,
     canonicalize_dimension,
     evaluate_qa_scores,
     evaluate_rubric,
+    get_rubric_definition,
     normalize_effective_weights,
     score_to_display,
     score_to_label,
 )
-
 
 # ============================================================================
 # 1. Score Display and Label Mapping Tests
@@ -34,28 +39,33 @@ def test_score_to_display() -> None:
 
 
 def test_score_to_label() -> None:
-    """Verify label boundaries on [0, 100] display scale:
+    """Verify default label boundaries on [0, 100] display scale:
 
-    - [0, 45): needs_work
-    - [45, 65): developing
-    - [65, 85): good
-    - [85, 100]: strong
+    - [0, 40): needs_work
+    - [40, 60): developing
+    - [60, 80): good
+    - [80, 100]: strong
     """
     assert score_to_label(0.0) == "needs_work"
-    assert score_to_label(0.44) == "needs_work"
-    assert score_to_label(0.444) == "needs_work"
+    assert score_to_label(0.39) == "needs_work"
+    assert score_to_label(0.394) == "needs_work"
 
-    assert score_to_label(0.45) == "developing"
+    assert score_to_label(0.395) == "developing"
+    assert score_to_label(0.40) == "developing"
     assert score_to_label(0.50) == "developing"
-    assert score_to_label(0.64) == "developing"
+    assert score_to_label(0.59) == "developing"
+    assert score_to_label(0.594) == "developing"
 
-    assert score_to_label(0.65) == "good"
+    assert score_to_label(0.595) == "good"
+    assert score_to_label(0.60) == "good"
+    assert score_to_label(0.62) == "good"
     assert score_to_label(0.70) == "good"
-    assert score_to_label(0.84) == "good"
+    assert score_to_label(0.79) == "good"
+    assert score_to_label(0.794) == "good"
 
-    assert score_to_label(0.80) == "good"
-    assert score_to_label(0.795) == "good"
-    assert score_to_label(0.825) == "good"
+    assert score_to_label(0.795) == "strong"
+    assert score_to_label(0.80) == "strong"
+    assert score_to_label(0.82) == "strong"
     assert score_to_label(0.85) == "strong"
     assert score_to_label(0.95) == "strong"
     assert score_to_label(1.00) == "strong"
@@ -709,3 +719,113 @@ def test_calculate_individual_delivery_scores_missing_video() -> None:
     assert del_comp.status == "not_evaluated"
     assert del_comp.limitation_code == "no_visual_observations"
     assert timing_comp.status == "scored"
+
+
+@pytest.mark.parametrize(
+    ("normalized_score", "expected_display", "expected_label"),
+    [
+        (0.39, 39, "needs_work"),
+        (0.40, 40, "developing"),
+        (0.59, 59, "developing"),
+        (0.60, 60, "good"),
+        (0.79, 79, "good"),
+        (0.80, 80, "strong"),
+    ],
+)
+def test_score_to_label_exact_boundaries(
+    normalized_score: float,
+    expected_display: int,
+    expected_label: str,
+) -> None:
+    """Verify exact boundary transitions at 39/40, 59/60, and 79/80."""
+    assert score_to_display(normalized_score) == expected_display
+    assert score_to_label(normalized_score) == expected_label
+
+
+def test_label_bands_come_from_rubric_definition_and_default_to_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify label bands default to 40/60/80 and honor per-rubric overrides."""
+    default_def = get_rubric_definition("startup_pitch")
+    assert default_def.label_bands == DEFAULT_LABEL_BANDS
+    assert default_def.label_bands == LabelBands(developing=40, good=60, strong=80)
+
+    # Unknown rubric IDs fall back to the default 40/60/80 bands
+    assert get_rubric_definition("unknown_rubric").label_bands == LabelBands(
+        developing=40, good=60, strong=80
+    )
+    assert score_to_label(0.62, rubric_id="unknown_rubric") == "good"
+    assert score_to_label(0.82, rubric_id="unknown_rubric") == "strong"
+
+    # Custom rubric definition overrides label bands in score_to_label, evaluate_rubric,
+    # and calculate_individual_delivery_scores
+    custom_rubric = RubricDefinition(
+        rubric_id="strict_pitch",
+        version=1,
+        weights=STARTUP_PITCH_RUBRIC_V1,
+        label_bands=LabelBands(developing=50, good=70, strong=90),
+    )
+    monkeypatch.setitem(RUBRIC_DEFINITIONS, "strict_pitch", custom_rubric)
+
+    assert score_to_label(0.49, rubric_id="strict_pitch") == "needs_work"
+    assert score_to_label(0.50, rubric_id="strict_pitch") == "developing"
+    assert score_to_label(0.69, rubric_id="strict_pitch") == "developing"
+    assert score_to_label(0.70, rubric_id="strict_pitch") == "good"
+    assert score_to_label(0.89, rubric_id="strict_pitch") == "good"
+    assert score_to_label(0.90, rubric_id="strict_pitch") == "strong"
+
+    _, components = evaluate_rubric(
+        {
+            "pitch_content_and_evidence": 0.85,
+            "business_and_problem_solution_reasoning": 0.65,
+            "technical_feasibility": 0.45,
+            "delivery_and_body_language": 0.90,
+            "timing_and_speech_mechanics": 0.70,
+            "qa_quality": 0.50,
+        },
+        rubric_id="strict_pitch",
+    )
+    labels_by_dim = {c.dimension: c.label for c in components}
+    assert labels_by_dim == {
+        "pitch_content_and_evidence": "good",
+        "business_and_problem_solution_reasoning": "developing",
+        "technical_feasibility": "needs_work",
+        "delivery_and_body_language": "strong",
+        "timing_and_speech_mechanics": "good",
+        "qa_quality": "developing",
+    }
+
+    delivery_comps = calculate_individual_delivery_scores(
+        {
+            "speaking_time_ms": 60000,
+            "windows": [
+                {
+                    "acoustic": {
+                        "speaking_rate_wpm": 140.0,
+                        "pause_duration_ms": 200,
+                        "filler_count": 0,
+                    },
+                    "visual": {
+                        "gaze_direction": 1.0,
+                        "posture_openness": 0.88,
+                        "shoulder_symmetry_ratio": 0.96,
+                    },
+                }
+            ],
+        },
+        rubric_id="strict_pitch",
+    )
+    # delivery_norm = 0.91 -> strong under strict_pitch (>=90); timing_norm = 0.95 -> strong
+    assert all(c.label == "strong" for c in delivery_comps)
+
+
+def test_label_bands_validation_rejects_invalid_order() -> None:
+    """Verify LabelBands rejects non-increasing or out-of-range boundaries."""
+    with pytest.raises(ValidationError):
+        LabelBands(developing=60, good=60, strong=80)
+    with pytest.raises(ValidationError):
+        LabelBands(developing=40, good=80, strong=75)
+    with pytest.raises(ValidationError):
+        LabelBands(developing=-1, good=60, strong=80)
+    with pytest.raises(ValidationError):
+        LabelBands(developing=40, good=60, strong=101)

@@ -10,9 +10,9 @@ import datetime
 from typing import Any
 from uuid import UUID
 
-from app.contracts import Evaluation
+from app.contracts import Evaluation, ScoreComponent
 from app.stages.aggregation import compute_speaker_metrics_summary, format_duration_ms
-from app.stages.scoring import score_to_display, score_to_label
+from app.stages.scoring import LabelBands, score_to_display, score_to_label
 
 DIMENSION_DISPLAY_NAMES: dict[str, str] = {
     "pitch_content_and_evidence": "Pitch Content & Evidence",
@@ -41,6 +41,20 @@ def _label_title(label: str | None) -> str:
     if not label:
         return "Not Rated"
     return SCORE_LABEL_DISPLAY.get(label, label.replace("_", " ").title())
+
+
+def _component_label_title(
+    comp: ScoreComponent,
+    *,
+    rubric_id: str,
+    label_bands: LabelBands | None = None,
+) -> str:
+    """Resolve a component's display label via the shared score_to_label function."""
+    if comp.normalized_score is not None:
+        return _label_title(
+            score_to_label(comp.normalized_score, rubric_id=rubric_id, label_bands=label_bands)
+        )
+    return _label_title(comp.label) if comp.label else "-"
 
 
 def _display_answered_by(value: Any) -> str:
@@ -142,15 +156,17 @@ def generate_markdown_report(
     session_date: str | None = None,
     qa_data: dict[str, Any] | None = None,
     by_speaker: dict[str, Any] | None = None,
+    label_bands: LabelBands | None = None,
 ) -> str:
     """Generate the complete, canonical markdown report (report.md) from an Evaluation model."""
     date_str = session_date or datetime.date.today().isoformat()
     overall_score_val = evaluation.overall_score
+    rubric_id = evaluation.rubric.rubric_id
 
     # Overall score badge
     if overall_score_val is not None:
         display_score = score_to_display(overall_score_val)
-        label_key = score_to_label(overall_score_val)
+        label_key = score_to_label(overall_score_val, rubric_id=rubric_id, label_bands=label_bands)
         label_str = _label_title(label_key)
         score_badge = f"{label_str} ({display_score}/100)"
     else:
@@ -188,7 +204,7 @@ def generate_markdown_report(
         cfg_wt = f"{comp.configured_weight * 100:.0f}%"
         eff_wt = f"{comp.effective_weight * 100:.0f}%" if comp.effective_weight is not None else "-"
         score_str = f"{comp.display_score} / 100" if comp.display_score is not None else "-"
-        label_disp = _label_title(comp.label) if comp.label else "-"
+        label_disp = _component_label_title(comp, rubric_id=rubric_id, label_bands=label_bands)
         out.append(
             f"| {dim_name} | {cfg_wt} | {eff_wt} | {score_str} | {label_disp} | `{comp.status}` |"
         )
@@ -274,7 +290,9 @@ def generate_markdown_report(
                 for dc in member.delivery_components:
                     d_name = _dim_title(dc.dimension)
                     d_score = f"{dc.display_score} / 100" if dc.display_score is not None else "-"
-                    d_label = _label_title(dc.label) if dc.label else "-"
+                    d_label = _component_label_title(
+                        dc, rubric_id=rubric_id, label_bands=label_bands
+                    )
                     out.append(f"| {d_name} | {d_score} | {d_label} |")
                 out.append("")
 
@@ -357,7 +375,9 @@ def generate_markdown_report(
                 out.append("- **Assessment Score:** Not Evaluated")
             elif ass_score is not None:
                 ass_disp = score_to_display(float(ass_score))
-                ass_label = _label_title(score_to_label(float(ass_score)))
+                ass_label = _label_title(
+                    score_to_label(float(ass_score), rubric_id=rubric_id, label_bands=label_bands)
+                )
                 out.append(f"- **Assessment Score:** {ass_label} ({ass_disp}/100)")
 
             ass_text = ass.get("assessment_text")

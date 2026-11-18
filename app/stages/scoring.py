@@ -10,6 +10,8 @@ import math
 from collections.abc import Sequence
 from typing import Any, NamedTuple
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from app.contracts import (
     Limitation,
     ScoreComponent,
@@ -21,6 +23,44 @@ logger = logging.getLogger(__name__)
 # Weighting policy identifier recorded in Evaluation.reproducibility metadata
 WEIGHTING_POLICY_VERSION: str = "fixed_qa_20_v1"
 FIXED_WEIGHT_DIMENSIONS: frozenset[str] = frozenset({"qa_quality"})
+
+
+class LabelBands(BaseModel):
+    """Display-scale [0, 100] lower boundaries for qualitative rubric score labels.
+
+    Boundaries partition [0, 100] into:
+    - [0, developing): needs_work
+    - [developing, good): developing
+    - [good, strong): good
+    - [strong, 100]: strong
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    developing: int = 40
+    good: int = 60
+    strong: int = 80
+
+    @model_validator(mode="after")
+    def validate_boundaries(self) -> "LabelBands":
+        if not (0 <= self.developing < self.good < self.strong <= 100):
+            raise ValueError("Label bands must satisfy 0 <= developing < good < strong <= 100")
+        return self
+
+
+DEFAULT_LABEL_BANDS = LabelBands()
+
+
+class RubricDefinition(BaseModel):
+    """Versioned rubric definition with dimension weights and score label bands."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rubric_id: str
+    version: int = 1
+    weights: dict[str, float]
+    label_bands: LabelBands = Field(default_factory=LabelBands)
+
 
 # Startup pitch v1 rubric definition (weights sum to 1.0)
 STARTUP_PITCH_RUBRIC_V1: dict[str, float] = {
@@ -42,9 +82,33 @@ DIMENSION_ALIASES: dict[str, str] = {
     "qa": "qa_quality",
 }
 
-RUBRIC_CONFIGS: dict[str, dict[str, float]] = {
-    "startup_pitch": STARTUP_PITCH_RUBRIC_V1,
+STARTUP_PITCH_RUBRIC_DEFINITION = RubricDefinition(
+    rubric_id="startup_pitch",
+    version=1,
+    weights=STARTUP_PITCH_RUBRIC_V1,
+    label_bands=DEFAULT_LABEL_BANDS,
+)
+
+RUBRIC_DEFINITIONS: dict[str, RubricDefinition] = {
+    "startup_pitch": STARTUP_PITCH_RUBRIC_DEFINITION,
 }
+
+RUBRIC_CONFIGS: dict[str, dict[str, float]] = {
+    rid: definition.weights for rid, definition in RUBRIC_DEFINITIONS.items()
+}
+
+
+def get_rubric_definition(rubric_id: str = "startup_pitch") -> RubricDefinition:
+    """Return the rubric definition for ``rubric_id``, defaulting to startup_pitch."""
+    if rubric_id in RUBRIC_DEFINITIONS:
+        return RUBRIC_DEFINITIONS[rubric_id]
+    if rubric_id in RUBRIC_CONFIGS:
+        return RubricDefinition(
+            rubric_id=rubric_id,
+            weights=RUBRIC_CONFIGS[rubric_id],
+            label_bands=DEFAULT_LABEL_BANDS,
+        )
+    return STARTUP_PITCH_RUBRIC_DEFINITION
 
 
 def canonicalize_dimension(dim: str) -> str:
@@ -59,25 +123,31 @@ def score_to_display(normalized_score: float | None) -> int | None:
     return max(0, min(100, int(normalized_score * 100.0 + 0.5)))
 
 
-def score_to_label(normalized_score: float | None) -> ScoreLabel | None:
-    """Map normalized score to qualitative rubric label.
+def score_to_label(
+    normalized_score: float | None,
+    *,
+    rubric_id: str = "startup_pitch",
+    label_bands: LabelBands | None = None,
+) -> ScoreLabel | None:
+    """Map normalized score to qualitative rubric label using rubric label bands.
 
-    Boundaries on display scale [0, 100]:
-    - [0, 45): needs_work
-    - [45, 65): developing
-    - [65, 85): good
-    - [85, 100]: strong (reserved for exceptional, well-substantiated work)
+    Default boundaries on display scale [0, 100]:
+    - [0, 40): needs_work
+    - [40, 60): developing
+    - [60, 80): good
+    - [80, 100]: strong
     """
     if normalized_score is None:
         return None
     display = score_to_display(normalized_score)
     if display is None:
         return None
-    if display < 45:
+    bands = label_bands if label_bands is not None else get_rubric_definition(rubric_id).label_bands
+    if display < bands.developing:
         return "needs_work"
-    if display < 65:
+    if display < bands.good:
         return "developing"
-    if display < 85:
+    if display < bands.strong:
         return "good"
     return "strong"
 
@@ -320,6 +390,9 @@ def calculate_qa_score(
 
 def calculate_individual_delivery_scores(
     speaker_profile: dict[str, Any],
+    *,
+    rubric_id: str = "startup_pitch",
+    label_bands: LabelBands | None = None,
 ) -> list[ScoreComponent]:
     """Calculate calibrated individual presentation delivery scores from aggregated windows.
 
@@ -394,7 +467,7 @@ def calculate_individual_delivery_scores(
             status="scored",
             normalized_score=timing_norm,
             display_score=score_to_display(timing_norm),
-            label=score_to_label(timing_norm),
+            label=score_to_label(timing_norm, rubric_id=rubric_id, label_bands=label_bands),
             configured_weight=0.05,
             effective_weight=0.05,
             evidence_ids=acoustic_eids,
@@ -473,7 +546,7 @@ def calculate_individual_delivery_scores(
             status="scored",
             normalized_score=delivery_norm,
             display_score=score_to_display(delivery_norm),
-            label=score_to_label(delivery_norm),
+            label=score_to_label(delivery_norm, rubric_id=rubric_id, label_bands=label_bands),
             configured_weight=0.15,
             effective_weight=0.15,
             evidence_ids=visual_eids,
@@ -501,6 +574,7 @@ def evaluate_rubric(
     evidence_by_dimension: dict[str, list[str]] | None = None,
     rationales: dict[str, str] | None = None,
     limitations: list[Limitation] | None = None,
+    label_bands: LabelBands | None = None,
 ) -> tuple[float | None, list[ScoreComponent]]:
     """Score the full rubric, computing effective weights and overall score.
 
@@ -511,11 +585,14 @@ def evaluate_rubric(
         evidence_by_dimension: Optional mapping from dimension to evidence IDs.
         rationales: Optional dimension rationales.
         limitations: Active pipeline limitations for limitation_code attribution.
+        label_bands: Optional explicit label boundaries overriding the rubric definition.
 
     Returns:
         (overall_score, components)
     """
-    rubric_config = RUBRIC_CONFIGS.get(rubric_id, STARTUP_PITCH_RUBRIC_V1)
+    rubric_def = get_rubric_definition(rubric_id)
+    rubric_config = rubric_def.weights
+    bands = label_bands if label_bands is not None else rubric_def.label_bands
     evidence_map = evidence_by_dimension or {}
     rationale_map = rationales or {}
 
@@ -545,7 +622,7 @@ def evaluate_rubric(
         if score is not None:
             norm_score = max(0.0, min(1.0, float(score)))
             disp_score = score_to_display(norm_score)
-            label = score_to_label(norm_score)
+            label = score_to_label(norm_score, rubric_id=rubric_id, label_bands=bands)
             if not ev_ids:
                 default_ev_map = {
                     "pitch_content_and_evidence": ["ev_speech_001"],
@@ -590,12 +667,17 @@ def evaluate_rubric(
 
 
 __all__ = [
+    "DEFAULT_LABEL_BANDS",
     "DIMENSION_ALIASES",
     "FIXED_WEIGHT_DIMENSIONS",
     "RUBRIC_CONFIGS",
+    "RUBRIC_DEFINITIONS",
+    "STARTUP_PITCH_RUBRIC_DEFINITION",
     "STARTUP_PITCH_RUBRIC_V1",
     "WEIGHTING_POLICY_VERSION",
+    "LabelBands",
     "QAScoreResult",
+    "RubricDefinition",
     "calculate_individual_delivery_scores",
     "calculate_overall_score",
     "calculate_qa_score",
@@ -603,6 +685,7 @@ __all__ = [
     "evaluate_qa_scores",
     "evaluate_rubric",
     "extract_assessment_score",
+    "get_rubric_definition",
     "normalize_effective_weights",
     "score_to_display",
     "score_to_label",

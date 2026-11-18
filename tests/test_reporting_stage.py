@@ -19,8 +19,9 @@ from app.stages.report_loader import (
     build_synthetic_analysis_data,
     build_synthetic_qa_data,
 )
+from app.stages.report_markdown import SCORE_LABEL_DISPLAY
 from app.stages.reporting import ReportStageResult, run_report_stage
-from app.stages.scoring import WEIGHTING_POLICY_VERSION
+from app.stages.scoring import WEIGHTING_POLICY_VERSION, score_to_label
 from app.storage.base import ObjectStorageProtocol
 from app.storage.local import LocalDiskObjectStorage
 from tests.conftest import load_json_fixture
@@ -587,3 +588,58 @@ async def test_run_report_stage_unrecoverable_qa_scores_become_not_evaluated(tmp
     )
     assert "- **Assessment Score:** Not Evaluated" in result.report_markdown
     assert "0/100" not in result.report_markdown
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_markdown_and_evaluation_labels_match() -> None:
+    """Verify evaluation.json and report.md use the same 40/60/80 score_to_label bands."""
+    bundle = ReportEvidenceBundle(
+        session_id="session_label_consistency",
+        transcript_full_text="Pitch transcript.",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 30000,
+                "intervals": [{"start_ms": 0, "end_ms": 30000, "formatted": "00:00 - 00:30"}],
+                "windows": [],
+            }
+        },
+        questions=[
+            {"id": "q1", "text": "Q1?", "rubric_dimension": "pitch_content_and_evidence"},
+            {"id": "q2", "text": "Q2?", "rubric_dimension": "technical_feasibility"},
+        ],
+        answers=[
+            {"question_id": "q1", "status": "submitted", "transcript": "Answer 1."},
+            {"question_id": "q2", "status": "submitted", "transcript": "Answer 2."},
+        ],
+        assessments=[
+            {"question_id": "q1", "score": 0.62, "assessment_text": "Solid answer."},
+            {"question_id": "q2", "score": 0.82, "assessment_text": "Thorough answer."},
+        ],
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_LABELS_01",
+        evidence_bundle_override=bundle,
+        judge_provider=FakeJudgeModelProvider(),
+    )
+
+    eval_model = result.evaluation
+    md = result.report_markdown
+
+    # FakeJudgeModelProvider returns 0.85, 0.80, 0.82; Q&A = (0.62 + 0.82) / 2 = 0.72
+    labels_by_dim = {c.dimension: c.label for c in eval_model.components if c.status == "scored"}
+    assert labels_by_dim["pitch_content_and_evidence"] == "strong"
+    assert labels_by_dim["business_and_problem_solution_reasoning"] == "strong"
+    assert labels_by_dim["technical_feasibility"] == "strong"
+    assert labels_by_dim["qa_quality"] == "good"
+
+    for comp in eval_model.components:
+        if comp.status == "scored" and comp.normalized_score is not None:
+            expected_label = score_to_label(
+                comp.normalized_score, rubric_id=eval_model.rubric.rubric_id
+            )
+            assert comp.label == expected_label
+            assert SCORE_LABEL_DISPLAY[expected_label] in md
+
+    assert "- **Assessment Score:** Good (62/100)" in md
+    assert "- **Assessment Score:** Strong (82/100)" in md

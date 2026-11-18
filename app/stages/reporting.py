@@ -155,7 +155,7 @@ async def run_report_stage(
     team_delivery_scores: list[float] = []
     team_timing_scores: list[float] = []
     for spk_prof in bundle.by_speaker.values():
-        spk_comps = calculate_individual_delivery_scores(spk_prof)
+        spk_comps = calculate_individual_delivery_scores(spk_prof, rubric_id=rubric_id)
         for sc in spk_comps:
             if (
                 sc.dimension == "delivery_and_body_language"
@@ -291,7 +291,9 @@ async def run_report_stage(
         speaking_time_ms = spk_profile.get("speaking_time_ms", 0)
         spk_prof_with_label = dict(spk_profile)
         spk_prof_with_label.setdefault("speaker_label", spk_label)
-        delivery_components = calculate_individual_delivery_scores(spk_prof_with_label)
+        delivery_components = calculate_individual_delivery_scores(
+            spk_prof_with_label, rubric_id=rubric_id
+        )
 
         has_delivery_data = bool(speaking_intervals or spk_profile.get("windows")) or (
             speaking_time_ms > 0
