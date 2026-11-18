@@ -6,7 +6,6 @@ import concurrent.futures
 import logging
 import os
 import random
-import re
 import shutil
 import threading
 from collections.abc import Coroutine
@@ -40,6 +39,8 @@ from app.contracts import (
     StartedPayload,
     UpdateStatus,
     WorkerUpdate,
+    is_safe_identifier,
+    is_valid_job_id,
 )
 from app.pipeline import PitchAnalysisPipeline
 from app.providers.groq_speech import GroqSpeechProviderError
@@ -48,7 +49,6 @@ from app.stages.common import StageError, classify_stage_error
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-ULID_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
 MAX_PROVIDER_RETRIES = 3
 MAX_CALLBACK_RETRIES = 3
 MAX_TASK_RETRIES = MAX_PROVIDER_RETRIES + MAX_CALLBACK_RETRIES
@@ -559,10 +559,11 @@ async def _async_process_job_task(
         message = QueueMessage.model_validate(envelope)
     except ValidationError as val_exc:
         code, safe_msg = _map_validation_error(val_exc)
-        raw_job_id = envelope.get("job_id")
-        if not isinstance(raw_job_id, str) or not ULID_PATTERN.fullmatch(raw_job_id):
+        raw_job_id = envelope.get("job_id") if isinstance(envelope, dict) else None
+        if not is_valid_job_id(raw_job_id):
+            quarantine_job_id = raw_job_id if is_safe_identifier(raw_job_id) else "unknown"
             retry_or_quarantine(
-                job_id="unknown",
+                job_id=quarantine_job_id,
                 reason="malformed_queue_message",
                 pending_update=None,
                 retry_args=[envelope],
@@ -570,12 +571,8 @@ async def _async_process_job_task(
             )
             return None
 
-        raw_trace_id = envelope.get("trace_id")
-        trace_id = (
-            raw_trace_id
-            if isinstance(raw_trace_id, str) and ULID_PATTERN.fullmatch(raw_trace_id)
-            else raw_job_id
-        )
+        raw_trace_id = envelope.get("trace_id") if isinstance(envelope, dict) else None
+        trace_id = raw_trace_id if is_safe_identifier(raw_trace_id) else raw_job_id
         try:
             sequence = await backend_client.get_last_update_sequence(raw_job_id)
         except BackendUnauthorizedError:

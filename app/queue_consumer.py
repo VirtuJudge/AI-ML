@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import signal
 from datetime import UTC, datetime
 from typing import Any
@@ -25,7 +24,15 @@ from app.backend_client import (
     JobConflictError,
     JobNotFoundError,
 )
-from app.contracts import ErrorCode, FailedPayload, QueueMessage, UpdateStatus, WorkerUpdate
+from app.contracts import (
+    ErrorCode,
+    FailedPayload,
+    QueueMessage,
+    UpdateStatus,
+    WorkerUpdate,
+    is_safe_identifier,
+    is_valid_job_id,
+)
 from app.pipeline import PitchAnalysisPipeline
 from app.worker import process_job
 
@@ -39,7 +46,6 @@ DEFAULT_HEARTBEAT_TTL_SECONDS: int = 15
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS: float = 5.0
 DEFAULT_DEAD_LETTER_LIMIT: int = 1000
 DEFAULT_DEAD_LETTER_TTL_SECONDS: int = 7 * 24 * 60 * 60
-ULID_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
 
 
 class RedisQueueConsumer:
@@ -180,12 +186,8 @@ class RedisQueueConsumer:
 
         job_id = raw_envelope.get("job_id") if isinstance(raw_envelope, dict) else None
         trace_id = raw_envelope.get("trace_id") if isinstance(raw_envelope, dict) else None
-        if isinstance(job_id, str) and ULID_PATTERN.fullmatch(job_id):
-            safe_trace_id = (
-                trace_id
-                if isinstance(trace_id, str) and ULID_PATTERN.fullmatch(trace_id)
-                else job_id
-            )
+        if is_valid_job_id(job_id):
+            safe_trace_id = trace_id if is_safe_identifier(trace_id) else job_id
             attempt = raw_envelope.get("analysis_attempt", 1)
             if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
                 attempt = 1
@@ -222,12 +224,8 @@ class RedisQueueConsumer:
         record = {
             "digest": digest,
             "byte_length": len(raw_message.encode("utf-8", errors="replace")),
-            "job_id": job_id
-            if isinstance(job_id, str) and ULID_PATTERN.fullmatch(job_id)
-            else None,
-            "trace_id": trace_id
-            if isinstance(trace_id, str) and ULID_PATTERN.fullmatch(trace_id)
-            else None,
+            "job_id": job_id if is_safe_identifier(job_id) else None,
+            "trace_id": trace_id if is_safe_identifier(trace_id) else None,
             "envelope_fields": sorted(raw_envelope) if isinstance(raw_envelope, dict) else [],
             "error_type": type(error).__name__,
             "failure_code": ErrorCode.MALFORMED_PAYLOAD.value,

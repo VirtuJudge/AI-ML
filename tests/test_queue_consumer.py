@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.backend_client import FakeBackendClient
+from app.backend_client import FakeBackendClient, JobNotFoundError
 from app.contracts import (
     ArtifactRef,
+    ErrorCode,
+    FailedPayload,
     JobType,
     PrimaryQuestion,
     QueueMessage,
@@ -227,3 +229,92 @@ async def test_heartbeat_payload() -> None:
         pytest.approx(json.dumps(payload)),
         ex=10,
     )
+
+
+@pytest.mark.asyncio
+async def test_process_one_message_reports_failure_for_malformed_uuid_envelope() -> None:
+    """Malformed envelopes with Backend UUID job_id and trc_ trace_id report failure."""
+    mock_pipeline = AsyncMock(spec=PitchAnalysisPipeline)
+    mock_redis = AsyncMock()
+    mock_backend = FakeBackendClient()
+
+    consumer = RedisQueueConsumer(
+        pipeline=mock_pipeline,
+        backend_client=mock_backend,
+        redis_client=mock_redis,
+    )
+
+    envelope = {
+        "schema_version": 1,
+        "job_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+        "job_type": "analyze_answr",
+        "practice_session_id": "109156be-c4fb-41ea-b1b4-efe1671c5836",
+        "analysis_attempt": 1,
+        "created_at": "2026-09-10T12:00:00Z",
+        "trace_id": "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+        "payload": {},
+    }
+
+    res = await consumer.process_one_message(json.dumps(envelope))
+    assert res is None
+    mock_redis.lpush.assert_not_awaited()
+    assert len(mock_backend.updates) == 1
+    update = mock_backend.updates[0]
+    assert update.status == UpdateStatus.FAILED
+    assert update.trace_id == "trc_4a7f2c9e8b1d4056a3c7e9f012345678"
+    assert isinstance(update.payload, FailedPayload)
+    assert update.payload.code == ErrorCode.MALFORMED_PAYLOAD
+
+
+@pytest.mark.asyncio
+async def test_process_one_message_dead_letter_keeps_safe_ids() -> None:
+    """Dead-letter records retain safe raw job_id/trace_id and drop unsafe ones."""
+    mock_pipeline = AsyncMock(spec=PitchAnalysisPipeline)
+    mock_redis = AsyncMock()
+    mock_backend = AsyncMock()
+    mock_backend.get_last_update_sequence.side_effect = JobNotFoundError("not found")
+
+    consumer = RedisQueueConsumer(
+        pipeline=mock_pipeline,
+        backend_client=mock_backend,
+        redis_client=mock_redis,
+    )
+
+    # 1. UUID job_id not found on backend -> dead-letter keeps UUID and trc_<hex>
+    uuid_envelope = {
+        "schema_version": 1,
+        "job_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+        "job_type": "analyze_answr",
+        "trace_id": "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+        "payload": {},
+    }
+    await consumer.process_one_message(json.dumps(uuid_envelope))
+    first_record = json.loads(mock_redis.lpush.await_args_list[0].args[1])
+    assert first_record["job_id"] == "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+    assert first_record["trace_id"] == "trc_4a7f2c9e8b1d4056a3c7e9f012345678"
+
+    # 2. Safe non-UUID/non-ULID job_id -> dead-letter keeps safe raw job_id
+    safe_envelope = {
+        "schema_version": 1,
+        "job_id": "custom_job_123",
+        "job_type": "analyze_answr",
+        "trace_id": "trc_custom_1",
+        "payload": {},
+    }
+    await consumer.process_one_message(json.dumps(safe_envelope))
+    second_record = json.loads(mock_redis.lpush.await_args_list[1].args[1])
+    assert second_record["job_id"] == "custom_job_123"
+    assert second_record["trace_id"] == "trc_custom_1"
+
+    # 3. Unsafe job_id -> dead-letter stores None
+    unsafe_envelope = {
+        "schema_version": 1,
+        "job_id": "../bad\nid",
+        "job_type": "analyze_answr",
+        "trace_id": "https://evil.example?tok=secret",
+        "payload": {},
+    }
+    await consumer.process_one_message(json.dumps(unsafe_envelope))
+    third_record = json.loads(mock_redis.lpush.await_args_list[2].args[1])
+    assert third_record["job_id"] is None
+    assert third_record["trace_id"] is None

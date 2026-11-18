@@ -499,3 +499,171 @@ async def test_celery_task_non_retryable_provider_error_skips_retry_and_uses_exe
     assert res.payload.code == ErrorCode.PROVIDER_ERROR
     assert res.payload.retryable is False
     assert res.payload.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_celery_task_consumes_backend_uuid_analyze_session_fixture():
+    """Verify valid Backend UUID / trc_<hex> job completes cleanly."""
+    envelope = _load_fixture("job_analyze_session_uuid_valid.json")
+    client = MockBackendClient()
+    pipeline = MockPipeline()
+
+    update = await _async_process_job_task(
+        task=None,
+        envelope=envelope,
+        pipeline=pipeline,
+        backend_client=client,
+    )
+
+    assert update is not None
+    assert update.status == UpdateStatus.COMPLETED
+    assert update.trace_id == "trc_4a7f2c9e8b1d4056a3c7e9f012345678"
+    assert client.updates[0][0] == "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+    assert client.updates[-1][1].status == UpdateStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_id", "trace_id", "expected_trace_id"),
+    [
+        (
+            "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+            "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+            "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+            "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+        ),
+        (
+            "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+            "unsafe\ntrace",
+            "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+        ),
+    ],
+)
+async def test_celery_task_malformed_envelope_reports_failure_for_uuid_and_ulid(
+    monkeypatch: pytest.MonkeyPatch,
+    job_id: str,
+    trace_id: str,
+    expected_trace_id: str,
+):
+    """Malformed envelopes with Backend UUID or ULID job IDs post a failed callback."""
+    envelope = dict(_load_fixture("job_unknown_enum_uuid.json"))
+    envelope["job_id"] = job_id
+    envelope["trace_id"] = trace_id
+
+    client = MockBackendClient()
+    pipeline = MockPipeline()
+    quarantined: list[Any] = []
+    monkeypatch.setattr(celery_app, "send_task", lambda *a, **kw: quarantined.append((a, kw)))
+
+    mock_celery_task = MagicMock()
+    mock_celery_task.app = celery_app
+    mock_celery_task.request.retries = 0
+
+    res = await _async_process_job_task(
+        task=mock_celery_task,
+        envelope=envelope,
+        pipeline=pipeline,
+        backend_client=client,
+    )
+
+    assert res is None
+    mock_celery_task.retry.assert_not_called()
+    assert quarantined == []
+    assert len(client.updates) == 1
+    reported_job_id, update = client.updates[0]
+    assert reported_job_id == job_id
+    assert update.status == UpdateStatus.FAILED
+    assert update.trace_id == expected_trace_id
+    assert isinstance(update.payload, FailedPayload)
+    assert update.payload.code == ErrorCode.MALFORMED_PAYLOAD
+    assert update.payload.retryable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_job_id", "expected_quarantine_job_id"),
+    [
+        ("01JEXAMPLE0000000000000001", "01JEXAMPLE0000000000000001"),
+        ("custom_bad_job-123", "custom_bad_job-123"),
+        ("../escape/path", "unknown"),
+        ("job\nwith_newline", "unknown"),
+        ("https://example.com/signed?X-Amz-Signature=secret", "unknown"),
+        ("", "unknown"),
+        (None, "unknown"),
+        (12345, "unknown"),
+        ("a" * 129, "unknown"),
+    ],
+)
+async def test_celery_task_quarantine_preserves_safe_raw_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_job_id: Any,
+    expected_quarantine_job_id: str,
+):
+    """Quarantine keeps safe non-UUID/ULID job IDs and falls back to 'unknown' otherwise."""
+    envelope: dict[str, Any] = {
+        "schema_version": 1,
+        "job_type": "analyze_answr",
+        "trace_id": "trc_4a7f2c9e8b1d4056a3c7e9f012345678",
+        "payload": {},
+    }
+    if raw_job_id is not None:
+        envelope["job_id"] = raw_job_id
+
+    client = MockBackendClient()
+    pipeline = MockPipeline()
+    quarantined: list[dict[str, Any]] = []
+
+    def fake_send_task(name: str, *, args: list[Any], **kwargs: Any) -> None:
+        quarantined.append({"name": name, "record": args[0], "kwargs": kwargs})
+
+    monkeypatch.setattr(celery_app, "send_task", fake_send_task)
+
+    mock_celery_task = MagicMock()
+    mock_celery_task.app = celery_app
+    mock_celery_task.request.retries = 0
+
+    res = await _async_process_job_task(
+        task=mock_celery_task,
+        envelope=envelope,
+        pipeline=pipeline,
+        backend_client=client,
+    )
+
+    assert res is None
+    assert client.updates == []
+    assert len(quarantined) == 1
+    record = quarantined[0]["record"]
+    assert record["job_id"] == expected_quarantine_job_id
+    assert record["reason"] == "malformed_queue_message"
+
+
+@pytest.mark.asyncio
+async def test_celery_task_quarantines_non_dict_envelope_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Non-dict envelopes fail validation and quarantine cleanly as 'unknown'."""
+    client = MockBackendClient()
+    pipeline = MockPipeline()
+    quarantined: list[dict[str, Any]] = []
+
+    def fake_send_task(name: str, *, args: list[Any], **kwargs: Any) -> None:
+        quarantined.append({"name": name, "record": args[0], "kwargs": kwargs})
+
+    monkeypatch.setattr(celery_app, "send_task", fake_send_task)
+
+    res = await _async_process_job_task(
+        task=None,
+        envelope=["not", "a", "dict"],  # type: ignore[arg-type]
+        pipeline=pipeline,
+        backend_client=client,
+    )
+
+    assert res is None
+    assert client.updates == []
+    assert len(quarantined) == 1
+    assert quarantined[0]["record"]["job_id"] == "unknown"
+    assert quarantined[0]["record"]["reason"] == "malformed_queue_message"

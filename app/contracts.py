@@ -12,11 +12,29 @@ except ImportError:
         pass
 
 
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SHA256_HEX_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
+UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+ULID_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
+SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def is_valid_job_id(value: Any) -> TypeGuard[str]:
+    """Return True if value matches a Backend UUID or compatibility ULID."""
+    return isinstance(value, str) and bool(
+        UUID_PATTERN.fullmatch(value) or ULID_PATTERN.fullmatch(value)
+    )
+
+
+def is_safe_identifier(value: Any) -> TypeGuard[str]:
+    """Return True if value is a bounded, log- and path-safe identifier string."""
+    return isinstance(value, str) and bool(SAFE_IDENTIFIER_PATTERN.fullmatch(value))
 
 
 class JobType(StrEnum):
@@ -527,6 +545,9 @@ class WorkerUpdate(BaseModel):
 
 
 __all__ = [
+    "SAFE_IDENTIFIER_PATTERN",
+    "ULID_PATTERN",
+    "UUID_PATTERN",
     "AnalyzeAnswerPayload",
     "AnalyzeSessionPayload",
     "AnswerAnalysisCompleted",
@@ -569,4 +590,6 @@ __all__ = [
     "StartedPayload",
     "UpdateStatus",
     "WorkerUpdate",
+    "is_safe_identifier",
+    "is_valid_job_id",
 ]

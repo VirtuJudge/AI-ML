@@ -32,6 +32,8 @@ from app.contracts import (
     StartedPayload,
     UpdateStatus,
     WorkerUpdate,
+    is_safe_identifier,
+    is_valid_job_id,
 )
 
 FIXTURES_DIR_BACKEND = (
@@ -51,6 +53,8 @@ def _get_fixture_dir() -> Path:
 def _load_fixture(filename: str) -> dict:
     fdir = _get_fixture_dir()
     path = fdir / filename
+    if not path.is_file() and FIXTURES_DIR_LOCAL.is_dir():
+        path = FIXTURES_DIR_LOCAL / filename
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -262,3 +266,30 @@ def test_worker_update_negative_fixtures():
     up_neg = WorkerUpdate.model_validate(data_neg)
     with pytest.raises(ValidationError):
         ErasureCompleted.model_validate(up_neg.payload)
+
+
+def test_backend_uuid_and_trace_format_fixtures():
+    """Verify shared fixtures using Backend's real UUID and trc_<hex> formats."""
+    valid_data = _load_fixture("job_analyze_session_uuid_valid.json")
+    msg = QueueMessage.model_validate(valid_data)
+    assert is_valid_job_id(msg.job_id)
+    assert msg.job_id == "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+    assert msg.practice_session_id == "109156be-c4fb-41ea-b1b4-efe1671c5836"
+    assert msg.trace_id == "trc_4a7f2c9e8b1d4056a3c7e9f012345678"
+    assert is_safe_identifier(msg.trace_id)
+    payload = AnalyzeSessionPayload.model_validate(msg.payload)
+    assert payload.presentation.artifact_id == "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b"
+
+    invalid_data = _load_fixture("job_unknown_enum_uuid.json")
+    assert is_valid_job_id(invalid_data["job_id"])
+    assert is_safe_identifier(invalid_data["trace_id"])
+    with pytest.raises(ValidationError):
+        QueueMessage.model_validate(invalid_data)
+
+    failed_data = _load_fixture("worker_update_failed_uuid_valid.json")
+    failed_update = WorkerUpdate.model_validate(failed_data)
+    assert failed_update.status == UpdateStatus.FAILED
+    assert failed_update.trace_id == "trc_4a7f2c9e8b1d4056a3c7e9f012345678"
+    failed_payload = FailedPayload.model_validate(failed_update.payload)
+    assert failed_payload.code == "malformed_payload"
+    assert failed_payload.retryable is False
