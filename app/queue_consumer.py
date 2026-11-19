@@ -34,6 +34,7 @@ from app.contracts import (
     is_valid_job_id,
 )
 from app.pipeline import PitchAnalysisPipeline
+from app.stages.media import cleanup_stale_worker_temp_dirs
 from app.worker import process_job
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,7 @@ class RedisQueueConsumer:
 
     async def run(self, max_jobs: int | None = None) -> int:
         """Run the consumer polling loop until stopped or max_jobs processed."""
+        cleanup_stale_worker_temp_dirs()
         r = await self._get_redis()
         self._stopping = False
         jobs_processed = 0

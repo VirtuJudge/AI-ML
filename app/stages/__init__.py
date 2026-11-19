@@ -40,6 +40,7 @@ from app.stages.media import (
     SUPPORTED_MEDIA_EXTENSIONS,
     FFmpegExecutionError,
     FFmpegNotFoundError,
+    FFmpegTimeoutError,
     MediaNormalizationError,
     MediaNormalizationResult,
     MediaSplitResult,
@@ -90,6 +91,7 @@ from app.stages.scoring import (
 from app.stages.speech import (
     SpeechStageResult,
     run_speech_stage,
+    validate_diarization_timestamps,
     validate_word_timestamps,
 )
 from app.stages.vision import (
@@ -117,6 +119,7 @@ __all__ = [
     "EvidenceItem",
     "FFmpegExecutionError",
     "FFmpegNotFoundError",
+    "FFmpegTimeoutError",
     "LabelBands",
     "MediaNormalizationError",
     "MediaNormalizationResult",
@@ -167,6 +170,7 @@ __all__ = [
     "score_to_label",
     "split_media",
     "validate_audio_observations",
+    "validate_diarization_timestamps",
     "validate_observation_timestamps",
     "validate_visual_observations",
     "validate_word_timestamps",
