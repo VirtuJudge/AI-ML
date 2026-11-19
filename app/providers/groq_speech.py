@@ -138,7 +138,22 @@ class GroqSpeechProvider:
         }
 
     @staticmethod
-    def _parse_words(raw_words: list[dict[str, Any]]) -> list[WordTimestamp]:
+    def _parse_confidence(raw: Any) -> tuple[float | None, bool]:
+        """Return (confidence, malformed): None when absent or unusable, never a guessed 1.0."""
+        if raw is None:
+            return None, False
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None, True
+        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+            return None, True
+        return round(value, 4), False
+
+    @classmethod
+    def _parse_words(
+        cls, raw_words: list[dict[str, Any]], stats: dict[str, int] | None = None
+    ) -> list[WordTimestamp]:
         """Parse raw word dictionaries into WordTimestamp models."""
         words: list[WordTimestamp] = []
         for w in raw_words:
@@ -149,17 +164,27 @@ class GroqSpeechProvider:
             w_end = round(float(w.get("end", 0.0)) * 1000)
             w_start = max(0, w_start)
             w_end = max(w_start, w_end)
-            w_conf = float(w.get("confidence", w.get("probability", 1.0)))
-            w_conf = max(0.0, min(1.0, w_conf))
+            raw_conf = w.get("confidence", w.get("probability"))
+            w_conf, malformed = cls._parse_confidence(raw_conf)
+            if stats is not None:
+                if malformed:
+                    stats["malformed"] += 1
+                elif w_conf is None:
+                    stats["missing_words"] += 1
             words.append(
                 WordTimestamp(
                     word=w_text,
                     start_ms=w_start,
                     end_ms=w_end,
-                    confidence=round(w_conf, 4),
+                    confidence=w_conf,
                 )
             )
         return words
+
+    @staticmethod
+    def _mean_known_confidence(words: list[WordTimestamp]) -> float | None:
+        known = [w.confidence for w in words if w.confidence is not None]
+        return round(sum(known) / len(known), 4) if known else None
 
     async def transcribe(self, audio_path: Path) -> TranscriptionResult:
         """Transcribe an audio file using GroqCloud Whisper API.
@@ -237,6 +262,7 @@ class GroqSpeechProvider:
         # Parse segments
         raw_segments = resp_data.get("segments") or []
         segments: list[TranscriptionSegment] = []
+        stats = {"malformed": 0, "missing_words": 0}
 
         for seg in raw_segments:
             s_start = round(float(seg.get("start", 0.0)) * 1000)
@@ -245,29 +271,32 @@ class GroqSpeechProvider:
             s_end = max(s_start, s_end)
             s_text = str(seg.get("text", "")).strip()
 
-            seg_words = self._parse_words(seg.get("words") or [])
+            seg_words = self._parse_words(seg.get("words") or [], stats)
 
-            # Calculate segment confidence
-            seg_confidence = 1.0
-            if "avg_logprob" in seg and seg["avg_logprob"] is not None:
+            # Segment confidence: provider avg_logprob, then an explicit confidence, then the
+            # mean of known word confidences. Unknown stays None instead of becoming 1.0.
+            seg_confidence: float | None = None
+            seg_malformed = False
+            if seg.get("avg_logprob") is not None:
                 try:
-                    seg_confidence = max(0.0, min(1.0, math.exp(float(seg["avg_logprob"]))))
-                except (OverflowError, ValueError):
-                    seg_confidence = 1.0
-            elif "confidence" in seg and seg["confidence"] is not None:
-                try:
-                    seg_confidence = max(0.0, min(1.0, float(seg["confidence"])))
-                except (ValueError, TypeError):
-                    seg_confidence = 1.0
-            elif seg_words:
-                seg_confidence = sum(w.confidence for w in seg_words) / len(seg_words)
+                    seg_confidence, seg_malformed = self._parse_confidence(
+                        math.exp(float(seg["avg_logprob"]))
+                    )
+                except (OverflowError, TypeError, ValueError):
+                    seg_confidence, seg_malformed = None, True
+            elif seg.get("confidence") is not None:
+                seg_confidence, seg_malformed = self._parse_confidence(seg["confidence"])
+            if seg_confidence is None:
+                seg_confidence = self._mean_known_confidence(seg_words)
+            if seg_malformed:
+                stats["malformed"] += 1
 
             segments.append(
                 TranscriptionSegment(
                     start_ms=s_start,
                     end_ms=s_end,
                     text=s_text,
-                    confidence=round(seg_confidence, 4),
+                    confidence=seg_confidence,
                     words=seg_words,
                 )
             )
@@ -275,7 +304,7 @@ class GroqSpeechProvider:
         # If segments did not contain nested words but root words exist, assign words to segments
         raw_words = resp_data.get("words") or []
         if raw_words and segments and not any(s.words for s in segments):
-            top_words = self._parse_words(raw_words)
+            top_words = self._parse_words(raw_words, stats)
             for word in top_words:
                 best_idx = 0
                 best_overlap = -1
@@ -296,10 +325,13 @@ class GroqSpeechProvider:
                         ),
                     )
                 segments[best_idx].words.append(word)
+            for segment in segments:
+                if segment.confidence is None:
+                    segment.confidence = self._mean_known_confidence(segment.words)
 
         # If no segments exist but text or words exist, synthesize a single segment
         if not segments and (full_text or raw_words):
-            top_words = self._parse_words(raw_words)
+            top_words = self._parse_words(raw_words, stats)
             start_ms = top_words[0].start_ms if top_words else 0
             end_ms = (
                 top_words[-1].end_ms
@@ -311,7 +343,7 @@ class GroqSpeechProvider:
                     start_ms=start_ms,
                     end_ms=max(start_ms, end_ms),
                     text=full_text,
-                    confidence=1.0,
+                    confidence=self._mean_known_confidence(top_words),
                     words=top_words,
                 )
             )
@@ -321,6 +353,9 @@ class GroqSpeechProvider:
             "model": self.model,
             "language": detected_language,
             "duration": duration_s,
+            "confidence_missing_segments": sum(1 for seg in segments if seg.confidence is None),
+            "confidence_missing_words": stats["missing_words"],
+            "confidence_malformed_values": stats["malformed"],
         }
 
         return TranscriptionResult(

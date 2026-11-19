@@ -37,6 +37,44 @@ class SpeechStageResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def transcript_confidence_limitations(transcription: TranscriptionResult) -> list[Limitation]:
+    """Flag transcripts whose provider confidence is missing or malformed.
+
+    Unknown confidence is kept as None on words and segments (never treated as 1.0); this
+    limitation makes that uncertainty visible to question, answer and report consumers.
+    """
+    limitations: list[Limitation] = []
+    segments = transcription.segments
+    missing = sum(1 for seg in segments if seg.confidence is None)
+    if segments and missing:
+        limitations.append(
+            Limitation(
+                code="transcript_confidence_unavailable",
+                scope="speech",
+                message=(
+                    f"Transcription confidence was not available for {missing} of "
+                    f"{len(segments)} transcript segment(s); their reliability is unknown."
+                ),
+                affected_dimensions=[],
+            )
+        )
+    metadata = getattr(transcription, "metadata", None) or {}
+    malformed = metadata.get("confidence_malformed_values", 0)
+    if isinstance(malformed, int) and malformed > 0:
+        limitations.append(
+            Limitation(
+                code="transcript_confidence_malformed",
+                scope="speech",
+                message=(
+                    f"The speech provider returned {malformed} unusable confidence value(s); "
+                    "they were treated as unknown, not as high confidence."
+                ),
+                affected_dimensions=[],
+            )
+        )
+    return limitations
+
+
 def validate_word_timestamps(
     transcription: TranscriptionResult,
     media_duration_ms: int | None,
@@ -467,6 +505,7 @@ async def run_speech_stage(
                 transcription, duration_ms, strict=strict_timestamps
             )
             limitations.extend(ts_limitations)
+        limitations.extend(transcript_confidence_limitations(transcription))
     finally:
         if owned_temp_wav is not None:
             owned_temp_wav.unlink(missing_ok=True)
@@ -590,6 +629,7 @@ __all__ = [
     "SPEECH_STAGE_VERSION",
     "SpeechStageResult",
     "run_speech_stage",
+    "transcript_confidence_limitations",
     "validate_diarization_timestamps",
     "validate_word_timestamps",
 ]

@@ -22,7 +22,7 @@ from app.stages.media import (
     normalize_media,
     resolve_media_duration,
 )
-from app.stages.speech import validate_word_timestamps
+from app.stages.speech import transcript_confidence_limitations, validate_word_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ async def run_answer_speech_stage(
             transcription, duration_ms, strict=strict_timestamps
         )
         limitations.extend(ts_limitations)
+        limitations.extend(transcript_confidence_limitations(transcription))
     finally:
         if owned_temp_wav is not None:
             owned_temp_wav.unlink(missing_ok=True)

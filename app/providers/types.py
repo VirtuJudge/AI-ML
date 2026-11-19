@@ -17,7 +17,8 @@ class WordTimestamp(BaseModel):
     word: str
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # None means the provider gave no usable confidence (unknown, not certain).
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class TranscriptionSegment(BaseModel):
@@ -26,7 +27,8 @@ class TranscriptionSegment(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
     text: str
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # None means the provider gave no usable confidence (unknown, not certain).
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     words: list[WordTimestamp] = Field(default_factory=list)
 
 

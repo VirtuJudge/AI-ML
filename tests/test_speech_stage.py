@@ -273,12 +273,14 @@ async def test_run_speech_stage_multi_speaker(tmp_path: Path) -> None:
                 end_ms=3000,
                 text="Speaker 1 opening pitch",
                 words=[WordTimestamp(word="Speaker", start_ms=0, end_ms=1000)],
+                confidence=0.9,
             ),
             TranscriptionSegment(
                 start_ms=3500,
                 end_ms=7000,
                 text="Speaker 2 financial breakdown",
                 words=[WordTimestamp(word="Speaker", start_ms=3500, end_ms=4500)],
+                confidence=0.9,
             ),
         ],
         full_text="Speaker 1 opening pitch Speaker 2 financial breakdown",
@@ -672,7 +674,9 @@ async def test_run_speech_stage_boundary_rounding_cases(tmp_path: Path) -> None:
     audio_path = tmp_path / "rounded.wav"
     audio_path.write_bytes(b"dummy")
     transcription = TranscriptionResult(
-        segments=[TranscriptionSegment(start_ms=0, end_ms=1000, text="Boundary test")],
+        segments=[
+            TranscriptionSegment(start_ms=0, end_ms=1000, text="Boundary test", confidence=0.9)
+        ],
         full_text="Boundary test",
     )
 

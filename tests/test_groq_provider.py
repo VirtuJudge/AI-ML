@@ -455,3 +455,114 @@ async def test_groq_speech_with_custom_key_pool() -> None:
 
     assert provider.key_pool is pool
     assert provider.api_key == "gsk_custom_1"
+
+
+async def _transcribe_response(tmp_path: Path, api_response: dict) -> TranscriptionResult:
+    audio_file = tmp_path / "audio.wav"
+    audio_file.write_bytes(b"RIFF dummy wav audio content")
+    mock_response = httpx.Response(
+        status_code=200,
+        json=api_response,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions"),
+    )
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        return await GroqSpeechProvider(api_key="gsk_test_key_abc").transcribe(audio_file)
+
+
+async def test_groq_missing_confidence_stays_unknown(tmp_path: Path) -> None:
+    """No provider confidence anywhere: words and segments are None, never 1.0."""
+    result = await _transcribe_response(
+        tmp_path,
+        {
+            "text": "hello world",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello world"}],
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 0.4},
+                {"word": "world", "start": 0.5, "end": 1.0},
+            ],
+        },
+    )
+    seg = result.segments[0]
+    assert seg.confidence is None
+    assert [w.confidence for w in seg.words] == [None, None]
+    assert result.metadata["confidence_missing_segments"] == 1
+    assert result.metadata["confidence_missing_words"] == 2
+    assert result.metadata["confidence_malformed_values"] == 0
+
+
+async def test_groq_malformed_confidence_is_unknown_not_high(tmp_path: Path) -> None:
+    result = await _transcribe_response(
+        tmp_path,
+        {
+            "text": "a b c",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.5,
+                    "text": "a b c",
+                    "confidence": "very sure",
+                    "words": [
+                        {"word": "a", "start": 0.0, "end": 0.4, "probability": "nan"},
+                        {"word": "b", "start": 0.5, "end": 0.9, "probability": 1.7},
+                        {"word": "c", "start": 1.0, "end": 1.5, "probability": 0.31},
+                    ],
+                }
+            ],
+        },
+    )
+    seg = result.segments[0]
+    assert [w.confidence for w in seg.words] == [None, None, 0.31]
+    # The malformed segment value is not trusted; the known word confidence is used.
+    assert seg.confidence == 0.31
+    assert result.metadata["confidence_malformed_values"] == 3
+
+
+async def test_groq_low_and_high_confidence_preserved(tmp_path: Path) -> None:
+    result = await _transcribe_response(
+        tmp_path,
+        {
+            "text": "low high",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "low",
+                    "avg_logprob": -2.5,
+                    "words": [{"word": "low", "start": 0.0, "end": 1.0, "probability": 0.08}],
+                },
+                {
+                    "start": 1.0,
+                    "end": 2.0,
+                    "text": "high",
+                    "confidence": 0.97,
+                    "words": [{"word": "high", "start": 1.0, "end": 2.0, "probability": 0.99}],
+                },
+            ],
+        },
+    )
+    low, high = result.segments
+    assert low.confidence is not None and low.confidence < 0.1
+    assert low.words[0].confidence == 0.08
+    assert high.confidence == 0.97
+    assert high.words[0].confidence == 0.99
+    assert result.metadata["confidence_missing_segments"] == 0
+
+
+def test_transcript_confidence_limitations_surface_uncertainty() -> None:
+    from app.providers.types import TranscriptionSegment
+    from app.stages.speech import transcript_confidence_limitations
+
+    unknown = TranscriptionResult(
+        full_text="x",
+        segments=[TranscriptionSegment(start_ms=0, end_ms=100, text="x")],
+        metadata={"confidence_malformed_values": 2},
+    )
+    codes = [lim.code for lim in transcript_confidence_limitations(unknown)]
+    assert codes == ["transcript_confidence_unavailable", "transcript_confidence_malformed"]
+
+    known = TranscriptionResult(
+        full_text="x",
+        segments=[TranscriptionSegment(start_ms=0, end_ms=100, text="x", confidence=0.8)],
+    )
+    assert transcript_confidence_limitations(known) == []
