@@ -13,6 +13,11 @@ from pydantic import BaseModel, Field
 
 from app.contracts import AssetInput, Limitation
 from app.providers.base import DocumentProvider
+from app.providers.document_errors import (
+    DocumentExtractionTimeout,
+    DocumentParserCrashed,
+    DocumentResourceLimitExceeded,
+)
 from app.providers.types import DocumentChunk
 
 logger = logging.getLogger(__name__)
@@ -112,10 +117,36 @@ async def run_document_stage(
                 )
             else:
                 all_chunks.extend(chunks)
+            truncation = getattr(document_provider, "truncation_reasons", {})
+            reasons = truncation.pop(artifact_id, None) if isinstance(truncation, dict) else None
+            if reasons:
+                limitations.append(
+                    Limitation(
+                        code="document_truncated",
+                        scope="documents",
+                        message=(
+                            f"Supporting document '{artifact_id}' exceeded an extraction budget "
+                            f"({', '.join(sorted(reasons))}); only the first part was analysed."
+                        ),
+                        affected_dimensions=["market_and_business_model", "technology_and_moat"],
+                    )
+                )
         except Exception as exc:
             err_msg = str(exc).lower()
             logger.warning("Document extraction failed for artifact_id=%s", artifact_id)
-            if "encrypted" in err_msg or "password" in err_msg:
+            if isinstance(exc, DocumentExtractionTimeout):
+                code = "document_extraction_timeout"
+                msg = f"Supporting document '{artifact_id}' took too long to parse and was skipped."
+            elif isinstance(exc, DocumentResourceLimitExceeded):
+                code = "document_resource_limit"
+                msg = (
+                    f"Supporting document '{artifact_id}' exceeded the parser memory budget "
+                    "and was skipped."
+                )
+            elif isinstance(exc, DocumentParserCrashed):
+                code = "document_parser_crashed"
+                msg = f"Supporting document '{artifact_id}' could not be parsed and was skipped."
+            elif "encrypted" in err_msg or "password" in err_msg:
                 code = "document_malformed"
                 msg = f"Supporting document '{artifact_id}' is encrypted or password-protected."
             elif "unsupported" in err_msg:

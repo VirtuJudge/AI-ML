@@ -3,17 +3,37 @@
 Extracts text from PDF and PPTX documents with page/slide provenance, splits into
 versioned chunks, and optionally generates text embeddings via an EmbeddingProvider.
 Treats all document text strictly as untrusted data.
+
+Native parsing runs in a separate, killable child process (``python -m
+app.document_parser``) with a wall-clock deadline, a memory cap where the OS supports
+it, and page/slide, extracted-text and chunk budgets. A parser crash, hang or runaway
+document therefore cannot take down or monopolise the worker, and cancelling the job
+stops the parser.
 """
 
+from __future__ import annotations
+
 import asyncio
-import hashlib
+import contextlib
+import json
 import logging
+import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
-import pymupdf
-from pptx import Presentation
-
+from app.document_parser import (
+    DocumentExtractionLimits,
+    ParserError,
+    extract_document,
+)
 from app.providers.base import EmbeddingProvider
+from app.providers.document_errors import (
+    DocumentExtractionError,
+    DocumentExtractionTimeout,
+    DocumentParserCrashed,
+    DocumentResourceLimitExceeded,
+)
 from app.providers.types import DocumentChunk
 
 logger = logging.getLogger(__name__)
@@ -22,9 +42,8 @@ DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 64
 CHUNKING_VERSION = "v1_512_64"
 
-
-class DocumentExtractionError(Exception):
-    """Exception raised when document extraction fails."""
+_REAP_TIMEOUT_SECONDS = 5.0
+DEFAULT_PARSER_COMMAND: tuple[str, ...] = (sys.executable, "-m", "app.document_parser")
 
 
 class PyMuPDFDocumentProvider:
@@ -37,142 +56,114 @@ class PyMuPDFDocumentProvider:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         chunking_version: str = CHUNKING_VERSION,
+        limits: DocumentExtractionLimits | None = None,
+        isolate: bool = True,
+        parser_command: Sequence[str] | None = None,
     ) -> None:
         self.embedding_provider = embedding_provider
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.chunking_version = chunking_version
+        self.limits = limits if limits is not None else DocumentExtractionLimits.from_env()
+        self.isolate = isolate
+        # Overridable for deterministic timeout/crash tests.
+        self.parser_command: tuple[str, ...] = tuple(parser_command or DEFAULT_PARSER_COMMAND)
+        # Budget truncation reasons per asset_version_id, consumed by the document stage.
+        self.truncation_reasons: dict[str, list[str]] = {}
+        self.last_parser_process: asyncio.subprocess.Process | None = None
 
-    def _chunk_text(
-        self,
-        text: str,
-        asset_version_id: str,
-        page_or_slide: int,
-        extraction_method: str,
-    ) -> list[DocumentChunk]:
-        """Split page/slide text into versioned, deterministic chunks."""
-        text = text.strip()
-        if not text:
-            return []
+    def _request(self, doc_path: Path, asset_version_id: str) -> dict[str, Any]:
+        return {
+            "doc_path": str(doc_path),
+            "asset_version_id": asset_version_id,
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+            "chunking_version": self.chunking_version,
+            "limits": self.limits.to_dict(),
+        }
 
-        chunks: list[DocumentChunk] = []
-        text_len = len(text)
-
-        # The stepping loop naturally handles single-chunk texts (when text_len <= chunk_size)
-        # as well as multi-chunk sliding windows with identical offset and hash semantics.
-        step = max(1, self.chunk_size - self.chunk_overlap)
-        start_offset = 0
-
-        while start_offset < text_len:
-            end_offset = min(text_len, start_offset + self.chunk_size)
-            chunk_content = text[start_offset:end_offset]
-
-            chunk_key = f"{asset_version_id}:{page_or_slide}:{start_offset}:{self.chunking_version}"
-            chunk_hash = hashlib.sha256(chunk_key.encode()).hexdigest()[:16]
-            chunk_id = f"{asset_version_id}_p{page_or_slide}_{chunk_hash}"
-
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=chunk_id,
-                    asset_version_id=asset_version_id,
-                    page_or_slide=page_or_slide,
-                    text=chunk_content,
-                    start_offset=start_offset,
-                    end_offset=end_offset,
-                    extraction_method=extraction_method,
-                    chunking_version=self.chunking_version,
-                )
-            )
-
-            if end_offset >= text_len:
-                break
-            start_offset += step
-
-        return chunks
-
-    def _extract_pdf(self, doc_path: Path, asset_version_id: str) -> list[DocumentChunk]:
-        """Extract text and chunk by page from a PDF file."""
-        extraction_method = f"pymupdf/{pymupdf.__version__}"
+    def _extract_in_process(
+        self, doc_path: Path, asset_version_id: str
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         try:
-            doc = pymupdf.open(str(doc_path))  # type: ignore[no-untyped-call]
-        except Exception as exc:
-            raise DocumentExtractionError(f"Failed to open PDF document: {exc}") from exc
-
-        try:
-            if doc.is_encrypted and not doc.authenticate(""):  # type: ignore[no-untyped-call]
-                raise DocumentExtractionError("PDF document is password-protected or encrypted.")
-
-            all_chunks: list[DocumentChunk] = []
-            for page_index in range(len(doc)):
-                page = doc[page_index]
-                page_text = page.get_text() or ""  # type: ignore[no-untyped-call]
-                page_chunks = self._chunk_text(
-                    page_text,
-                    asset_version_id=asset_version_id,
-                    page_or_slide=page_index + 1,
-                    extraction_method=extraction_method,
-                )
-                all_chunks.extend(page_chunks)
-            return all_chunks
-        finally:
-            doc.close()  # type: ignore[no-untyped-call]
-
-    def _extract_pptx(self, doc_path: Path, asset_version_id: str) -> list[DocumentChunk]:
-        """Extract text and chunk by slide from a PPTX file."""
-        extraction_method = "python-pptx"
-        try:
-            prs = Presentation(str(doc_path))
-        except Exception as exc:
-            raise DocumentExtractionError(f"Failed to open PPTX presentation: {exc}") from exc
-
-        all_chunks: list[DocumentChunk] = []
-        for slide_index, slide in enumerate(prs.slides):
-            slide_texts: list[str] = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for paragraph in shape.text_frame.paragraphs:
-                        text = "".join(run.text for run in paragraph.runs).strip()
-                        if text:
-                            slide_texts.append(text)
-                elif shape.has_table:
-                    for row in shape.table.rows:
-                        for cell in row.cells:
-                            c_text = cell.text.strip()
-                            if c_text:
-                                slide_texts.append(c_text)
-
-            slide_text = "\n".join(slide_texts).strip()
-            slide_chunks = self._chunk_text(
-                slide_text,
+            return extract_document(
+                doc_path,
                 asset_version_id=asset_version_id,
-                page_or_slide=slide_index + 1,
-                extraction_method=extraction_method,
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap,
+                chunking_version=self.chunking_version,
+                limits=self.limits,
             )
-            all_chunks.extend(slide_chunks)
-        return all_chunks
+        except MemoryError as exc:
+            raise DocumentResourceLimitExceeded(
+                "Document parser exceeded its memory budget."
+            ) from exc
+        except ParserError as exc:
+            raise DocumentExtractionError(str(exc)) from exc
 
-    def _sync_extract(self, doc_path: Path, asset_version_id: str) -> list[DocumentChunk]:
-        """Synchronously parse and extract document chunks based on extension."""
-        if not doc_path.is_file():
-            raise FileNotFoundError(f"Document file not found: {doc_path}")
-
-        suffix = doc_path.suffix.lower()
-        if suffix == ".pdf":
-            return self._extract_pdf(doc_path, asset_version_id)
-        elif suffix == ".pptx":
-            return self._extract_pptx(doc_path, asset_version_id)
-        else:
-            raise DocumentExtractionError(
-                f"Unsupported document format '{suffix}'. Only .pdf and .pptx are supported."
+    async def _extract_isolated(
+        self, doc_path: Path, asset_version_id: str
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Run the parser in a child process; kill and reap it on timeout or cancellation."""
+        request = json.dumps(self._request(doc_path, asset_version_id)).encode("utf-8")
+        process = await asyncio.create_subprocess_exec(
+            *self.parser_command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        self.last_parser_process = process
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(request), timeout=self.limits.timeout_seconds
             )
+        except TimeoutError as exc:
+            raise DocumentExtractionTimeout(
+                "Document parser exceeded its time limit and was stopped."
+            ) from exc
+        finally:
+            # On timeout, cancellation or any error the child is killed so it cannot keep
+            # parsing; it is always awaited so no zombie process is left behind.
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(process.wait(), timeout=_REAP_TIMEOUT_SECONDS)
+
+        try:
+            result = json.loads(stdout.decode("utf-8")) if stdout else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            result = None
+        if not isinstance(result, dict) or process.returncode != 0:
+            raise DocumentParserCrashed(
+                f"Document parser exited unexpectedly (exit code {process.returncode})."
+            )
+        if result.get("status") == "ok":
+            return list(result.get("chunks", [])), list(result.get("truncation_reasons", []))
+        message = str(result.get("message") or "Document parser failed.")
+        if result.get("kind") == "resource":
+            raise DocumentResourceLimitExceeded(message)
+        raise DocumentExtractionError(message)
 
     async def extract_and_embed(
         self, doc_path: Path, *, asset_version_id: str = ""
     ) -> list[DocumentChunk]:
-        """Extract chunks from PDF/PPTX in thread pool and embed if provider is set."""
+        """Extract chunks from PDF/PPTX in an isolated process and embed if a provider is set."""
+        doc_path = Path(doc_path)
         resolved_version = asset_version_id or doc_path.stem
-        chunks = await asyncio.to_thread(self._sync_extract, Path(doc_path), resolved_version)
+        if not doc_path.is_file():
+            raise FileNotFoundError(f"Document file not found: {doc_path}")
 
+        if self.isolate:
+            records, reasons = await self._extract_isolated(doc_path, resolved_version)
+        else:
+            records, reasons = await asyncio.to_thread(
+                self._extract_in_process, doc_path, resolved_version
+            )
+        if reasons:
+            self.truncation_reasons[resolved_version] = reasons
+
+        chunks = [DocumentChunk.model_validate(record) for record in records]
         if not chunks:
             return []
 
@@ -201,6 +192,11 @@ __all__ = [
     "CHUNKING_VERSION",
     "DEFAULT_CHUNK_OVERLAP",
     "DEFAULT_CHUNK_SIZE",
+    "DEFAULT_PARSER_COMMAND",
     "DocumentExtractionError",
+    "DocumentExtractionLimits",
+    "DocumentExtractionTimeout",
+    "DocumentParserCrashed",
+    "DocumentResourceLimitExceeded",
     "PyMuPDFDocumentProvider",
 ]
