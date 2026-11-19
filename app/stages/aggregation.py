@@ -148,9 +148,10 @@ def clean_diarization_turns(
                     SpeakerSegment(start_ms=seg.start_ms, end_ms=seg.end_ms, speaker_label=spk)
                 )
 
-        # Prune isolated micro-segments shorter than min_duration_ms
+        # Prune isolated micro-segments shorter than min_duration_ms (and any zero-length turns)
+        effective_min_duration_ms = max(1, min_duration_ms)
         for m_seg in merged:
-            if (m_seg.end_ms - m_seg.start_ms) >= min_duration_ms:
+            if (m_seg.end_ms - m_seg.start_ms) >= effective_min_duration_ms:
                 cleaned.append(m_seg)
 
     # Sort all cleaned segments across all speakers chronologically
