@@ -5,6 +5,7 @@ import pytest
 from app.contracts import Limitation, ScoreComponent
 from app.stages.scoring import (
     STARTUP_PITCH_RUBRIC_V1,
+    WEIGHTING_POLICY_VERSION,
     calculate_individual_delivery_scores,
     calculate_overall_score,
     calculate_qa_score,
@@ -101,9 +102,10 @@ def test_normalize_effective_weights_all_scored() -> None:
 
 
 def test_normalize_effective_weights_missing_dimension() -> None:
-    """When a dimension cannot be evaluated (e.g. vision missing), effective weights normalize
+    """When a presentation dimension cannot be evaluated (e.g. vision missing), Q&A stays fixed
 
-    only across available scored dimensions.
+    at 0.20 and the remaining 0.80 is redistributed proportionally across scored presentation
+    dimensions.
     """
     # 5 scored dimensions, 1 not_evaluated (delivery_and_body_language = 0.15)
     components = [
@@ -147,13 +149,13 @@ def test_normalize_effective_weights_missing_dimension() -> None:
 
     normalize_effective_weights(components)
 
-    # Scored sum = 0.25 + 0.20 + 0.15 + 0.05 + 0.20 = 0.85
+    # Non-Q&A scored sum = 0.25 + 0.20 + 0.15 + 0.05 = 0.65; remaining budget = 0.80
     # Effective weights:
-    # 0.25 / 0.85 = 0.2941
-    # 0.20 / 0.85 = 0.2353
-    # 0.15 / 0.85 = 0.1765
-    # 0.05 / 0.85 = 0.0588
-    # 0.20 / 0.85 = 0.2353
+    # pitch:     0.80 * (0.25 / 0.65) = 0.3077
+    # business:  0.80 * (0.20 / 0.65) = 0.2462
+    # technical: 0.80 * (0.15 / 0.65) = 0.1846
+    # timing:    0.80 * (0.05 / 0.65) = 0.0615
+    # qa_quality: 0.20 (fixed)
     scored_comps = [c for c in components if c.status == "scored"]
     unscored_comps = [c for c in components if c.status == "not_evaluated"]
 
@@ -161,13 +163,41 @@ def test_normalize_effective_weights_missing_dimension() -> None:
     assert len(unscored_comps) == 1
     assert unscored_comps[0].effective_weight is None
 
-    total_effective = sum(c.effective_weight for c in scored_comps)
+    total_effective = sum(
+        c.effective_weight for c in scored_comps if c.effective_weight is not None
+    )
     assert pytest.approx(total_effective, 0.001) == 1.0
 
     comp_map = {c.dimension: c.effective_weight for c in components}
-    assert comp_map["pitch_content_and_evidence"] == 0.2941
-    assert comp_map["business_and_problem_solution_reasoning"] == 0.2353
+    assert comp_map["pitch_content_and_evidence"] == 0.3077
+    assert comp_map["business_and_problem_solution_reasoning"] == 0.2462
+    assert comp_map["technical_feasibility"] == 0.1846
+    assert comp_map["timing_and_speech_mechanics"] == 0.0615
     assert comp_map["delivery_and_body_language"] is None
+    assert comp_map["qa_quality"] == 0.20
+
+
+def test_normalize_effective_weights_only_qa_scored() -> None:
+    """When only qa_quality is scored and all other dimensions are not_evaluated, Q&A takes 1.0."""
+    components = [
+        ScoreComponent(
+            dimension="pitch_content_and_evidence",
+            status="not_evaluated",
+            configured_weight=0.25,
+        ),
+        ScoreComponent(
+            dimension="qa_quality",
+            status="scored",
+            normalized_score=0.75,
+            configured_weight=0.20,
+        ),
+    ]
+
+    normalize_effective_weights(components)
+
+    assert components[0].effective_weight is None
+    assert components[1].effective_weight == 1.0
+    assert calculate_overall_score(components) == 0.75
 
 
 def test_normalize_effective_weights_all_unscored() -> None:
@@ -420,10 +450,125 @@ def test_evaluate_rubric_with_missing_dimension_and_limitation() -> None:
     assert del_comp.effective_weight is None
     assert del_comp.normalized_score is None
 
-    # Remaining 5 dimensions normalized
+    # Remaining 5 dimensions normalized with Q&A fixed at 0.20
     scored = [c for c in components if c.status == "scored"]
     assert len(scored) == 5
-    assert pytest.approx(sum(c.effective_weight for c in scored), 0.001) == 1.0
+    assert (
+        pytest.approx(sum(c.effective_weight for c in scored if c.effective_weight), 0.001) == 1.0
+    )
+    qa_comp = next(c for c in components if c.dimension == "qa_quality")
+    assert qa_comp.effective_weight == 0.20
+
+
+def test_evaluate_rubric_keeps_qa_at_20_percent_for_each_missing_modality() -> None:
+    """Issue #76: Q&A effective weight remains 0.20 when optional modalities are unavailable."""
+    assert WEIGHTING_POLICY_VERSION == "fixed_qa_20_v1"
+
+    # 1. Issue #76 reproduction: video unavailable (delivery and timing None), content 0.8, Q&A 0.5
+    overall_no_video, comps_no_video = evaluate_rubric(
+        {
+            "pitch_content_and_evidence": 0.8,
+            "business_and_problem_solution_reasoning": 0.8,
+            "technical_feasibility": 0.8,
+            "delivery_and_body_language": None,
+            "timing_and_speech_mechanics": None,
+            "qa_quality": 0.5,
+        }
+    )
+    weights_no_video = {c.dimension: c.effective_weight for c in comps_no_video}
+    assert weights_no_video == {
+        "pitch_content_and_evidence": 0.3333,
+        "business_and_problem_solution_reasoning": 0.2667,
+        "technical_feasibility": 0.20,
+        "delivery_and_body_language": None,
+        "timing_and_speech_mechanics": None,
+        "qa_quality": 0.20,
+    }
+    assert overall_no_video == 0.74
+
+    # 2. Only vision missing (delivery_and_body_language None)
+    _, comps_no_vision = evaluate_rubric(
+        {
+            "pitch_content_and_evidence": 0.8,
+            "business_and_problem_solution_reasoning": 0.8,
+            "technical_feasibility": 0.8,
+            "delivery_and_body_language": None,
+            "timing_and_speech_mechanics": 0.8,
+            "qa_quality": 0.5,
+        }
+    )
+    weights_no_vision = {c.dimension: c.effective_weight for c in comps_no_vision}
+    assert weights_no_vision == {
+        "pitch_content_and_evidence": 0.3077,
+        "business_and_problem_solution_reasoning": 0.2462,
+        "technical_feasibility": 0.1846,
+        "delivery_and_body_language": None,
+        "timing_and_speech_mechanics": 0.0615,
+        "qa_quality": 0.20,
+    }
+
+    # 3. Only audio features missing (timing_and_speech_mechanics None)
+    _, comps_no_audio = evaluate_rubric(
+        {
+            "pitch_content_and_evidence": 0.8,
+            "business_and_problem_solution_reasoning": 0.8,
+            "technical_feasibility": 0.8,
+            "delivery_and_body_language": 0.8,
+            "timing_and_speech_mechanics": None,
+            "qa_quality": 0.5,
+        }
+    )
+    weights_no_audio = {c.dimension: c.effective_weight for c in comps_no_audio}
+    assert weights_no_audio == {
+        "pitch_content_and_evidence": 0.2667,
+        "business_and_problem_solution_reasoning": 0.2133,
+        "technical_feasibility": 0.16,
+        "delivery_and_body_language": 0.16,
+        "timing_and_speech_mechanics": None,
+        "qa_quality": 0.20,
+    }
+
+    # 4. Supporting documents / technical_feasibility unavailable
+    _, comps_no_docs = evaluate_rubric(
+        {
+            "pitch_content_and_evidence": 0.8,
+            "business_and_problem_solution_reasoning": 0.8,
+            "technical_feasibility": None,
+            "delivery_and_body_language": 0.8,
+            "timing_and_speech_mechanics": 0.8,
+            "qa_quality": 0.5,
+        }
+    )
+    weights_no_docs = {c.dimension: c.effective_weight for c in comps_no_docs}
+    assert weights_no_docs == {
+        "pitch_content_and_evidence": 0.3077,
+        "business_and_problem_solution_reasoning": 0.2462,
+        "technical_feasibility": None,
+        "delivery_and_body_language": 0.1846,
+        "timing_and_speech_mechanics": 0.0615,
+        "qa_quality": 0.20,
+    }
+
+    # 5. Q&A unavailable: qa_quality is not_evaluated and remaining dimensions sum to 1.0
+    _, comps_no_qa = evaluate_rubric(
+        {
+            "pitch_content_and_evidence": 0.8,
+            "business_and_problem_solution_reasoning": 0.8,
+            "technical_feasibility": 0.8,
+            "delivery_and_body_language": None,
+            "timing_and_speech_mechanics": None,
+            "qa_quality": None,
+        }
+    )
+    weights_no_qa = {c.dimension: c.effective_weight for c in comps_no_qa}
+    assert weights_no_qa == {
+        "pitch_content_and_evidence": 0.4167,
+        "business_and_problem_solution_reasoning": 0.3333,
+        "technical_feasibility": 0.25,
+        "delivery_and_body_language": None,
+        "timing_and_speech_mechanics": None,
+        "qa_quality": None,
+    }
 
 
 # ============================================================================
