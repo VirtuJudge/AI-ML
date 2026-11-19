@@ -16,7 +16,59 @@ from app.providers.types import AudioObservation
 
 logger = logging.getLogger(__name__)
 
-ALGORITHM_VERSION = f"librosa/{librosa.__version__}"
+ALGORITHM_VERSION = f"librosa/{librosa.__version__}+disjoint_v1"
+
+
+def _build_analysis_windows(
+    total_duration_sec: float,
+    window_sec: float,
+    hop_sec: float,
+) -> list[tuple[float, float]]:
+    """Build sliding analysis windows covering [0, total_duration_sec]."""
+    if total_duration_sec <= window_sec:
+        return [(0.0, total_duration_sec)]
+
+    windows: list[tuple[float, float]] = []
+    t = 0.0
+    while t < total_duration_sec:
+        w_end = min(total_duration_sec, t + window_sec)
+        if w_end - t >= 0.5:  # Require at least 500ms for analysis
+            windows.append((t, w_end))
+        t += hop_sec
+    return windows
+
+
+def _build_disjoint_regions(
+    windows: list[tuple[float, float]],
+    total_duration_ms: int,
+) -> list[tuple[int, int]]:
+    """Partition covered windows into non-overlapping [start_ms, end_ms] counting regions."""
+    regions: list[tuple[int, int]] = []
+    for idx, (w_start, w_end) in enumerate(windows):
+        r_end = min(w_end, windows[idx + 1][0]) if idx + 1 < len(windows) else w_end
+        r_start_ms = max(0, round(w_start * 1000))
+        r_end_ms = min(total_duration_ms, round(r_end * 1000))
+        if regions and r_start_ms < regions[-1][1]:
+            r_start_ms = regions[-1][1]
+        if r_end_ms > r_start_ms:
+            regions.append((r_start_ms, r_end_ms))
+    return regions
+
+
+def _assign_event_to_region(
+    ev_start_ms: int,
+    ev_end_ms: int,
+    regions: list[tuple[int, int]],
+) -> int | None:
+    """Return index of the disjoint region with largest overlap (tie-breaking earlier)."""
+    best_idx: int | None = None
+    best_overlap = 0
+    for idx, (r_start, r_end) in enumerate(regions):
+        overlap = min(ev_end_ms, r_end) - max(ev_start_ms, r_start)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_idx = idx
+    return best_idx
 
 
 class LibrosaAudioProvider:
@@ -91,27 +143,115 @@ class LibrosaAudioProvider:
 
         artifact_id = source_artifact_id or audio_path.name
         total_duration_sec = len(y) / sr
+        total_duration_ms = round(total_duration_sec * 1000.0)
+        if total_duration_ms <= 0:
+            return []
+
         frame_ms = (self.hop_length / sr) * 1000.0
         min_pause_frames = max(1, round(250.0 / frame_ms))  # 250ms threshold for pause event
 
-        # Build analysis windows
-        windows: list[tuple[float, float]] = []
-        if total_duration_sec <= self.window_sec:
-            windows.append((0.0, total_duration_sec))
-        else:
-            t = 0.0
-            while t < total_duration_sec:
-                w_end = min(total_duration_sec, t + self.window_sec)
-                if w_end - t >= 0.5:  # Require at least 500ms for analysis
-                    windows.append((t, w_end))
-                t += self.hop_sec
+        # Build sliding analysis windows and disjoint counting regions so extensive
+        # event counts/durations are never double-counted across overlapping hops.
+        windows = _build_analysis_windows(total_duration_sec, self.window_sec, self.hop_sec)
+        if not windows:
+            return []
+        regions = _build_disjoint_regions(windows, total_duration_ms)
+
+        # Global pitch & filler detection across the full timeline to avoid
+        # splitting or double-counting fillers at window boundaries.
+        f0_global: np.ndarray | None = None
+        voiced_global: np.ndarray | None = None
+        filler_events: list[tuple[int, int]] = []
+        try:
+            f0_global, voiced_global, _ = librosa.pyin(
+                y,
+                fmin=self.fmin,
+                fmax=self.fmax,
+                sr=sr,
+                hop_length=self.hop_length,
+            )
+            min_filler_frames = max(2, round(200.0 / frame_ms))
+            max_filler_frames = max(min_filler_frames, round(1000.0 / frame_ms))
+            consec_voiced = 0
+            run_start_idx = 0
+            run_pitches: list[float] = []
+
+            for i, is_v in enumerate(voiced_global):
+                if is_v and not np.isnan(f0_global[i]):
+                    if consec_voiced == 0:
+                        run_start_idx = i
+                    consec_voiced += 1
+                    run_pitches.append(float(f0_global[i]))
+                else:
+                    if (
+                        min_filler_frames <= consec_voiced <= max_filler_frames
+                        and run_pitches
+                        and float(np.std(run_pitches)) < 35.0
+                    ):
+                        ev_s = max(0, round(run_start_idx * frame_ms))
+                        ev_e = min(total_duration_ms, round(i * frame_ms))
+                        if ev_e > ev_s:
+                            filler_events.append((ev_s, ev_e))
+                    consec_voiced = 0
+                    run_pitches = []
+
+            if (
+                min_filler_frames <= consec_voiced <= max_filler_frames
+                and run_pitches
+                and float(np.std(run_pitches)) < 35.0
+            ):
+                ev_s = max(0, round(run_start_idx * frame_ms))
+                ev_e = min(total_duration_ms, round(len(voiced_global) * frame_ms))
+                if ev_e > ev_s:
+                    filler_events.append((ev_s, ev_e))
+        except Exception:
+            logger.debug("Global pitch and filler estimation failed for %s", audio_path)
+            f0_global = None
+            voiced_global = None
+
+        # Global silence / pause detection via RMS energy thresholding
+        pause_events: list[tuple[int, int]] = []
+        try:
+            rms = librosa.feature.rms(y=y, hop_length=self.hop_length)[0]
+            max_rms = float(np.max(rms)) if len(rms) > 0 else 0.0
+            if max_rms > 1e-5:
+                rms_db = librosa.amplitude_to_db(rms, ref=max_rms)
+                is_silent = rms_db < self.silence_threshold_db
+            else:
+                is_silent = np.ones_like(rms, dtype=bool)
+
+            consecutive = 0
+            run_start_idx = 0
+            for i, silent in enumerate(is_silent):
+                if silent:
+                    if consecutive == 0:
+                        run_start_idx = i
+                    consecutive += 1
+                else:
+                    if consecutive >= min_pause_frames:
+                        ev_s = max(0, round(run_start_idx * frame_ms))
+                        ev_e = min(total_duration_ms, round(i * frame_ms))
+                        if ev_e > ev_s:
+                            pause_events.append((ev_s, ev_e))
+                    consecutive = 0
+
+            if consecutive >= min_pause_frames:
+                ev_s = max(0, round(run_start_idx * frame_ms))
+                ev_e = min(total_duration_ms, round(len(is_silent) * frame_ms))
+                if ev_e > ev_s:
+                    pause_events.append((ev_s, ev_e))
+        except Exception:
+            logger.debug("Global pause analysis failed for %s", audio_path)
 
         observations: list[AudioObservation] = []
 
+        # Emit intensive window metrics (speaking rate, pitch mean/std) per sliding window
         for w_start, w_end in windows:
-            start_ms = round(w_start * 1000)
-            end_ms = round(w_end * 1000)
+            start_ms = max(0, round(w_start * 1000))
+            end_ms = min(total_duration_ms, round(w_end * 1000))
             dur_sec = w_end - w_start
+            if end_ms <= start_ms:
+                continue
 
             start_idx = int(w_start * sr)
             end_idx = min(len(y), int(w_end * sr))
@@ -130,85 +270,21 @@ class LibrosaAudioProvider:
                 logger.debug("Onset detection failed for window [%.2f, %.2f]", w_start, w_end)
                 wpm_val = 0.0
 
-            # 2. Fundamental frequency (pitch) mean and variation via pYIN
+            # 2. Fundamental frequency (pitch) mean and variation from global pYIN
             pitch_mean: float | None = None
             pitch_std: float | None = None
-            filler_count = 0
-            filler_duration_ms = 0.0
-
-            try:
-                f0, voiced_flag, _ = librosa.pyin(
-                    y_win,
-                    fmin=self.fmin,
-                    fmax=self.fmax,
-                    sr=sr,
-                    hop_length=self.hop_length,
+            if f0_global is not None and voiced_global is not None and len(f0_global) > 0:
+                s_frame = max(0, round((w_start * sr) / self.hop_length))
+                e_frame = min(
+                    len(f0_global), max(s_frame + 1, round((w_end * sr) / self.hop_length))
                 )
-                valid_voiced = f0[voiced_flag & ~np.isnan(f0)]
+                f0_win = f0_global[s_frame:e_frame]
+                voiced_win = voiced_global[s_frame:e_frame]
+                valid_voiced = f0_win[voiced_win & ~np.isnan(f0_win)]
                 if len(valid_voiced) > 0:
                     pitch_mean = round(float(np.mean(valid_voiced)), 2)
                     pitch_std = round(float(np.std(valid_voiced)), 2)
 
-                # 3. Acoustic filler word detection
-                # Hesitation / vocalized pauses ("uh", "um") are continuous voiced segments
-                # lasting between 200ms and 1000ms with steady pitch (low contour deviation).
-                min_filler_frames = max(2, int(round(200.0 / frame_ms)))
-                max_filler_frames = max(min_filler_frames, int(round(1000.0 / frame_ms)))
-                consec_voiced = 0
-                run_pitches: list[float] = []
-
-                for i, is_v in enumerate(voiced_flag):
-                    if is_v and not np.isnan(f0[i]):
-                        consec_voiced += 1
-                        run_pitches.append(float(f0[i]))
-                    else:
-                        if min_filler_frames <= consec_voiced <= max_filler_frames and run_pitches:
-                            if float(np.std(run_pitches)) < 35.0:
-                                filler_count += 1
-                                filler_duration_ms += consec_voiced * frame_ms
-                        consec_voiced = 0
-                        run_pitches = []
-
-                if min_filler_frames <= consec_voiced <= max_filler_frames and run_pitches:
-                    if float(np.std(run_pitches)) < 35.0:
-                        filler_count += 1
-                        filler_duration_ms += consec_voiced * frame_ms
-
-            except Exception:
-                logger.debug(
-                    "Pitch and filler estimation failed for window [%.2f, %.2f]", w_start, w_end
-                )
-
-            # 4. Silence / pause detection via RMS energy thresholding
-            pause_duration_ms = 0.0
-            pause_count = 0
-            try:
-                rms = librosa.feature.rms(y=y_win, hop_length=self.hop_length)[0]
-                max_rms = float(np.max(rms)) if len(rms) > 0 else 0.0
-                if max_rms > 1e-5:
-                    rms_db = librosa.amplitude_to_db(rms, ref=max_rms)
-                    is_silent = rms_db < self.silence_threshold_db
-                else:
-                    is_silent = np.ones_like(rms, dtype=bool)
-
-                silent_frames = int(np.sum(is_silent))
-                pause_duration_ms = round(float(silent_frames * frame_ms), 1)
-
-                # Count contiguous pause runs lasting >= 250ms
-                consecutive = 0
-                for silent in is_silent:
-                    if silent:
-                        consecutive += 1
-                    else:
-                        if consecutive >= min_pause_frames:
-                            pause_count += 1
-                        consecutive = 0
-                if consecutive >= min_pause_frames:
-                    pause_count += 1
-            except Exception:
-                logger.debug("Pause analysis failed for window [%.2f, %.2f]", w_start, w_end)
-
-            # Add contract-compliant acoustic observations
             observations.append(
                 AudioObservation(
                     start_ms=start_ms,
@@ -249,33 +325,57 @@ class LibrosaAudioProvider:
                     ]
                 )
 
+        # Attribute pause and filler events onto disjoint counting regions once each
+        region_pause_ms = [0.0] * len(regions)
+        region_pause_counts = [0] * len(regions)
+        region_filler_counts = [0] * len(regions)
+
+        for p_start, p_end in pause_events:
+            owner_idx = _assign_event_to_region(p_start, p_end, regions)
+            if owner_idx is not None:
+                region_pause_counts[owner_idx] += 1
+            for r_idx, (r_start, r_end) in enumerate(regions):
+                overlap = min(p_end, r_end) - max(p_start, r_start)
+                if overlap > 0:
+                    region_pause_ms[r_idx] += float(overlap)
+
+        for f_start, f_end in filler_events:
+            owner_idx = _assign_event_to_region(f_start, f_end, regions)
+            if owner_idx is not None:
+                region_filler_counts[owner_idx] += 1
+
+        for r_idx, (r_start_ms, r_end_ms) in enumerate(regions):
+            bounded_pause_ms = round(
+                min(float(r_end_ms - r_start_ms), region_pause_ms[r_idx]),
+                1,
+            )
             observations.extend(
                 [
                     AudioObservation(
-                        start_ms=start_ms,
-                        end_ms=end_ms,
+                        start_ms=r_start_ms,
+                        end_ms=r_end_ms,
                         metric="pause_duration_ms",
-                        value=pause_duration_ms,
+                        value=bounded_pause_ms,
                         unit="milliseconds",
                         confidence=0.85,
                         source_artifact_id=artifact_id,
                         algorithm_version=ALGORITHM_VERSION,
                     ),
                     AudioObservation(
-                        start_ms=start_ms,
-                        end_ms=end_ms,
+                        start_ms=r_start_ms,
+                        end_ms=r_end_ms,
                         metric="pause_count",
-                        value=float(pause_count),
+                        value=float(region_pause_counts[r_idx]),
                         unit="count",
                         confidence=0.85,
                         source_artifact_id=artifact_id,
                         algorithm_version=ALGORITHM_VERSION,
                     ),
                     AudioObservation(
-                        start_ms=start_ms,
-                        end_ms=end_ms,
+                        start_ms=r_start_ms,
+                        end_ms=r_end_ms,
                         metric="filler_count",
-                        value=float(filler_count),
+                        value=float(region_filler_counts[r_idx]),
                         unit="count",
                         confidence=0.80,
                         source_artifact_id=artifact_id,

@@ -6,6 +6,7 @@ and cleaning acoustic micro-gaps before any downstream evaluation or LLM invocat
 """
 
 import logging
+from bisect import bisect_left
 from collections.abc import Sequence
 from typing import Any, NamedTuple, TypeVar
 
@@ -306,10 +307,14 @@ def compute_speaker_metrics_summary(
     if pitch_vals:
         summary["avg_pitch_hz"] = round(sum(pitch_vals) / len(pitch_vals), 1)
     if pause_durs:
-        summary["total_pause_ms"] = sum(pause_durs)
-        summary["total_pause_count"] = sum(pause_counts)
+        total_pause = sum(pause_durs)
+        summary["total_pause_ms"] = (
+            int(total_pause) if float(total_pause).is_integer() else round(total_pause, 1)
+        )
+    if pause_counts:
+        summary["total_pause_count"] = int(sum(pause_counts))
     if fillers:
-        summary["total_filler_count"] = sum(fillers)
+        summary["total_filler_count"] = int(sum(fillers))
     if gaze_vals:
         summary["avg_gaze"] = round(sum(gaze_vals) / len(gaze_vals), 2)
     if posture_vals:
@@ -318,6 +323,115 @@ def compute_speaker_metrics_summary(
         summary["avg_movement_px"] = round(sum(movement_vals) / len(movement_vals), 1)
 
     return summary
+
+
+def _aggregate_overlap_aware_metric(
+    observations: Sequence[AudioObservation],
+    metric: str,
+    window_size_ms: int,
+) -> dict[int, float]:
+    """Aggregate an additive acoustic metric across potentially overlapping intervals.
+
+    - Preserves event identity across both overlapping input windows and 10s bucket
+      boundaries so an event in an overlap region is never counted twice.
+    - Bounds ``pause_duration_ms`` by the covered timeline length in every elementary
+      interval and aggregation bucket.
+    """
+    if not observations or window_size_ms <= 0:
+        return {}
+
+    is_duration = metric == "pause_duration_ms"
+    dedup_pos: dict[tuple[int, int], float] = {}
+    point_events: dict[int, float] = {}
+    covered_buckets: set[int] = set()
+
+    for obs in observations:
+        s = max(0, min(obs.start_ms, obs.end_ms))
+        e = max(0, max(obs.start_ms, obs.end_ms))
+        val = max(0.0, float(obs.value))
+        if s == e:
+            covered_buckets.add(s // window_size_ms)
+            if not is_duration:
+                point_events[s] = max(point_events.get(s, 0.0), val)
+        else:
+            key = (s, e)
+            dedup_pos[key] = max(dedup_pos.get(key, 0.0), val)
+            first_w = s // window_size_ms
+            last_w = (e - 1) // window_size_ms
+            for w in range(first_w, last_w + 1):
+                covered_buckets.add(w)
+
+    bucket_totals: dict[int, float] = dict.fromkeys(covered_buckets, 0.0)
+    for pt, val in point_events.items():
+        w = pt // window_size_ms
+        bucket_totals[w] = bucket_totals.get(w, 0.0) + val
+
+    if not dedup_pos:
+        return bucket_totals
+
+    pos_obs = sorted(
+        ((s, e, val) for (s, e), val in dedup_pos.items()),
+        key=lambda item: (item[1], -item[0], -item[2]),
+    )
+    endpoints = sorted({p for s, e, _ in pos_obs for p in (s, e)})
+    elems = [(endpoints[i], endpoints[i + 1]) for i in range(len(endpoints) - 1)]
+    elem_len = [e - s for s, e in elems]
+    elem_obs: list[list[int]] = [[] for _ in elems]
+    obs_meta: list[tuple[int, int, float]] = []
+
+    for k, (s, e, val) in enumerate(pos_obs):
+        idx_s = bisect_left(endpoints, s)
+        idx_e = bisect_left(endpoints, e)
+        cap = min(val, float(e - s)) if is_duration else val
+        obs_meta.append((idx_s, idx_e, cap))
+        for j in range(idx_s, idx_e):
+            elem_obs[j].append(k)
+
+    assigned = [0.0] * len(elems)
+    obs_covered = [0.0] * len(pos_obs)
+
+    for k, (idx_s, idx_e, cap) in enumerate(obs_meta):
+        needed = cap - obs_covered[k]
+        if needed <= 1e-9:
+            continue
+        for j in range(idx_e - 1, idx_s - 1, -1):
+            avail = min(max(0.0, obs_meta[k2][2] - obs_covered[k2]) for k2 in elem_obs[j])
+            if is_duration:
+                avail = min(avail, float(elem_len[j]) - assigned[j])
+            add = min(needed, avail)
+            if add > 1e-9:
+                assigned[j] += add
+                for k2 in elem_obs[j]:
+                    obs_covered[k2] += add
+                needed -= add
+                if needed <= 1e-9:
+                    break
+
+    for j, val in enumerate(assigned):
+        if val <= 1e-9:
+            continue
+        es, ee = elems[j]
+        first_w = es // window_size_ms
+        last_w = (ee - 1) // window_size_ms
+        if first_w == last_w:
+            bucket_totals[first_w] = bucket_totals.get(first_w, 0.0) + val
+        elif is_duration:
+            total_span = ee - es
+            for w in range(first_w, last_w + 1):
+                ov = min(ee, (w + 1) * window_size_ms) - max(es, w * window_size_ms)
+                if ov > 0:
+                    bucket_totals[w] = bucket_totals.get(w, 0.0) + val * (ov / total_span)
+        else:
+            best_w = first_w
+            best_ov = -1
+            for w in range(first_w, last_w + 1):
+                ov = min(ee, (w + 1) * window_size_ms) - max(es, w * window_size_ms)
+                if ov > best_ov:
+                    best_ov = ov
+                    best_w = w
+            bucket_totals[best_w] = bucket_totals.get(best_w, 0.0) + val
+
+    return bucket_totals
 
 
 def aggregate_speaker_observations(
@@ -394,12 +508,23 @@ def aggregate_speaker_observations(
 
         # Group observations by window index
         window_indices: set[int] = set()
-        audio_by_window: dict[int, list[AudioObservation]] = {}
+        audio_mean_by_window: dict[int, list[AudioObservation]] = {}
+        audio_sum_obs_by_metric: dict[str, list[AudioObservation]] = {}
         for a in spk_audio:
-            mid = (a.start_ms + a.end_ms) / 2
-            w_idx = int(mid // window_size_ms)
-            window_indices.add(w_idx)
-            audio_by_window.setdefault(w_idx, []).append(a)
+            if a.metric in ACOUSTIC_SUM_METRICS:
+                audio_sum_obs_by_metric.setdefault(a.metric, []).append(a)
+            else:
+                mid = (a.start_ms + a.end_ms) / 2
+                w_idx = int(mid // window_size_ms)
+                window_indices.add(w_idx)
+                audio_mean_by_window.setdefault(w_idx, []).append(a)
+
+        audio_sum_by_window: dict[int, dict[str, float]] = {}
+        for metric_name, metric_obs in audio_sum_obs_by_metric.items():
+            bucket_vals = _aggregate_overlap_aware_metric(metric_obs, metric_name, window_size_ms)
+            for w_idx, val in bucket_vals.items():
+                window_indices.add(w_idx)
+                audio_sum_by_window.setdefault(w_idx, {})[metric_name] = val
 
         visual_by_window: dict[int, list[VisualObservation]] = {}
         for v in spk_visual:
@@ -414,7 +539,8 @@ def aggregate_speaker_observations(
             w_start = w_idx * window_size_ms
             w_end = (w_idx + 1) * window_size_ms
 
-            w_audio = audio_by_window.get(w_idx, [])
+            w_audio = audio_mean_by_window.get(w_idx, [])
+            w_audio_sums = audio_sum_by_window.get(w_idx, {})
             w_visual = visual_by_window.get(w_idx, [])
 
             # Aggregate acoustic metrics
@@ -429,16 +555,16 @@ def aggregate_speaker_observations(
                         vals = audio_metric_values[m]
                         acoustic_dict[m] = round(sum(vals) / len(vals), 1)
 
-                if "pause_duration_ms" in audio_metric_values:
-                    p_dur = sum(audio_metric_values["pause_duration_ms"])
-                    is_int = float(p_dur).is_integer()
-                    acoustic_dict["pause_duration_ms"] = int(p_dur) if is_int else round(p_dur, 1)
+            if "pause_duration_ms" in w_audio_sums:
+                p_dur = w_audio_sums["pause_duration_ms"]
+                is_int = float(p_dur).is_integer()
+                acoustic_dict["pause_duration_ms"] = int(p_dur) if is_int else round(p_dur, 1)
 
-                if "pause_count" in audio_metric_values:
-                    acoustic_dict["pause_count"] = int(sum(audio_metric_values["pause_count"]))
+            if "pause_count" in w_audio_sums:
+                acoustic_dict["pause_count"] = round(w_audio_sums["pause_count"])
 
-                if "filler_count" in audio_metric_values:
-                    acoustic_dict["filler_count"] = int(sum(audio_metric_values["filler_count"]))
+            if "filler_count" in w_audio_sums:
+                acoustic_dict["filler_count"] = round(w_audio_sums["filler_count"])
 
             # Aggregate visual metrics
             visual_dict: dict[str, Any] = {}

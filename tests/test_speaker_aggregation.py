@@ -18,6 +18,7 @@ from app.stages.aggregation import (
     format_speaker_summary_for_prompt,
     format_timestamp_ms,
 )
+from app.stages.scoring import calculate_individual_delivery_scores
 
 
 # ============================================================================
@@ -737,3 +738,322 @@ def test_format_speaker_summary_for_prompt() -> None:
 def test_format_speaker_summary_empty_fallback() -> None:
     """Verify graceful handling when by_speaker is empty."""
     assert format_speaker_summary_for_prompt({}) == "No presenter delivery metrics available."
+
+
+# ============================================================================
+# 6. Overlap-Aware Acoustic Aggregation Tests (Issue #69)
+# ============================================================================
+
+
+def test_overlap_aware_aggregation_a08_single_event_in_overlap() -> None:
+    """Reproduce A08: two overlapping windows observing 1s pause & 1 filler inside 3000-4000ms."""
+    diarization = DiarizationResult(
+        segments=[SpeakerSegment(start_ms=0, end_ms=10000, speaker_label="SPEAKER_00")],
+        speaker_labels=["SPEAKER_00"],
+    )
+    overlapping_audio = [
+        # Window 0-5000ms
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="speaking_rate_wpm",
+            value=140.0,
+            unit="words_per_minute",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pause_duration_ms",
+            value=1000.0,
+            unit="milliseconds",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        # Overlapping Window 2500-7500ms observing the exact same 3000-4000ms event
+        AudioObservation(
+            start_ms=2500,
+            end_ms=7500,
+            metric="speaking_rate_wpm",
+            value=140.0,
+            unit="words_per_minute",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=2500,
+            end_ms=7500,
+            metric="pause_duration_ms",
+            value=1000.0,
+            unit="milliseconds",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=2500,
+            end_ms=7500,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=2500,
+            end_ms=7500,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+
+    profile = aggregate_speaker_observations([], overlapping_audio, diarization)["SPEAKER_00"]
+    summary = profile["metrics_summary"]
+    assert summary["total_pause_ms"] == 1000
+    assert summary["total_pause_count"] == 1
+    assert summary["total_filler_count"] == 1
+
+    # Compare scoring against a single disjoint observation of the same 1s pause and 1 filler
+    disjoint_audio = [
+        AudioObservation(
+            start_ms=0,
+            end_ms=7500,
+            metric="speaking_rate_wpm",
+            value=140.0,
+            unit="words_per_minute",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=3000,
+            end_ms=4000,
+            metric="pause_duration_ms",
+            value=1000.0,
+            unit="milliseconds",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=3000,
+            end_ms=4000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=3000,
+            end_ms=4000,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+    disjoint_profile = aggregate_speaker_observations([], disjoint_audio, diarization)["SPEAKER_00"]
+    overlap_timing = next(
+        c
+        for c in calculate_individual_delivery_scores(profile)
+        if c.dimension == "timing_and_speech_mechanics"
+    )
+    disjoint_timing = next(
+        c
+        for c in calculate_individual_delivery_scores(disjoint_profile)
+        if c.dimension == "timing_and_speech_mechanics"
+    )
+    assert overlap_timing.normalized_score == disjoint_timing.normalized_score
+
+
+def test_overlap_aware_aggregation_preserves_identity_across_buckets() -> None:
+    """Events straddling or overlapping across 10s bucket boundaries must not double-count."""
+    diarization = DiarizationResult(
+        segments=[SpeakerSegment(start_ms=0, end_ms=20000, speaker_label="SPEAKER_00")],
+        speaker_labels=["SPEAKER_00"],
+    )
+
+    # Case 1: Overlapping windows [5000, 10000] (bucket 0) and [7500, 12500] (bucket 1)
+    # both observing one 1s pause + 1 filler inside [7500, 10000]
+    audio_obs = [
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pause_duration_ms",
+            value=1000.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=7500,
+            end_ms=12500,
+            metric="pause_duration_ms",
+            value=1000.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=7500,
+            end_ms=12500,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=7500,
+            end_ms=12500,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+    profile = aggregate_speaker_observations([], audio_obs, diarization)["SPEAKER_00"]
+    assert profile["metrics_summary"]["total_pause_ms"] == 1000
+    assert profile["metrics_summary"]["total_pause_count"] == 1
+    assert profile["metrics_summary"]["total_filler_count"] == 1
+
+    # Case 2: Single event [9000, 11000] crossing the 10000ms bucket boundary
+    straddling_obs = [
+        AudioObservation(
+            start_ms=9000,
+            end_ms=11000,
+            metric="pause_duration_ms",
+            value=2000.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=9000,
+            end_ms=11000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=9000,
+            end_ms=11000,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+    straddle_profile = aggregate_speaker_observations([], straddling_obs, diarization)["SPEAKER_00"]
+    assert len(straddle_profile["windows"]) == 2
+    assert straddle_profile["windows"][0]["acoustic"]["pause_duration_ms"] == 1000
+    assert straddle_profile["windows"][1]["acoustic"]["pause_duration_ms"] == 1000
+    assert straddle_profile["metrics_summary"]["total_pause_ms"] == 2000
+    assert straddle_profile["metrics_summary"]["total_pause_count"] == 1
+    assert straddle_profile["metrics_summary"]["total_filler_count"] == 1
+
+
+def test_overlap_aware_aggregation_bounds_pause_duration_and_handles_chains() -> None:
+    """Pause duration stays bounded by covered timeline; disjoint windows in chains still add."""
+    diarization = DiarizationResult(
+        segments=[SpeakerSegment(start_ms=0, end_ms=15000, speaker_label="SPEAKER_00")],
+        speaker_labels=["SPEAKER_00"],
+    )
+
+    # All-silent overlapping 5s windows over [0, 10000]: max possible pause is 10000ms, not 15000ms
+    all_silent_obs = [
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pause_duration_ms",
+            value=5000.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=2500,
+            end_ms=7500,
+            metric="pause_duration_ms",
+            value=5000.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pause_duration_ms",
+            value=5000.0,
+            unit="ms",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+    silent_profile = aggregate_speaker_observations([], all_silent_obs, diarization)["SPEAKER_00"]
+    assert silent_profile["metrics_summary"]["total_pause_ms"] == 10000
+    assert silent_profile["windows"][0]["acoustic"]["pause_duration_ms"] <= 10000
+
+    # Multi-hop overlap chain with two distinct events (one in [0, 2500), one in [5000, 7500))
+    chain_obs = [
+        AudioObservation(
+            start_ms=0,
+            end_ms=5000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=2500,
+            end_ms=7500,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+        AudioObservation(
+            start_ms=5000,
+            end_ms=10000,
+            metric="pause_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+    chain_profile = aggregate_speaker_observations([], chain_obs, diarization)["SPEAKER_00"]
+    assert chain_profile["metrics_summary"]["total_pause_count"] == 2
+
+    # Four overlapping hops (hop=1.0s, window=5.0s) seeing one event in [3000, 4000]
+    four_hop_obs = [
+        AudioObservation(
+            start_ms=s,
+            end_ms=s + 5000,
+            metric="filler_count",
+            value=1.0,
+            unit="count",
+            speaker_label="SPEAKER_00",
+        )
+        for s in (0, 1000, 2000, 3000)
+    ]
+    four_hop_profile = aggregate_speaker_observations([], four_hop_obs, diarization)["SPEAKER_00"]
+    assert four_hop_profile["metrics_summary"]["total_filler_count"] == 1
