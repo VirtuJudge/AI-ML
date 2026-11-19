@@ -9,9 +9,9 @@ import tempfile
 try:
     from datetime import UTC, datetime
 except ImportError:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    UTC = timezone.utc
+    UTC = UTC
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1400,10 +1400,16 @@ class FakePipeline:
                 "assessment": {
                     "text": assessment_res.assessment.assessment_text,
                     "score": assessment_res.assessment.score,
+                    "status": assessment_res.assessment.status,
                     "evidence_ids": assessment_res.assessment.evidence_ids,
                 },
                 "follow_up": (follow_up.model_dump() if follow_up else None),
                 "limitations": [lim.model_dump() for lim in assessment_res.limitations],
+                "metadata": {
+                    "assessment_source": assessment_res.assessment.metadata.get(
+                        "assessment_source"
+                    ),
+                },
             }
 
             assessment_ref = await self.object_storage.upload_json(

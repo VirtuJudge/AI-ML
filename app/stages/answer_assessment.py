@@ -12,8 +12,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.contracts import MAX_QUESTION_TEXT_LENGTH, Limitation
-from app.providers.base import AnswerAssessment, JudgeModelProvider
 from app.prompts.judges import JUDGE_DIRECTED_INSULT_REGEX
+from app.providers.base import AnswerAssessment, JudgeModelProvider
 from app.stages.common import build_over_length_follow_up_limitation
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,8 @@ async def run_answer_assessment_stage(
         "judge_provider": judge_provider.__class__.__name__,
         "rubric_dimension": rubric_dimension,
         "has_follow_up": assessment.follow_up is not None,
+        "assessment_status": assessment.status,
+        "assessment_source": assessment.metadata.get("assessment_source"),
     }
 
     return AnswerAssessmentResult(

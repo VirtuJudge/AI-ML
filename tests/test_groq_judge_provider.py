@@ -301,8 +301,11 @@ def test_groq_judge_fallback_assessment_has_no_followup_and_empty_evidence() -> 
     )
     assert fallback.follow_up is None
     assert fallback.evidence_ids == []
-    assert fallback.score == 0.0
-    assert "could not be reliably assessed" in fallback.assessment_text
+    # A model failure is not a judgement: no score, not_evaluated, with a limitation.
+    assert fallback.status == "not_evaluated"
+    assert fallback.score is None
+    assert [lim.code for lim in fallback.limitations] == ["answer_assessment_unavailable"]
+    assert "could not be assessed" in fallback.assessment_text
 
 
 def test_groq_judge_parse_assessment_empty_evidence_ids() -> None:

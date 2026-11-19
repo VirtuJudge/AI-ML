@@ -4,9 +4,9 @@ Defines structural interfaces (typing.Protocol) for swappable AI/ML adapters.
 """
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.contracts import Finding, FollowUpQuestion, Limitation, PrimaryQuestion
 from app.providers.types import (
@@ -35,10 +35,23 @@ class AnswerAssessment(BaseModel):
     """Structured assessment of a team member's answer against a question and rubric."""
 
     assessment_text: str
-    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # "scored" is a real judgement (a genuinely poor answer can score 0.0);
+    # "not_evaluated" means no usable judgement exists and score is None.
+    status: Literal["scored", "not_evaluated"] = "scored"
+    score: float | None = Field(default=0.0, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
     follow_up: FollowUpQuestion | None = None
     limitations: list[Limitation] = Field(default_factory=list)
+    # Operational provenance, e.g. which model attempt produced the result.
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _status_matches_score(self) -> "AnswerAssessment":
+        if self.status == "not_evaluated" and self.score is not None:
+            raise ValueError("A not_evaluated assessment must not carry a score.")
+        if self.status == "scored" and self.score is None:
+            raise ValueError("A scored assessment requires a score.")
+        return self
 
 
 class SpeechProvider(Protocol):

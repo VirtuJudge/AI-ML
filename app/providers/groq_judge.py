@@ -317,16 +317,33 @@ class GroqJudgeModelProvider:
         rubric_dimension: str,
         remaining_follow_ups: int,
     ) -> AnswerAssessment:
-        """Deterministic grounded fallback assessment on model failure."""
+        """Not-evaluated result when every model attempt failed or returned unusable output.
+
+        An infrastructure or model failure is not a judgement of the answer, so it carries
+        no score (never 0.0) and an explicit limitation instead.
+        """
         assessment_text = (
-            "The answer could not be reliably assessed because the evaluation model did not "
-            "return a valid structured result. No Q&A points were awarded."
+            "The answer could not be assessed because the evaluation model did not return a "
+            "valid structured result. It is excluded from Q&A scoring."
         )
         return AnswerAssessment(
             assessment_text=assessment_text,
-            score=0.0,
+            status="not_evaluated",
+            score=None,
             evidence_ids=[],
             follow_up=None,
+            limitations=[
+                Limitation(
+                    code="answer_assessment_unavailable",
+                    scope="qa_quality",
+                    message=(
+                        "The answer assessment was unavailable after all model attempts failed; "
+                        "it is not counted as a zero score."
+                    ),
+                    affected_dimensions=["qa_quality"],
+                )
+            ],
+            metadata={"assessment_source": "unavailable", "model_attempts": 2},
         )
 
     async def assess_answer(
@@ -366,7 +383,8 @@ class GroqJudgeModelProvider:
             )
             assessment = self._parse_assessment(raw_text, rubric_dimension, remaining_follow_ups)
             if assessment is not None:
-                return assessment
+                source_metadata = {**assessment.metadata, "assessment_source": "primary"}
+                return assessment.model_copy(update={"metadata": source_metadata})
         except (GroqPoolError, Exception) as err:
             logger.warning(
                 "Assess answer primary call failed (%s). Retrying with fallback model %s.",
@@ -385,7 +403,8 @@ class GroqJudgeModelProvider:
             )
             assessment = self._parse_assessment(raw_text, rubric_dimension, remaining_follow_ups)
             if assessment is not None:
-                return assessment
+                source_metadata = {**assessment.metadata, "assessment_source": "fallback_model"}
+                return assessment.model_copy(update={"metadata": source_metadata})
         except (GroqPoolError, Exception) as err:
             logger.warning(
                 "Assess answer fallback call failed (%s). Emitting deterministic fallback.",
@@ -538,7 +557,7 @@ class GroqJudgeModelProvider:
         )
 
         # Fallback populate for any speakers missing in member feedback
-        for spk in speaker_profiles.keys():
+        for spk in speaker_profiles:
             if spk not in member_strengths:
                 member_strengths[spk] = [
                     Finding(
