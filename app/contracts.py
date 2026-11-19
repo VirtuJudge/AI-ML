@@ -207,6 +207,7 @@ class GenerateReportPayload(BaseModel):
         default_factory=lambda: RubricRef(rubric_id="startup_pitch", version=1)
     )
     speaker_mappings: list[SpeakerMapping] = Field(default_factory=list)
+    analysis_attempt_id: str | None = None
 
 
 class EraseAIDataPayload(BaseModel):
@@ -335,6 +336,7 @@ class MemberFeedback(BaseModel):
     strengths: list[Finding] = Field(default_factory=list)
     improvements: list[Finding] = Field(default_factory=list)
     delivery_components: list[ScoreComponent] = Field(default_factory=list)
+    qa_feedback: FeedbackSection | None = None
 
 
 class Evaluation(BaseModel):

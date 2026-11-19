@@ -45,7 +45,7 @@ from app.contracts import (
 )
 from app.pipeline import PitchAnalysisPipeline
 from app.providers.groq_speech import GroqSpeechProviderError
-from app.stages.common import StageError, classify_stage_error
+from app.stages.common import StageError, StageValidationError, classify_stage_error
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +239,9 @@ def _default_stage_for_error(exc: BaseException) -> str:
 
 def _failed_payload_for_stage_error(exc: StageError, execution_attempt: int) -> FailedPayload:
     """Build a safe FailedPayload from a typed StageError."""
-    if exc.retryable:
+    if isinstance(exc, StageValidationError):
+        safe_message = exc.safe_message
+    elif exc.retryable:
         safe_message = (
             "External provider request timed out before completing the stage."
             if exc.code == ErrorCode.PROVIDER_TIMEOUT

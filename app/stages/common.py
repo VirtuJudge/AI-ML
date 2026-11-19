@@ -107,6 +107,21 @@ class StageProviderError(StageError):
         super().__init__(message, stage=stage, code=code, retryable=False)
 
 
+class StageValidationError(StageError):
+    """Raised when a pipeline stage cannot produce a valid contract output."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        stage: str | None = None,
+        code: ErrorCode = ErrorCode.VALIDATION_ERROR,
+        safe_message: str = "Stage output failed validation.",
+    ) -> None:
+        super().__init__(message, stage=stage, code=code, retryable=False)
+        self.safe_message = safe_message
+
+
 def _stage_error_from_status(
     status_code: int,
     *,
@@ -409,10 +424,20 @@ def build_over_length_follow_up_limitation(rubric_dimension: str | None = None) 
     )
 
 
+def append_unique_limitation(limitations: list[Limitation], lim: Limitation) -> None:
+    """Append a Limitation unless an equivalent code/scope/dimension entry is already present."""
+    key = (lim.code, lim.scope, tuple(lim.affected_dimensions))
+    existing = {(item.code, item.scope, tuple(item.affected_dimensions)) for item in limitations}
+    if key not in existing:
+        limitations.append(lim)
+
+
 __all__ = [
     "StageError",
     "StageProviderError",
     "StageTransientError",
+    "StageValidationError",
+    "append_unique_limitation",
     "build_over_length_follow_up_limitation",
     "classify_stage_error",
     "validate_observation_timestamps",

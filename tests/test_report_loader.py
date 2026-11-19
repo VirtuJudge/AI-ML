@@ -95,6 +95,9 @@ async def test_load_report_evidence_from_storage(tmp_path: Path) -> None:
     # 2. Upload sample qa.json
     qa_key = "ai/session/session_100/qa.json"
     qa_payload = {
+        "qa_round_id": "01JQAROUND0000000000000100",
+        "analysis_attempt": 3,
+        "analysis_attempt_id": "01JATTEMPT0000000000000100",
         "questions": [
             {"id": "q1", "text": "What is the moat?", "rubric_dimension": "technical_feasibility"}
         ],
@@ -112,6 +115,9 @@ async def test_load_report_evidence_from_storage(tmp_path: Path) -> None:
 
     assert isinstance(bundle, ReportEvidenceBundle)
     assert bundle.session_id == "session_100"
+    assert bundle.qa_round_id == "01JQAROUND0000000000000100"
+    assert bundle.analysis_attempt == 3
+    assert bundle.analysis_attempt_id == "01JATTEMPT0000000000000100"
     assert bundle.transcript_full_text == "Hello world from founders."
     assert "SPEAKER_00" in bundle.by_speaker
     assert len(bundle.limitations) == 1

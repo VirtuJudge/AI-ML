@@ -1011,6 +1011,12 @@ async def test_generate_report_recovers_scores_from_analyze_answer_with_backend_
     )
 
     evaluation = await storage.read_json(report_res.evaluation_artifact.object_key)
+    assert evaluation["qa_round_id"] == "01JISSUE74ROUND00000000001"
+    assert evaluation["analysis_attempt_id"] == f"{session_id}:attempt_1"
+    assert evaluation["member_feedback"][0]["qa_feedback"] is not None
+    assert evaluation["member_feedback"][0]["qa_feedback"]["score_components"][0]["status"] == (
+        "scored"
+    )
     qa_comp = next(c for c in evaluation["components"] if c["dimension"] == "qa_quality")
     # FakeJudgeModelProvider gives 0.85 for comprehensive and 0.65 for standard -> mean 0.7167
     assert qa_comp["status"] == "scored"
@@ -1139,3 +1145,122 @@ async def test_analyze_session_over_length_primary_question_replaced(
     assert len(result.primary_questions) == 3
     assert all(1 <= len(q.text) <= 1000 for q in result.primary_questions)
     assert any(lim.code == "over_length_question_rejected" for lim in result.limitations)
+
+
+@pytest.mark.asyncio
+async def test_generate_report_without_mappings_returns_empty_user_ids_and_limitation(
+    tmp_path: Path,
+) -> None:
+    """FakePipeline.generate_report with no speaker_mappings must not invent members."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    pipeline = FakePipeline(object_storage=storage)
+    session_id = "01JISSUE79UNMAPPED00000001"
+    attempt_id = "01JISSUE79ATTEMPT000000001"
+
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        {
+            "artifact_id": "01JISSUE79ANALYSIS00000001",
+            "session_id": session_id,
+            "practice_session_id": session_id,
+            "transcript": {"text": "Pitch transcript.", "segments": []},
+            "by_speaker": {
+                "SPEAKER_00": {"speaking_time_ms": 5000, "intervals": [], "windows": []}
+            },
+        },
+        artifact_id="01JISSUE79ANALYSIS00000001",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        {
+            "artifact_id": "01JISSUE79QA00000000000001",
+            "qa_round_id": "01JISSUE79ROUND00000000001",
+            "practice_session_id": session_id,
+            "analysis_attempt": 1,
+            "questions": [],
+            "answers": [],
+            "assessments": [],
+        },
+        artifact_id="01JISSUE79QA00000000000001",
+    )
+
+    result = await pipeline.generate_report(
+        GenerateReportPayload(
+            report_id="01JISSUE79REPORT0000000001",
+            analysis_artifact=analysis_ref,
+            qa_artifact=qa_ref,
+            speaker_mappings=[],
+            analysis_attempt_id=attempt_id,
+        ),
+        practice_session_id=session_id,
+    )
+
+    assert result.member_feedback_user_ids == []
+    assert any(lim.code == "speaker_mappings_not_provided" for lim in result.limitations)
+
+    evaluation = await storage.read_json(result.evaluation_artifact.object_key)
+    assert evaluation["member_feedback"] == []
+    assert evaluation["analysis_attempt_id"] == attempt_id
+    assert evaluation["qa_round_id"] == "01JISSUE79ROUND00000000001"
+
+
+@pytest.mark.asyncio
+async def test_generate_report_all_unscored_fails_cleanly_instead_of_null_score(
+    tmp_path: Path,
+) -> None:
+    """When zero dimensions are scored, generate_report fails with StageValidationError."""
+    from app.contracts import ErrorCode
+    from app.providers.fake_judge import FakeJudgeModelProvider
+    from app.stages.common import StageValidationError
+
+    class AllUnscoredJudge(FakeJudgeModelProvider):
+        async def generate_report_feedback(self, **kwargs):  # type: ignore[override]
+            res = await super().generate_report_feedback(**kwargs)
+            res.dimension_scores = {}
+            return res
+
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    pipeline = FakePipeline(
+        judge_provider=AllUnscoredJudge(),
+        object_storage=storage,
+    )
+    session_id = "01JISSUE79ALLUNSCORED00001"
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        {
+            "artifact_id": "01JISSUE79UNSCOREDAN000001",
+            "session_id": session_id,
+            "practice_session_id": session_id,
+            "transcript": {"text": "", "segments": []},
+            "by_speaker": {},
+        },
+        artifact_id="01JISSUE79UNSCOREDAN000001",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        {
+            "artifact_id": "01JISSUE79UNSCOREDQA000001",
+            "qa_round_id": "01JISSUE79UNSCOREDROUND001",
+            "practice_session_id": session_id,
+            "analysis_attempt": 1,
+            "questions": [],
+            "answers": [],
+            "assessments": [],
+        },
+        artifact_id="01JISSUE79UNSCOREDQA000001",
+    )
+
+    with pytest.raises(StageValidationError) as exc_info:
+        await pipeline.generate_report(
+            GenerateReportPayload(
+                report_id="01JISSUE79UNSCOREDREP00001",
+                analysis_artifact=analysis_ref,
+                qa_artifact=qa_ref,
+                speaker_mappings=[],
+            ),
+            practice_session_id=session_id,
+        )
+
+    assert exc_info.value.stage == "reporting"
+    assert exc_info.value.code == ErrorCode.VALIDATION_ERROR
+    assert exc_info.value.retryable is False

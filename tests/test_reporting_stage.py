@@ -51,6 +51,13 @@ async def test_run_report_stage_with_synthetic_defaults() -> None:
         qa_ref=qa_ref,
         storage=None,
         judge_provider=FakeJudgeModelProvider(),
+        speaker_mappings=[
+            SpeakerMapping(
+                speaker_label="SPEAKER_00",
+                user_id="01JSYNTHUSER00000000000001",
+                display_name="Presenter One",
+            )
+        ],
         session_title="VirtuJudge Synthetic Practice",
     )
 
@@ -264,7 +271,8 @@ async def test_run_report_stage_with_mock_storage() -> None:
         judge_provider=FakeJudgeModelProvider(),
     )
 
-    assert result.evaluation.analysis_attempt_id == "storage_sess_01"
+    assert result.evaluation.analysis_attempt_id == "storage_sess_01:attempt_1"
+    assert result.evaluation.qa_round_id == "storage_sess_01:round_1"
     assert mock_storage.download_file.call_count == 2
 
 
@@ -351,6 +359,13 @@ async def test_run_report_stage_zero_turn_presenter_has_no_delivery_feedback() -
         report_id="01JREPORT_NO_DELIVERY_01",
         evidence_bundle_override=bundle,
         judge_provider=FakeJudgeModelProvider(),
+        speaker_mappings=[
+            SpeakerMapping(
+                speaker_label="SPEAKER_00",
+                user_id="01JUSER_NO_DELIVERY_01",
+                display_name="Zero Turn Presenter",
+            )
+        ],
     )
 
     presenter = result.evaluation.member_feedback[0]
@@ -643,3 +658,308 @@ async def test_run_report_stage_markdown_and_evaluation_labels_match() -> None:
 
     assert "- **Assessment Score:** Good (62/100)" in md
     assert "- **Assessment Score:** Strong (82/100)" in md
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mappings", [None, []])
+async def test_run_report_stage_without_speaker_mappings_emits_limitation_and_no_members(
+    mappings: list[SpeakerMapping] | None,
+) -> None:
+    """Missing speaker mappings must not invent user_speaker_XX members; emit a limitation."""
+    bundle = ReportEvidenceBundle(
+        session_id="session_unmapped_01",
+        qa_round_id="01JUNMAPPEDROUND0000000001",
+        analysis_attempt=2,
+        transcript_full_text="Pitch without confirmed speaker mappings.",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 15000,
+                "intervals": [{"start_ms": 0, "end_ms": 15000, "formatted": "00:00 - 00:15"}],
+                "windows": [],
+            },
+            "SPEAKER_01": {
+                "speaking_time_ms": 10000,
+                "intervals": [{"start_ms": 15000, "end_ms": 25000, "formatted": "00:15 - 00:25"}],
+                "windows": [],
+            },
+        },
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_UNMAPPED_01",
+        evidence_bundle_override=bundle,
+        judge_provider=FakeJudgeModelProvider(),
+        speaker_mappings=mappings,
+    )
+
+    assert result.evaluation.member_feedback == []
+    assert result.member_feedback_user_ids == []
+    assert "user_speaker_" not in result.evaluation.model_dump_json()
+    assert any(
+        lim.code == "speaker_mappings_not_provided" and lim.scope == "member_feedback"
+        for lim in result.limitations
+    )
+    assert any(lim.code == "speaker_mappings_not_provided" for lim in result.evaluation.limitations)
+    assert "*No mapped individual presenter feedback available.*" in result.report_markdown
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_uses_real_attempt_and_qa_round_ids(tmp_path: Path) -> None:
+    """Evaluation uses real qa_round_id from qa.json and attempt identity, never session ID."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    session_id = "109156be-c4fb-41ea-b1b4-efe1671c5836"
+    qa_round_id = "22222222-3333-4444-5555-666666666666"
+    attempt_id = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        build_synthetic_analysis_data(session_id=session_id),
+        artifact_id="01JANALYSIS_REAL_IDS_001",
+    )
+    qa_payload = build_synthetic_qa_data(session_id=session_id)
+    qa_payload["qa_round_id"] = qa_round_id
+    qa_payload["analysis_attempt"] = 2
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        qa_payload,
+        artifact_id="01JQA_REAL_IDS_000000001",
+    )
+
+    result_with_attempt_id = await run_report_stage(
+        report_id="01JREPORT_REAL_IDS_00001",
+        analysis_ref=analysis_ref,
+        qa_ref=qa_ref,
+        storage=storage,
+        judge_provider=FakeJudgeModelProvider(),
+        analysis_attempt=2,
+        analysis_attempt_id=attempt_id,
+    )
+    assert result_with_attempt_id.evaluation.analysis_attempt_id == attempt_id
+    assert result_with_attempt_id.evaluation.qa_round_id == qa_round_id
+    assert f"- **Analysis Attempt ID:** `{attempt_id}`" in result_with_attempt_id.report_markdown
+    assert f"- **Q&A Round ID:** `{qa_round_id}`" in result_with_attempt_id.report_markdown
+
+    result_without_attempt_uuid = await run_report_stage(
+        report_id="01JREPORT_REAL_IDS_00002",
+        analysis_ref=analysis_ref,
+        qa_ref=qa_ref,
+        storage=storage,
+        judge_provider=FakeJudgeModelProvider(),
+    )
+    assert result_without_attempt_uuid.evaluation.analysis_attempt_id == f"{session_id}:attempt_2"
+    assert result_without_attempt_uuid.evaluation.analysis_attempt_id != session_id
+    assert result_without_attempt_uuid.evaluation.qa_round_id == qa_round_id
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_produces_qa_feedback_only_for_members_who_answered() -> None:
+    """MemberFeedback.qa_feedback is set for members who submitted answers and None otherwise."""
+    bundle = ReportEvidenceBundle(
+        session_id="session_member_qa_01",
+        qa_round_id="round_member_qa_01",
+        transcript_full_text="Team pitch.",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 20000,
+                "intervals": [{"start_ms": 0, "end_ms": 20000, "formatted": "00:00 - 00:20"}],
+                "windows": [],
+            },
+            "SPEAKER_01": {
+                "speaking_time_ms": 15000,
+                "intervals": [{"start_ms": 20000, "end_ms": 35000, "formatted": "00:20 - 00:35"}],
+                "windows": [],
+            },
+        },
+        questions=[
+            {
+                "id": "q1",
+                "text": "What is your gross margin?",
+                "rubric_dimension": "business_and_problem_solution_reasoning",
+                "evidence_ids": ["ev_speech_001"],
+            },
+            {
+                "id": "q2",
+                "text": "How does failover work?",
+                "rubric_dimension": "technical_feasibility",
+                "evidence_ids": ["ev_doc_001"],
+            },
+            {
+                "id": "q3",
+                "text": "What is your retention rate?",
+                "rubric_dimension": "pitch_content_and_evidence",
+                "evidence_ids": ["ev_speech_002"],
+            },
+        ],
+        answers=[
+            {
+                "id": "a1",
+                "question_id": "q1",
+                "answered_by": "user_alice",
+                "status": "submitted",
+                "transcript": "78% gross margin.",
+            },
+            {
+                "id": "a2",
+                "question_id": "q2",
+                "answered_by": "user_alice",
+                "status": "submitted",
+                "transcript": "We have one node.",
+            },
+            {
+                "id": "a3",
+                "question_id": "q3",
+                "answered_by": "user_bob",
+                "status": "skipped",
+            },
+        ],
+        assessments=[
+            {
+                "question_id": "q1",
+                "answer_id": "a1",
+                "score": 0.85,
+                "assessment_text": "Concrete gross margin figure provided.",
+                "evidence_ids": ["ev_ans_01"],
+            },
+            {
+                "question_id": "q2",
+                "answer_id": "a2",
+                "score": 0.45,
+                "assessment_text": "Single-node setup lacks redundancy details.",
+                "evidence_ids": ["ev_ans_02"],
+            },
+        ],
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_MEMBER_QA_01",
+        evidence_bundle_override=bundle,
+        judge_provider=FakeJudgeModelProvider(),
+        speaker_mappings=[
+            SpeakerMapping(
+                speaker_label="SPEAKER_00",
+                user_id="user_alice",
+                display_name="Alice Founder",
+            ),
+            SpeakerMapping(
+                speaker_label="SPEAKER_01",
+                user_id="user_bob",
+                display_name="Bob CTO",
+            ),
+        ],
+    )
+
+    by_user = {mf.user_id: mf for mf in result.evaluation.member_feedback}
+    alice = by_user["user_alice"]
+    bob = by_user["user_bob"]
+
+    assert alice.qa_feedback is not None
+    assert "65/100" in alice.qa_feedback.summary
+    assert len(alice.qa_feedback.strengths) == 1
+    assert alice.qa_feedback.strengths[0].evidence_ids == ["ev_ans_01", "ev_speech_001"]
+    assert len(alice.qa_feedback.improvements) == 1
+    assert alice.qa_feedback.improvements[0].evidence_ids == ["ev_ans_02", "ev_doc_001"]
+    assert len(alice.qa_feedback.score_components) == 1
+    assert alice.qa_feedback.score_components[0].dimension == "qa_quality"
+    assert alice.qa_feedback.score_components[0].status == "scored"
+    assert alice.qa_feedback.score_components[0].normalized_score == 0.65
+    assert alice.qa_feedback.score_components[0].label == "good"
+    assert "#### Presenter Q&A Feedback" in result.report_markdown
+
+    # Bob only skipped a question and submitted no answers -> qa_feedback must be None
+    assert bob.qa_feedback is None
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_unscored_member_qa_emits_limitation() -> None:
+    """Member who answered without recoverable assessment scores gets not_evaluated qa_feedback."""
+    bundle = ReportEvidenceBundle(
+        session_id="session_member_qa_unscored",
+        qa_round_id="round_member_qa_unscored",
+        transcript_full_text="Team pitch.",
+        by_speaker={
+            "SPEAKER_00": {
+                "speaking_time_ms": 0,
+                "intervals": [],
+                "windows": [],
+            }
+        },
+        questions=[
+            {
+                "id": "q1",
+                "text": "What is your burn rate?",
+                "rubric_dimension": "business_and_problem_solution_reasoning",
+            }
+        ],
+        answers=[
+            {
+                "id": "a1",
+                "question_id": "q1",
+                "answered_by": "user_alice",
+                "status": "submitted",
+                "transcript": "Our burn rate is $12k/month.",
+            }
+        ],
+        assessments=[],
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_MEMBER_QA_UNSCORED",
+        evidence_bundle_override=bundle,
+        judge_provider=FakeJudgeModelProvider(),
+        speaker_mappings=[
+            SpeakerMapping(
+                speaker_label="SPEAKER_00",
+                user_id="user_alice",
+                display_name="Alice Founder",
+            )
+        ],
+    )
+
+    alice = result.evaluation.member_feedback[0]
+    assert alice.qa_feedback is not None
+    assert alice.qa_feedback.strengths == []
+    assert alice.qa_feedback.improvements == []
+    assert alice.qa_feedback.score_components[0].status == "not_evaluated"
+    assert alice.qa_feedback.score_components[0].limitation_code == "qa_assessment_unavailable"
+    assert any(lim.code == "qa_assessment_unavailable" for lim in alice.qa_feedback.limitations)
+    assert "#### Presenter Q&A Feedback" in result.report_markdown
+
+
+@pytest.mark.asyncio
+async def test_run_report_stage_all_unscored_emits_explicit_limitation() -> None:
+    """When zero dimensions can be scored, overall_score=None must emit an explicit limitation."""
+
+    class AllUnscoredJudge(FakeJudgeModelProvider):
+        async def generate_report_feedback(self, **kwargs):  # type: ignore[override]
+            res = await super().generate_report_feedback(**kwargs)
+            res.dimension_scores = {}
+            return res
+
+    bundle = ReportEvidenceBundle(
+        session_id="session_all_unscored",
+        qa_round_id="round_all_unscored",
+        transcript_full_text="",
+        by_speaker={},
+        questions=[],
+        answers=[],
+        assessments=[],
+    )
+
+    result = await run_report_stage(
+        report_id="01JREPORT_ALL_UNSCORED",
+        evidence_bundle_override=bundle,
+        judge_provider=AllUnscoredJudge(),
+        speaker_mappings=[],
+    )
+
+    assert result.evaluation.overall_score is None
+    assert all(comp.status == "not_evaluated" for comp in result.evaluation.components)
+    assert any(
+        lim.code == "all_dimensions_not_evaluated" and lim.scope == "evaluation"
+        for lim in result.limitations
+    )
+    assert any(lim.code == "all_dimensions_not_evaluated" for lim in result.evaluation.limitations)
+    assert any(
+        lim.code == "all_dimensions_not_evaluated"
+        for lim in result.evaluation.team_feedback.limitations
+    )

@@ -497,3 +497,54 @@ def test_question_models_enforce_length_bounds() -> None:
         fu_kwargs[field_name] = ""
         with pytest.raises(ValidationError):
             FollowUpQuestion.model_validate(fu_kwargs)
+
+
+def test_member_feedback_supports_optional_qa_feedback_and_report_attempt_id() -> None:
+    """MemberFeedback accepts qa_feedback and GenerateReportPayload accepts attempt ID."""
+    from app.contracts import GenerateReportPayload
+
+    qa_sec = FeedbackSection(
+        summary="Jane answered 1 question (85/100).",
+        strengths=[
+            Finding(
+                id="f_qa_1",
+                kind="strength",
+                title="Grounded Answer",
+                detail="Cited cohort retention metrics.",
+                evidence_ids=["ev_ans_1"],
+            )
+        ],
+    )
+    member_with_qa = MemberFeedback(
+        user_id="01JUSER0000000000000000001",
+        display_name="Jane Founder",
+        speaker_labels=["SPEAKER_00"],
+        summary="Clear delivery.",
+        qa_feedback=qa_sec,
+    )
+    assert member_with_qa.qa_feedback is not None
+    assert member_with_qa.qa_feedback.summary == qa_sec.summary
+
+    member_without_qa = MemberFeedback(
+        user_id="01JUSER0000000000000000002",
+        display_name="Alex CTO",
+        speaker_labels=["SPEAKER_01"],
+        summary="Clear delivery.",
+    )
+    assert member_without_qa.qa_feedback is None
+
+    payload = GenerateReportPayload(
+        report_id="rep_1",
+        analysis_artifact=ArtifactRef(
+            artifact_id="art_1",
+            object_key="ai/session/s1/analysis.json",
+            checksum="sha256:" + "a" * 64,
+        ),
+        qa_artifact=ArtifactRef(
+            artifact_id="art_2",
+            object_key="ai/session/s1/qa.json",
+            checksum="sha256:" + "b" * 64,
+        ),
+        analysis_attempt_id="01JATTEMPT0000000000000001",
+    )
+    assert payload.analysis_attempt_id == "01JATTEMPT0000000000000001"

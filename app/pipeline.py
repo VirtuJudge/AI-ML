@@ -24,6 +24,7 @@ from app.contracts import (
     ChecksumMismatchError,
     EraseAIDataPayload,
     ErasureCompleted,
+    ErrorCode,
     GenerateReportPayload,
     JobCancelledError,
     Limitation,
@@ -64,7 +65,7 @@ from app.stages.checkpoint import (
     get_stage_checkpoint,
     save_stage_checkpoint,
 )
-from app.stages.common import with_transient_retries
+from app.stages.common import StageValidationError, with_transient_retries
 from app.stages.documents import run_document_stage
 from app.stages.media import MEDIA_NORMALIZATION_VERSION, split_media
 from app.stages.questions import run_question_stage
@@ -878,6 +879,7 @@ class FakePipeline:
             "artifact_id": artifact_id,
             "session_id": session_id,
             "practice_session_id": session_id,
+            "analysis_attempt": attempt,
             "schema_version": 1,
             "created_at": created_at,
             "transcript": {
@@ -1100,6 +1102,8 @@ class FakePipeline:
                 speaker_mappings=job.speaker_mappings,
                 storage=self.object_storage,
                 judge_provider=self.judge_provider,
+                analysis_attempt=attempt,
+                analysis_attempt_id=job.analysis_attempt_id,
                 rubric_id=job.rubric.rubric_id,
                 rubric_version=job.rubric.version,
                 pipeline_version=self.producer_version,
@@ -1107,6 +1111,17 @@ class FakePipeline:
             ),
             stage_name="reporting",
         )
+
+        if stage_res.evaluation.overall_score is None:
+            raise StageValidationError(
+                "Report evaluation produced no scored dimensions.",
+                stage="reporting",
+                code=ErrorCode.VALIDATION_ERROR,
+                safe_message=(
+                    "Report could not be scored because no rubric dimensions had evaluable "
+                    "evidence."
+                ),
+            )
 
         # Inspection point 3: Before final report.md / evaluation.json upload
         await self._check_cancellation(job_id, backend_client, stage="reporting")

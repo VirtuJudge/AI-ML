@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.contracts import ArtifactRef, ChecksumMismatchError, Limitation
 from app.runtime_mode import RuntimeModePolicy, resolve_runtime_mode
+from app.stages.common import append_unique_limitation
 from app.stages.scoring import extract_assessment_score
 from app.storage.base import (
     ObjectNotFoundError,
@@ -34,6 +35,9 @@ class ReportEvidenceBundle(BaseModel):
 
     session_id: str
     practice_session_id: str = ""
+    qa_round_id: str | None = None
+    analysis_attempt: int | None = None
+    analysis_attempt_id: str | None = None
     transcript_full_text: str = ""
     transcript_segments: list[dict[str, Any]] = Field(default_factory=list)
     document_chunks: list[dict[str, Any]] = Field(default_factory=list)
@@ -195,6 +199,7 @@ def build_synthetic_qa_data(session_id: str = "01JTESTSESSION0000000000001") -> 
         "artifact_id": f"{session_id}:qa",
         "qa_round_id": f"{session_id}:round_1",
         "practice_session_id": session_id,
+        "analysis_attempt": 1,
         "questions": [
             {
                 "id": "q_01",
@@ -283,10 +288,7 @@ def build_synthetic_qa_data(session_id: str = "01JTESTSESSION0000000000001") -> 
 
 def _append_unique_limitation(limitations: list[Limitation], lim: Limitation) -> None:
     """Append a Limitation unless an equivalent code/scope/dimension entry is already present."""
-    key = (lim.code, lim.scope, tuple(lim.affected_dimensions))
-    existing = {(item.code, item.scope, tuple(item.affected_dimensions)) for item in limitations}
-    if key not in existing:
-        limitations.append(lim)
+    append_unique_limitation(limitations, lim)
 
 
 def _candidate_assessment_keys(answer_id: str, session_ids: list[str]) -> list[str]:
@@ -733,6 +735,45 @@ async def load_report_evidence(
     )
     practice_session_id = analysis_data.get("practice_session_id") or qa_session_id or session_id
 
+    raw_qa_round = qa_data.get("qa_round")
+    qa_round_dict = raw_qa_round if isinstance(raw_qa_round, dict) else {}
+    raw_qa_metadata = qa_data.get("metadata")
+    qa_metadata_dict = raw_qa_metadata if isinstance(raw_qa_metadata, dict) else {}
+    raw_analysis_metadata = analysis_data.get("metadata")
+    analysis_metadata_dict = (
+        raw_analysis_metadata if isinstance(raw_analysis_metadata, dict) else {}
+    )
+
+    raw_qa_round_id = (
+        qa_data.get("qa_round_id") or qa_round_dict.get("id") or qa_metadata_dict.get("qa_round_id")
+    )
+    qa_round_id = str(raw_qa_round_id).strip() if raw_qa_round_id else None
+
+    raw_attempt_num = qa_data.get("analysis_attempt")
+    if raw_attempt_num is None:
+        raw_attempt_num = analysis_data.get("analysis_attempt")
+    if raw_attempt_num is None:
+        raw_attempt_num = qa_metadata_dict.get("analysis_attempt")
+    analysis_attempt: int | None = None
+    if (
+        isinstance(raw_attempt_num, int)
+        and not isinstance(raw_attempt_num, bool)
+        and raw_attempt_num >= 1
+    ):
+        analysis_attempt = raw_attempt_num
+    elif isinstance(raw_attempt_num, str) and raw_attempt_num.strip().isdigit():
+        parsed_attempt = int(raw_attempt_num.strip())
+        if parsed_attempt >= 1:
+            analysis_attempt = parsed_attempt
+
+    raw_attempt_id = (
+        qa_data.get("analysis_attempt_id")
+        or analysis_data.get("analysis_attempt_id")
+        or qa_metadata_dict.get("analysis_attempt_id")
+        or analysis_metadata_dict.get("analysis_attempt_id")
+    )
+    analysis_attempt_id = str(raw_attempt_id).strip() if raw_attempt_id else None
+
     # Extract transcript
     transcript_info = analysis_data.get("transcript", {})
     transcript_text = transcript_info.get("text", "")
@@ -856,6 +897,9 @@ async def load_report_evidence(
     return ReportEvidenceBundle(
         session_id=session_id,
         practice_session_id=practice_session_id,
+        qa_round_id=qa_round_id,
+        analysis_attempt=analysis_attempt,
+        analysis_attempt_id=analysis_attempt_id,
         transcript_full_text=transcript_text,
         transcript_segments=transcript_segments,
         document_chunks=document_chunks,

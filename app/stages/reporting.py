@@ -23,6 +23,7 @@ from app.contracts import (
     Limitation,
     MemberFeedback,
     RubricRef,
+    ScoreComponent,
     SpeakerMapping,
     SpeakingInterval,
 )
@@ -30,6 +31,7 @@ from app.providers.base import JudgeModelProvider
 from app.providers.fake_judge import FakeJudgeModelProvider
 from app.runtime_mode import RuntimeModePolicy
 from app.stages.aggregation import format_duration_ms
+from app.stages.common import append_unique_limitation
 from app.stages.report_loader import ReportEvidenceBundle, load_report_evidence
 from app.stages.report_markdown import generate_markdown_report
 from app.stages.scoring import (
@@ -37,6 +39,9 @@ from app.stages.scoring import (
     calculate_individual_delivery_scores,
     evaluate_qa_scores,
     evaluate_rubric,
+    extract_assessment_score,
+    score_to_display,
+    score_to_label,
 )
 from app.storage.base import ObjectStorageProtocol
 
@@ -81,6 +86,218 @@ def _format_qa_summary_text(questions: list[dict[str, Any]], answers: list[dict[
     return "\n\n".join(lines)
 
 
+def _group_speaker_mappings(
+    speaker_mappings: list[SpeakerMapping],
+) -> list[tuple[str, str, list[str]]]:
+    """Group speaker mappings by user_id while preserving order and deduplicating labels."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for sm in speaker_mappings:
+        entry = grouped.get(sm.user_id)
+        if entry is None:
+            grouped[sm.user_id] = {
+                "display_name": (sm.display_name or "").strip(),
+                "speaker_labels": [sm.speaker_label],
+            }
+        else:
+            if sm.speaker_label not in entry["speaker_labels"]:
+                entry["speaker_labels"].append(sm.speaker_label)
+            if not entry["display_name"] and sm.display_name and sm.display_name.strip():
+                entry["display_name"] = sm.display_name.strip()
+
+    result: list[tuple[str, str, list[str]]] = []
+    for user_id, entry in grouped.items():
+        labels: list[str] = entry["speaker_labels"]
+        display_name = entry["display_name"] or f"Presenter ({labels[0]})"
+        result.append((user_id, display_name, labels))
+    return result
+
+
+def _collect_evidence_ids(*sources: dict[str, Any] | None) -> list[str]:
+    """Collect deduplicated, non-empty evidence IDs across question/answer/assessment dicts."""
+    collected: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        raw_ids = source.get("evidence_ids", [])
+        if not isinstance(raw_ids, list):
+            continue
+        for eid in raw_ids:
+            eid_str = str(eid or "").strip()
+            if eid_str and eid_str not in collected:
+                collected.append(eid_str)
+    return collected
+
+
+def _build_member_qa_feedback(
+    *,
+    user_id: str,
+    display_name: str,
+    speaker_labels: list[str],
+    questions: list[dict[str, Any]],
+    answers: list[dict[str, Any]],
+    assessments: list[dict[str, Any]],
+    rubric_id: str,
+) -> FeedbackSection | None:
+    """Build grounded Q&A feedback for a mapped member who submitted at least one answer."""
+    submitted_answers = [
+        ans
+        for ans in answers
+        if isinstance(ans, dict)
+        and str(ans.get("answered_by") or "").strip() == user_id
+        and str(ans.get("status") or "submitted").strip().lower() not in {"skipped", "draft"}
+    ]
+    if not submitted_answers:
+        return None
+
+    questions_by_id: dict[str, dict[str, Any]] = {}
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qid_raw = q.get("id") or q.get("question_id") or q.get("candidate_id")
+        if qid_raw:
+            questions_by_id[str(qid_raw)] = q
+
+    assessments_by_qid: dict[str, dict[str, Any]] = {}
+    assessments_by_aid: dict[str, dict[str, Any]] = {}
+    for asm in assessments:
+        if not isinstance(asm, dict):
+            continue
+        aid_raw = asm.get("answer_id")
+        if aid_raw:
+            assessments_by_aid[str(aid_raw)] = asm
+        qid_raw = asm.get("question_id") or asm.get("candidate_id")
+        if qid_raw:
+            assessments_by_qid[str(qid_raw)] = asm
+
+    qa_strengths: list[Finding] = []
+    qa_improvements: list[Finding] = []
+    scored_values: list[float] = []
+    scored_evidence_ids: list[str] = []
+    unscored_count = 0
+
+    for idx, ans in enumerate(submitted_answers, start=1):
+        qid = str(ans.get("question_id") or ans.get("candidate_id") or "")
+        ans_id = str(ans.get("id") or ans.get("answer_id") or "")
+        q = questions_by_id.get(qid, {})
+        matched_asm = (assessments_by_aid.get(ans_id) if ans_id else None) or (
+            assessments_by_qid.get(qid) if qid else None
+        )
+
+        score = extract_assessment_score(matched_asm)
+        if score is None:
+            unscored_count += 1
+            continue
+
+        scored_values.append(score)
+        ev_ids = _collect_evidence_ids(matched_asm, ans, q)
+        for eid in ev_ids:
+            if eid not in scored_evidence_ids:
+                scored_evidence_ids.append(eid)
+
+        nested_asm = matched_asm.get("assessment") if isinstance(matched_asm, dict) else None
+        raw_text = (matched_asm or {}).get("assessment_text")
+        if not raw_text and isinstance(nested_asm, dict):
+            raw_text = nested_asm.get("text")
+        assessment_text = str(raw_text or "").strip()
+
+        q_dim = str(q.get("rubric_dimension") or "qa_quality")
+        q_text = str(q.get("text") or "").strip()
+        finding_eids = ev_ids or ([f"ev_answer_{ans_id}"] if ans_id else [f"ev_qa_{qid or idx}"])
+        dim_label = q_dim.replace("_", " ").title()
+        disp_score = score_to_display(score)
+        detail = assessment_text or f"Response to Q&A prompt scored {disp_score}/100."
+
+        if score >= 0.60:
+            qa_strengths.append(
+                Finding(
+                    id=f"f_{user_id}_qa_s{idx}",
+                    kind="strength",
+                    title=f"Grounded Q&A Response ({dim_label})",
+                    detail=detail,
+                    evidence_ids=finding_eids,
+                    rubric_dimension=q_dim,
+                    speaker_labels=list(speaker_labels),
+                )
+            )
+        else:
+            recommendation = (
+                f"Provide concrete evidence addressing: {q_text[:180]}"
+                if q_text
+                else "Address the core question directly with concrete supporting evidence."
+            )
+            qa_improvements.append(
+                Finding(
+                    id=f"f_{user_id}_qa_i{idx}",
+                    kind="improvement",
+                    title=f"Strengthen Q&A Depth ({dim_label})",
+                    detail=detail,
+                    recommendation=recommendation,
+                    evidence_ids=finding_eids,
+                    rubric_dimension=q_dim,
+                    speaker_labels=list(speaker_labels),
+                )
+            )
+
+    qa_limitations: list[Limitation] = []
+    if unscored_count > 0:
+        qa_limitations.append(
+            Limitation(
+                code="qa_assessment_unavailable",
+                scope="qa_feedback",
+                message=(
+                    f"Assessment score was unavailable for {unscored_count} Q&A response(s) "
+                    f"submitted by {display_name}."
+                ),
+                affected_dimensions=["qa_quality"],
+            )
+        )
+
+    if scored_values:
+        mean_score = round(sum(scored_values) / len(scored_values), 4)
+        comp_eids = scored_evidence_ids or [f"ev_qa_{user_id}"]
+        qa_comp = ScoreComponent(
+            dimension="qa_quality",
+            status="scored",
+            normalized_score=mean_score,
+            display_score=score_to_display(mean_score),
+            label=score_to_label(mean_score, rubric_id=rubric_id),
+            configured_weight=0.20,
+            effective_weight=0.20,
+            evidence_ids=comp_eids,
+            rationale=(
+                f"Mean score across {len(scored_values)} evaluated Q&A response(s) "
+                f"by {display_name}."
+            ),
+        )
+        summary = (
+            f"{display_name} answered {len(submitted_answers)} Q&A question(s) "
+            f"({len(scored_values)} evaluated, mean score {score_to_display(mean_score)}/100)."
+        )
+    else:
+        qa_comp = ScoreComponent(
+            dimension="qa_quality",
+            status="not_evaluated",
+            configured_weight=0.20,
+            limitation_code="qa_assessment_unavailable",
+            rationale=(
+                f"Q&A responses by {display_name} could not be scored because assessment "
+                "scores were unavailable."
+            ),
+        )
+        summary = (
+            f"{display_name} submitted {len(submitted_answers)} Q&A response(s), "
+            "but assessment scores were unavailable."
+        )
+
+    return FeedbackSection(
+        summary=summary,
+        strengths=qa_strengths,
+        improvements=qa_improvements,
+        score_components=[qa_comp],
+        limitations=qa_limitations,
+    )
+
+
 async def run_report_stage(
     report_id: str,
     *,
@@ -90,6 +307,8 @@ async def run_report_stage(
     judge_provider: JudgeModelProvider | None = None,
     speaker_mappings: list[SpeakerMapping] | None = None,
     evidence_bundle_override: ReportEvidenceBundle | None = None,
+    analysis_attempt: int | None = None,
+    analysis_attempt_id: str | None = None,
     session_title: str = "Startup Pitch Practice Session",
     session_date: str | None = None,
     rubric_id: str = "startup_pitch",
@@ -257,118 +476,166 @@ async def run_report_stage(
         limitations=limitations,
     )
 
+    if overall_score is None:
+        append_unique_limitation(
+            limitations,
+            Limitation(
+                code="all_dimensions_not_evaluated",
+                scope="evaluation",
+                message=(
+                    "No rubric dimensions could be evaluated from the available evidence; "
+                    "overall score is unavailable."
+                ),
+                affected_dimensions=[comp.dimension for comp in rubric_components],
+            ),
+        )
+
     # 4. Map Individual Presenter MemberFeedback
     member_feedbacks: list[MemberFeedback] = []
     member_user_ids: list[str] = []
 
-    # Build speaker mapping index
-    mappings_to_process: list[tuple[str, str, str]] = []
-    if speaker_mappings:
-        for sm in speaker_mappings:
-            spk_label = sm.speaker_label
-            user_id = sm.user_id
-            display_name = sm.display_name or f"Presenter ({spk_label})"
-            mappings_to_process.append((spk_label, user_id, display_name))
+    if not speaker_mappings:
+        append_unique_limitation(
+            limitations,
+            Limitation(
+                code="speaker_mappings_not_provided",
+                scope="member_feedback",
+                message=(
+                    "No speaker mappings were provided; individual presenter feedback was omitted."
+                ),
+                affected_dimensions=[],
+            ),
+        )
     else:
-        # Fallback to speakers found in by_speaker or speaker_labels
-        speaker_keys = list(bundle.by_speaker.keys()) or bundle.speaker_labels or ["SPEAKER_00"]
-        for spk_label in sorted(speaker_keys):
-            mappings_to_process.append(
-                (spk_label, f"user_{spk_label.lower()}", f"Presenter ({spk_label})")
+        for user_id, display_name, spk_labels in _group_speaker_mappings(speaker_mappings):
+            member_user_ids.append(user_id)
+
+            speaking_intervals: list[SpeakingInterval] = []
+            speaking_time_ms = 0
+            combined_windows: list[Any] = []
+            acoustic_eids: list[str] = []
+            visual_eids: list[str] = []
+            mbr_strengths: list[Finding] = []
+            mbr_improvements: list[Finding] = []
+
+            for spk_label in spk_labels:
+                spk_profile = bundle.by_speaker.get(spk_label, {})
+                for item in spk_profile.get("intervals", []):
+                    if isinstance(item, SpeakingInterval):
+                        speaking_intervals.append(item)
+                    elif isinstance(item, dict):
+                        start_ms = item.get("start_ms", 0)
+                        end_ms = item.get("end_ms", 0)
+                        s_min, s_sec = divmod(start_ms // 1000, 60)
+                        e_min, e_sec = divmod(end_ms // 1000, 60)
+                        fmt = (
+                            item.get("formatted")
+                            or f"{s_min:02d}:{s_sec:02d} - {e_min:02d}:{e_sec:02d}"
+                        )
+                        speaking_intervals.append(
+                            SpeakingInterval(start_ms=start_ms, end_ms=end_ms, formatted=fmt)
+                        )
+
+                speaking_time_ms += int(spk_profile.get("speaking_time_ms", 0) or 0)
+                combined_windows.extend(spk_profile.get("windows", []))
+                for eid in spk_profile.get("acoustic_evidence_ids", []):
+                    if eid not in acoustic_eids:
+                        acoustic_eids.append(eid)
+                for eid in spk_profile.get("visual_evidence_ids", []):
+                    if eid not in visual_eids:
+                        visual_eids.append(eid)
+
+            speaking_intervals.sort(key=lambda inv: (inv.start_ms, inv.end_ms))
+
+            combined_profile: dict[str, Any] = {
+                "speaker_label": spk_labels[0],
+                "speaking_time_ms": speaking_time_ms,
+                "windows": combined_windows,
+            }
+            if acoustic_eids:
+                combined_profile["acoustic_evidence_ids"] = acoustic_eids
+            if visual_eids:
+                combined_profile["visual_evidence_ids"] = visual_eids
+
+            delivery_components = calculate_individual_delivery_scores(
+                combined_profile, rubric_id=rubric_id
             )
 
-    for spk_label, user_id, display_name in mappings_to_process:
-        member_user_ids.append(user_id)
-        spk_profile = bundle.by_speaker.get(spk_label, {})
+            has_delivery_data = bool(speaking_intervals or combined_windows) or (
+                speaking_time_ms > 0
+            )
+            if not has_delivery_data:
+                # Delivery feedback must be grounded in a recorded turn, duration, or
+                # observation. Do not turn missing media into invented praise or advice.
+                summary = "No delivery data was recorded for this presenter."
+            else:
+                for spk_label in spk_labels:
+                    mbr_strengths.extend(feedback_result.member_strengths.get(spk_label, []))
+                    mbr_improvements.extend(feedback_result.member_improvements.get(spk_label, []))
 
-        # Extract speaking intervals
-        raw_intervals = spk_profile.get("intervals", [])
-        speaking_intervals: list[SpeakingInterval] = []
-        for item in raw_intervals:
-            if isinstance(item, SpeakingInterval):
-                speaking_intervals.append(item)
-            elif isinstance(item, dict):
-                start_ms = item.get("start_ms", 0)
-                end_ms = item.get("end_ms", 0)
-                s_min, s_sec = divmod(start_ms // 1000, 60)
-                e_min, e_sec = divmod(end_ms // 1000, 60)
-                fmt = item.get("formatted") or f"{s_min:02d}:{s_sec:02d} - {e_min:02d}:{e_sec:02d}"
-                speaking_intervals.append(
-                    SpeakingInterval(start_ms=start_ms, end_ms=end_ms, formatted=fmt)
+                primary_label = spk_labels[0]
+                if not mbr_strengths:
+                    mbr_strengths = [
+                        Finding(
+                            id=f"f_{primary_label.lower()}_s1",
+                            kind="strength",
+                            title="Engaged Vocal Presence",
+                            detail=(
+                                f"{display_name} maintained clear vocal delivery "
+                                "throughout their presentation turns."
+                            ),
+                            rubric_dimension="delivery_and_body_language",
+                            speaker_labels=list(spk_labels),
+                        )
+                    ]
+                if not mbr_improvements:
+                    mbr_improvements = [
+                        Finding(
+                            id=f"f_{primary_label.lower()}_i1",
+                            kind="improvement",
+                            title="Slide Transition Calibration",
+                            detail=(
+                                f"{display_name} can use deliberate pauses when introducing "
+                                "new slides."
+                            ),
+                            recommendation=(
+                                "Insert a 1-2 second pause before transitioning to new sections."
+                            ),
+                            rubric_dimension="timing_and_speech_mechanics",
+                            speaker_labels=list(spk_labels),
+                        )
+                    ]
+
+                time_display = format_duration_ms(speaking_time_ms)
+                summary = (
+                    f"Active presentation delivery analysis for {display_name} across "
+                    f"{len(speaking_intervals)} turn(s) ({time_display} total)."
                 )
 
-        speaking_time_ms = spk_profile.get("speaking_time_ms", 0)
-        spk_prof_with_label = dict(spk_profile)
-        spk_prof_with_label.setdefault("speaker_label", spk_label)
-        delivery_components = calculate_individual_delivery_scores(
-            spk_prof_with_label, rubric_id=rubric_id
-        )
-
-        has_delivery_data = bool(speaking_intervals or spk_profile.get("windows")) or (
-            speaking_time_ms > 0
-        )
-        if not has_delivery_data:
-            # Delivery feedback must be grounded in a recorded turn, duration, or
-            # observation. Do not turn missing media into invented praise or advice.
-            mbr_strengths = []
-            mbr_improvements = []
-            summary = "No delivery data was recorded for this presenter."
-        else:
-            # Retrieve member findings from LLM feedback.
-            mbr_strengths = list(feedback_result.member_strengths.get(spk_label, []))
-            mbr_improvements = list(feedback_result.member_improvements.get(spk_label, []))
-
-            # Default fallbacks apply only when there is delivery evidence.
-            if not mbr_strengths:
-                mbr_strengths = [
-                    Finding(
-                        id=f"f_{spk_label.lower()}_s1",
-                        kind="strength",
-                        title="Engaged Vocal Presence",
-                        detail=(
-                            f"{display_name} maintained clear vocal delivery "
-                            "throughout their presentation turns."
-                        ),
-                        rubric_dimension="delivery_and_body_language",
-                        speaker_labels=[spk_label],
-                    )
-                ]
-            if not mbr_improvements:
-                mbr_improvements = [
-                    Finding(
-                        id=f"f_{spk_label.lower()}_i1",
-                        kind="improvement",
-                        title="Slide Transition Calibration",
-                        detail=(
-                            f"{display_name} can use deliberate pauses when introducing new slides."
-                        ),
-                        recommendation=(
-                            "Insert a 1-2 second pause before transitioning to new sections."
-                        ),
-                        rubric_dimension="timing_and_speech_mechanics",
-                        speaker_labels=[spk_label],
-                    )
-                ]
-
-            time_display = format_duration_ms(speaking_time_ms)
-            summary = (
-                f"Active presentation delivery analysis for {display_name} across "
-                f"{len(speaking_intervals)} turn(s) ({time_display} total)."
-            )
-
-        member_feedbacks.append(
-            MemberFeedback(
+            qa_feedback = _build_member_qa_feedback(
                 user_id=user_id,
                 display_name=display_name,
-                speaker_labels=[spk_label],
-                speaking_intervals=speaking_intervals,
-                speaking_time_ms=speaking_time_ms,
-                summary=summary,
-                strengths=mbr_strengths,
-                improvements=mbr_improvements,
-                delivery_components=delivery_components,
+                speaker_labels=spk_labels,
+                questions=bundle.questions,
+                answers=bundle.answers,
+                assessments=bundle.assessments,
+                rubric_id=rubric_id,
             )
-        )
+
+            member_feedbacks.append(
+                MemberFeedback(
+                    user_id=user_id,
+                    display_name=display_name,
+                    speaker_labels=spk_labels,
+                    speaking_intervals=speaking_intervals,
+                    speaking_time_ms=speaking_time_ms,
+                    summary=summary,
+                    strengths=mbr_strengths,
+                    improvements=mbr_improvements,
+                    delivery_components=delivery_components,
+                    qa_feedback=qa_feedback,
+                )
+            )
 
     # 5. Whole-Team Feedback Section & Consolidated Findings
     team_feedback = FeedbackSection(
@@ -385,11 +652,33 @@ async def run_report_stage(
     for mf in member_feedbacks:
         all_findings.extend(mf.strengths)
         all_findings.extend(mf.improvements)
+        if mf.qa_feedback is not None:
+            all_findings.extend(mf.qa_feedback.strengths)
+            all_findings.extend(mf.qa_feedback.improvements)
 
     # 6. Construct Evaluation Model
     eval_id = ulid.new().str
-    session_id = bundle.session_id or report_id
-    qa_round_id = bundle.metadata.get("qa_round_id") or f"{report_id}:qa_round"
+    session_id = bundle.practice_session_id or bundle.session_id or report_id
+    attempt_num = (
+        analysis_attempt
+        if analysis_attempt is not None
+        else (bundle.analysis_attempt or bundle.metadata.get("analysis_attempt") or 1)
+    )
+    resolved_attempt_id = (
+        analysis_attempt_id
+        or bundle.analysis_attempt_id
+        or (
+            str(bundle.metadata["analysis_attempt_id"])
+            if bundle.metadata.get("analysis_attempt_id")
+            else None
+        )
+        or f"{session_id}:attempt_{attempt_num}"
+    )
+    qa_round_id = (
+        bundle.qa_round_id
+        or (str(bundle.metadata["qa_round_id"]) if bundle.metadata.get("qa_round_id") else None)
+        or f"{session_id}:round_{attempt_num}"
+    )
 
     completed_at = datetime.datetime.now(datetime.UTC).isoformat()
     duration_ms = max(0, int((time.monotonic() - start_time) * 1000))
@@ -448,7 +737,7 @@ async def run_report_stage(
 
     evaluation = Evaluation(
         id=eval_id,
-        analysis_attempt_id=session_id,
+        analysis_attempt_id=resolved_attempt_id,
         qa_round_id=qa_round_id,
         rubric=RubricRef(rubric_id=rubric_id, version=rubric_version),
         overall_score=overall_score,

@@ -178,7 +178,8 @@ def generate_markdown_report(
     out.append(f"# {session_title} — Final Evaluation Report")
     out.append("")
     out.append(f"- **Evaluation ID:** `{evaluation.id}`")
-    out.append(f"- **Session ID:** `{evaluation.analysis_attempt_id}`")
+    out.append(f"- **Analysis Attempt ID:** `{evaluation.analysis_attempt_id}`")
+    out.append(f"- **Q&A Round ID:** `{evaluation.qa_round_id}`")
     out.append(f"- **Date:** {date_str}")
     out.append(f"- **Rubric:** `{evaluation.rubric.rubric_id}` (v{evaluation.rubric.version})")
     out.append(f"- **Overall Performance:** 🏆 **{score_badge}**")
@@ -265,8 +266,11 @@ def generate_markdown_report(
     out.append("")
     if evaluation.member_feedback:
         for member in evaluation.member_feedback:
+            spk_labels_disp = (
+                ", ".join(member.speaker_labels) if member.speaker_labels else "SPEAKER_UNKNOWN"
+            )
             spk_label = member.speaker_labels[0] if member.speaker_labels else "SPEAKER_UNKNOWN"
-            out.append(f"### {member.display_name} ({spk_label})")
+            out.append(f"### {member.display_name} ({spk_labels_disp})")
             out.append("")
 
             spk_profile = (by_speaker or {}).get(spk_label)
@@ -275,68 +279,86 @@ def generate_markdown_report(
             if not has_delivery_data:
                 out.append("*No delivery data was recorded for this presenter.*")
                 out.append("")
-                continue
-
-            # Turns & total speaking duration
-            turn_strs = [inv.formatted for inv in member.speaking_intervals]
-            turns_disp = ", ".join(turn_strs) if turn_strs else "None recorded"
-            total_dur = format_duration_ms(member.speaking_time_ms)
-            out.append(
-                f"> ⏱️ **Active Speaking Turns:** {turns_disp} | "
-                f"**Total Speaking Time:** {total_dur}"
-            )
-            out.append("")
-
-            if member.summary:
-                out.append(member.summary)
-                out.append("")
-
-            # Delivery score components table
-            if member.delivery_components:
-                out.append("#### Delivery Scores")
-                out.append("")
-                out.append("| Dimension | Score | Rating |")
-                out.append("| :--- | :---: | :---: |")
-                for dc in member.delivery_components:
-                    d_name = _dim_title(dc.dimension)
-                    d_score = f"{dc.display_score} / 100" if dc.display_score is not None else "-"
-                    d_label = _component_label_title(
-                        dc, rubric_id=rubric_id, label_bands=label_bands
-                    )
-                    out.append(f"| {d_name} | {d_score} | {d_label} |")
-                out.append("")
-
-            # Reader-facing delivery coaching, derived from windowed observations.
-            metric_lines = format_speaker_metrics_highlight(spk_profile)
-            out.append("#### Delivery Coaching")
-            out.append("")
-            for ml in metric_lines:
-                out.append(ml)
-            out.append("")
-
-            # Member strengths
-            out.append("#### Presenter Strengths")
-            out.append("")
-            if member.strengths:
-                for s in member.strengths:
-                    out.append(f"- **{s.title}**: {s.detail}")
-                    if s.recommendation:
-                        out.append(f"  - *Advice:* {s.recommendation}")
             else:
-                out.append("*No presenter-specific strengths recorded.*")
-            out.append("")
+                # Turns & total speaking duration
+                turn_strs = [inv.formatted for inv in member.speaking_intervals]
+                turns_disp = ", ".join(turn_strs) if turn_strs else "None recorded"
+                total_dur = format_duration_ms(member.speaking_time_ms)
+                out.append(
+                    f"> ⏱️ **Active Speaking Turns:** {turns_disp} | "
+                    f"**Total Speaking Time:** {total_dur}"
+                )
+                out.append("")
 
-            # Member improvements
-            out.append("#### Presenter Areas for Improvement")
-            out.append("")
-            if member.improvements:
-                for imp in member.improvements:
-                    out.append(f"- **{imp.title}**: {imp.detail}")
-                    if imp.recommendation:
-                        out.append(f"  - *Action Step:* {imp.recommendation}")
-            else:
-                out.append("*No presenter-specific improvements recorded.*")
-            out.append("")
+                if member.summary:
+                    out.append(member.summary)
+                    out.append("")
+
+                # Delivery score components table
+                if member.delivery_components:
+                    out.append("#### Delivery Scores")
+                    out.append("")
+                    out.append("| Dimension | Score | Rating |")
+                    out.append("| :--- | :---: | :---: |")
+                    for dc in member.delivery_components:
+                        d_name = _dim_title(dc.dimension)
+                        d_score = (
+                            f"{dc.display_score} / 100" if dc.display_score is not None else "-"
+                        )
+                        d_label = _component_label_title(
+                            dc, rubric_id=rubric_id, label_bands=label_bands
+                        )
+                        out.append(f"| {d_name} | {d_score} | {d_label} |")
+                    out.append("")
+
+                # Reader-facing delivery coaching, derived from windowed observations.
+                metric_lines = format_speaker_metrics_highlight(spk_profile)
+                out.append("#### Delivery Coaching")
+                out.append("")
+                for ml in metric_lines:
+                    out.append(ml)
+                out.append("")
+
+                # Member strengths
+                out.append("#### Presenter Strengths")
+                out.append("")
+                if member.strengths:
+                    for s in member.strengths:
+                        out.append(f"- **{s.title}**: {s.detail}")
+                        if s.recommendation:
+                            out.append(f"  - *Advice:* {s.recommendation}")
+                else:
+                    out.append("*No presenter-specific strengths recorded.*")
+                out.append("")
+
+                # Member improvements
+                out.append("#### Presenter Areas for Improvement")
+                out.append("")
+                if member.improvements:
+                    for imp in member.improvements:
+                        out.append(f"- **{imp.title}**: {imp.detail}")
+                        if imp.recommendation:
+                            out.append(f"  - *Action Step:* {imp.recommendation}")
+                else:
+                    out.append("*No presenter-specific improvements recorded.*")
+                out.append("")
+
+            if member.qa_feedback is not None:
+                out.append("#### Presenter Q&A Feedback")
+                out.append("")
+                if member.qa_feedback.summary:
+                    out.append(member.qa_feedback.summary)
+                    out.append("")
+                if member.qa_feedback.strengths:
+                    for qs in member.qa_feedback.strengths:
+                        out.append(f"- **{qs.title}**: {qs.detail}")
+                    out.append("")
+                if member.qa_feedback.improvements:
+                    for qi in member.qa_feedback.improvements:
+                        out.append(f"- **{qi.title}**: {qi.detail}")
+                        if qi.recommendation:
+                            out.append(f"  - *Action Step:* {qi.recommendation}")
+                    out.append("")
     else:
         out.append("*No mapped individual presenter feedback available.*")
         out.append("")

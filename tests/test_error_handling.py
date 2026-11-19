@@ -255,3 +255,64 @@ async def test_stage_timeout_reports_real_stage_and_provider_timeout_code(
     assert rep_update.payload.code == ErrorCode.PROVIDER_TIMEOUT
     assert rep_update.payload.retryable is True
     assert rep_update.payload.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_process_job_generate_report_all_unscored_returns_non_retryable_failure(
+    tmp_path: Path,
+    generate_report_message: QueueMessage,
+) -> None:
+    """All-unscored evaluation fails the job cleanly rather than emitting null overall_score."""
+    from app.storage.local import LocalDiskObjectStorage
+
+    class AllUnscoredJudge(FakeJudgeModelProvider):
+        async def generate_report_feedback(self, **kwargs: Any) -> Any:
+            res = await super().generate_report_feedback(**kwargs)
+            res.dimension_scores = {}
+            return res
+
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    session_id = generate_report_message.practice_session_id or "01JTEST0000000000000000031"
+    analysis_ref = await storage.upload_json(
+        f"ai/session/{session_id}/analysis.json",
+        {
+            "artifact_id": "01JTEST0000000000000000034",
+            "session_id": session_id,
+            "practice_session_id": session_id,
+            "transcript": {"text": "", "segments": []},
+            "by_speaker": {},
+        },
+        artifact_id="01JTEST0000000000000000034",
+    )
+    qa_ref = await storage.upload_json(
+        f"ai/session/{session_id}/qa.json",
+        {
+            "artifact_id": "01JTEST0000000000000000035",
+            "qa_round_id": "01JTEST0000000000000000099",
+            "practice_session_id": session_id,
+            "analysis_attempt": 1,
+            "questions": [],
+            "answers": [],
+            "assessments": [],
+        },
+        artifact_id="01JTEST0000000000000000035",
+    )
+    msg = generate_report_message.model_copy(
+        update={
+            "payload": {
+                **generate_report_message.payload,
+                "analysis_artifact": analysis_ref.model_dump(mode="json"),
+                "qa_artifact": qa_ref.model_dump(mode="json"),
+            }
+        }
+    )
+
+    pipeline = FakePipeline(judge_provider=AllUnscoredJudge(), object_storage=storage)
+    update = await process_job(msg, pipeline, execution_attempt=1)
+
+    assert update.status == UpdateStatus.FAILED
+    assert isinstance(update.payload, FailedPayload)
+    assert update.payload.stage == "reporting"
+    assert update.payload.code == ErrorCode.VALIDATION_ERROR
+    assert update.payload.retryable is False
+    assert "no rubric dimensions" in update.payload.message.lower()
