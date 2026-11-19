@@ -7,6 +7,7 @@ from audio files without making psychological, emotional, or personality claims.
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 import librosa
 import numpy as np
@@ -20,6 +21,26 @@ ALGORITHM_VERSION = f"librosa/{librosa.__version__}"
 
 class LibrosaAudioProvider:
     """Extracts timed acoustic measurements from audio files using librosa."""
+
+    model_name = "librosa_prosody"
+
+    @property
+    def adapter_version(self) -> str:
+        """Return adapter/algorithm version dynamically for checkpoint fingerprinting."""
+        return ALGORITHM_VERSION
+
+    def checkpoint_config(self) -> dict[str, Any]:
+        """Return safe sampling and feature configuration for checkpointing."""
+        return {
+            "sample_rate": self.sample_rate,
+            "window_sec": self.window_sec,
+            "hop_sec": self.hop_sec,
+            "hop_length": self.hop_length,
+            "fmin": self.fmin,
+            "fmax": self.fmax,
+            "silence_threshold_db": self.silence_threshold_db,
+            "algorithm_version": ALGORITHM_VERSION,
+        }
 
     def __init__(
         self,

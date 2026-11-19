@@ -18,6 +18,8 @@ from app.stages.common import validate_observation_timestamps
 
 logger = logging.getLogger(__name__)
 
+AUDIO_STAGE_VERSION = "1.0.0"
+
 
 class AudioStageResult(BaseModel):
     """Result of the audio acoustic measurement stage."""
@@ -140,6 +142,7 @@ async def run_audio_stage(
 
 
 __all__ = [
+    "AUDIO_STAGE_VERSION",
     "AudioStageResult",
     "run_audio_stage",
     "validate_audio_observations",

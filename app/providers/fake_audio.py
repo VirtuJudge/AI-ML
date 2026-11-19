@@ -10,6 +10,9 @@ ALGORITHM_VERSION = "fake_librosa/0.0.0"
 class FakeAudioMetricsProvider:
     """Deterministic audio prosody and acoustic feature provider for testing."""
 
+    adapter_version = ALGORITHM_VERSION
+    algorithm_version = ALGORITHM_VERSION
+
     def __init__(self, *, duration_ms: int = 15000) -> None:
         self._duration_ms = duration_ms
 

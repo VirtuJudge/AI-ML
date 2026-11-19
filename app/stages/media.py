@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field
 
 from app.contracts import AssetInput, Limitation
 
+MEDIA_NORMALIZATION_VERSION = "ffmpeg_pcm_s16le_16k_mono_v1"
+
 SUPPORTED_MEDIA_EXTENSIONS: frozenset[str] = frozenset(
     {
         ".mp4",
@@ -336,6 +338,7 @@ async def split_media(
 
 
 __all__ = [
+    "MEDIA_NORMALIZATION_VERSION",
     "SUPPORTED_MEDIA_EXTENSIONS",
     "FFmpegExecutionError",
     "FFmpegNotFoundError",

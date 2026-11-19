@@ -28,7 +28,11 @@ from app.contracts import (
 from app.pipeline import FakePipeline
 from app.providers.fake_speech import FakeSpeechProvider
 from app.providers.types import TranscriptionResult
-from app.stages.checkpoint import get_stage_checkpoint, save_stage_checkpoint
+from app.stages.checkpoint import (
+    compute_fingerprint_digest,
+    get_stage_checkpoint,
+    save_stage_checkpoint,
+)
 from app.stages.common import StageTransientError
 from app.storage.local import LocalDiskObjectStorage
 from app.worker import process_job
@@ -358,11 +362,27 @@ async def test_stage_checkpoint_reuse_across_attempts(
     assert res_attempt1 is not None
     assert spy_speech.call_count == 1
 
+    speech_fp_v1 = pipeline.build_stage_checkpoint_fingerprint(
+        "speech",
+        presentation_checksum=checksum_v1,
+        media_duration_ms=job_v1.presentation.duration_ms or 15000,
+        skip_file_check=True,
+        has_audio_stream=True,
+    )
     clean_hash_v1 = checksum_v1.removeprefix("sha256:")
-    expected_ckpt_key = f"ai/session/{session_id}/checkpoints/speech_{clean_hash_v1}.json"
+    fp_hash_v1 = compute_fingerprint_digest(speech_fp_v1)[:16]
+    expected_ckpt_key = (
+        f"ai/session/{session_id}/checkpoints/speech_{clean_hash_v1}_{fp_hash_v1}.json"
+    )
     assert (tmp_path / expected_ckpt_key).is_file()
 
-    cached_v1 = await get_stage_checkpoint(storage, session_id, "speech", checksum_v1)
+    cached_v1 = await get_stage_checkpoint(
+        storage,
+        session_id,
+        "speech",
+        checksum_v1,
+        expected_compatibility_fingerprint=speech_fp_v1,
+    )
     assert cached_v1 is not None
 
     # 2. On attempt=2 with same checksum: reuses cached checkpoint without calling provider
@@ -384,8 +404,16 @@ async def test_stage_checkpoint_reuse_across_attempts(
     assert spy_speech.call_count == 2
 
     # New checkpoint must be written for the new checksum
+    speech_fp_v2 = pipeline.build_stage_checkpoint_fingerprint(
+        "speech",
+        presentation_checksum=checksum_v2,
+        media_duration_ms=job_v2.presentation.duration_ms or 15000,
+        skip_file_check=True,
+        has_audio_stream=True,
+    )
     clean_hash_v2 = checksum_v2.removeprefix("sha256:")
-    new_ckpt_key = f"ai/session/{session_id}/checkpoints/speech_{clean_hash_v2}.json"
+    fp_hash_v2 = compute_fingerprint_digest(speech_fp_v2)[:16]
+    new_ckpt_key = f"ai/session/{session_id}/checkpoints/speech_{clean_hash_v2}_{fp_hash_v2}.json"
     assert (tmp_path / new_ckpt_key).is_file()
 
 

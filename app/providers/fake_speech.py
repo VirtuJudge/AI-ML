@@ -13,6 +13,8 @@ from app.providers.types import (
 class FakeSpeechProvider:
     """Deterministic speech transcription provider."""
 
+    adapter_version = "fake_speech/0.1.0"
+
     async def transcribe(self, audio_path: Path) -> TranscriptionResult:
         return TranscriptionResult(
             segments=[
@@ -54,6 +56,8 @@ class FakeSpeechProvider:
 
 class FakeDiarizationProvider:
     """Deterministic speaker diarization provider."""
+
+    adapter_version = "fake_diarization/0.1.0"
 
     async def diarize(self, audio_path: Path) -> DiarizationResult:
         return DiarizationResult(

@@ -18,6 +18,8 @@ from app.stages.media import get_wav_metadata, normalize_media
 
 logger = logging.getLogger(__name__)
 
+SPEECH_STAGE_VERSION = "1.0.0"
+
 
 class SpeechStageResult(BaseModel):
     """Result of speech transcription and diarization stage."""
@@ -342,6 +344,7 @@ async def run_speech_stage(
 
 
 __all__ = [
+    "SPEECH_STAGE_VERSION",
     "SpeechStageResult",
     "run_speech_stage",
     "validate_word_timestamps",

@@ -18,6 +18,7 @@ class PyannoteDiarizationProvider:
     """Speaker diarization adapter powered by pyannote.audio 3.1."""
 
     DEFAULT_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+    adapter_version = "pyannote_diarization/1.0.0"
 
     def __init__(
         self,
@@ -199,6 +200,13 @@ class PyannoteDiarizationProvider:
             speaker_labels=speaker_labels,
             metadata=metadata,
         )
+
+    def checkpoint_config(self) -> dict[str, Any]:
+        """Return safe configuration metadata for stage checkpoint fingerprinting."""
+        return {
+            "min_speakers": self.min_speakers,
+            "max_speakers": self.max_speakers,
+        }
 
     async def diarize(self, audio_path: Path) -> DiarizationResult:
         """Diarize an audio file asynchronously."""

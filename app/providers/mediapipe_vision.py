@@ -66,6 +66,23 @@ def _ensure_model(model_path: Path, url: str) -> Path:
 class MediaPipeVisionProvider:
     """Extracts timed visual measurements from video files using MediaPipe."""
 
+    model_name = "mediapipe_face_pose_landmarker"
+
+    @property
+    def adapter_version(self) -> str:
+        """Return adapter/algorithm version dynamically for checkpoint fingerprinting."""
+        return ALGORITHM_VERSION
+
+    def checkpoint_config(self) -> dict[str, Any]:
+        """Return safe sampling, model, and feature configuration for checkpointing."""
+        return {
+            "sample_fps": self.sample_fps,
+            "max_persons": self.max_persons,
+            "face_model": FACE_MODEL_URL,
+            "pose_model": POSE_MODEL_URL,
+            "algorithm_version": ALGORITHM_VERSION,
+        }
+
     def __init__(
         self,
         *,

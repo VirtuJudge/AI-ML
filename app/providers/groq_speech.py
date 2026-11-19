@@ -62,6 +62,7 @@ class GroqSpeechProvider:
     DEFAULT_MODEL = "whisper-large-v3-turbo"
     API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
     MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25MB strict request limit
+    adapter_version = "groq_speech/1.0.0"
 
     def __init__(
         self,
@@ -127,6 +128,14 @@ class GroqSpeechProvider:
     def model_name(self) -> str:
         """Return the model identifier."""
         return self.model
+
+    def checkpoint_config(self) -> dict[str, Any]:
+        """Return safe configuration metadata for stage checkpoint fingerprinting."""
+        return {
+            "max_file_size_bytes": self.max_file_size_bytes,
+            "response_format": "verbose_json",
+            "timestamp_granularities": ["word", "segment"],
+        }
 
     @staticmethod
     def _parse_words(raw_words: list[dict[str, Any]]) -> list[WordTimestamp]:

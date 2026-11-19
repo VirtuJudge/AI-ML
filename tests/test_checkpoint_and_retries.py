@@ -1,6 +1,7 @@
 """Unit tests for stage checkpointing and transient retry mechanics."""
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -8,11 +9,28 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from app.contracts import ErrorCode
+from app.contracts import AnalyzeSessionPayload, AssetInput, ErrorCode, RubricRef
+from app.pipeline import FakePipeline
+from app.providers.fake_audio import FakeAudioMetricsProvider
+from app.providers.fake_speech import FakeDiarizationProvider, FakeSpeechProvider
+from app.providers.fake_vision import FakeVisionProvider
 from app.providers.groq_pool import AllKeysExhaustedError
-from app.providers.groq_speech import GroqSpeechProviderError
+from app.providers.groq_speech import GroqSpeechProvider, GroqSpeechProviderError
 from app.providers.http_embedding import HttpEmbeddingProviderError
-from app.stages.checkpoint import get_stage_checkpoint, save_stage_checkpoint
+from app.providers.types import (
+    AudioObservation,
+    DiarizationResult,
+    TranscriptionResult,
+    VisualObservation,
+)
+from app.runtime_mode import resolve_runtime_mode
+from app.stages.checkpoint import (
+    StageCheckpointFingerprint,
+    compute_fingerprint_digest,
+    extract_provider_fingerprint,
+    get_stage_checkpoint,
+    save_stage_checkpoint,
+)
 from app.stages.common import (
     StageProviderError,
     StageTransientError,
@@ -544,3 +562,356 @@ def test_classify_stage_error_http_status_error() -> None:
     assert isinstance(mapped_400, StageProviderError)
     assert mapped_400.retryable is False
     assert mapped_400.stage == "speech"
+
+
+# ---------------------------------------------------------------------------
+# Compatibility fingerprinting, namespacing, and invalidation tests (#63)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_stage_checkpoint_rejects_obsolete_producer_version(tmp_path: Path) -> None:
+    """Reproduces issue #63: an obsolete producer_version checkpoint must not be reused."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    session_id = "01JSESSIONOBSOLETE00000001"
+    checksum = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    old_data = {"transcription": {"full_text": "stale transcript"}}
+
+    await save_stage_checkpoint(
+        storage=storage,
+        session_id=session_id,
+        stage="speech",
+        input_checksum=checksum,
+        data=old_data,
+        schema_version=1,
+        producer_version="obsolete-producer/0.0.1",
+    )
+
+    assert await get_stage_checkpoint(storage, session_id, "speech", checksum) is None
+    assert (
+        await get_stage_checkpoint(
+            storage,
+            session_id,
+            "speech",
+            checksum,
+            expected_producer_version="obsolete-producer/0.0.1",
+        )
+        == old_data
+    )
+
+
+@pytest.mark.asyncio
+async def test_stage_checkpoint_fingerprint_namespaces_and_validates(tmp_path: Path) -> None:
+    """Verify fingerprints namespace storage keys and reject mismatched/unfingerprinted reads."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    session_id = "01JSESSIONFINGERPRINT00001"
+    stage = "vision"
+    checksum = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+
+    fp_v1 = StageCheckpointFingerprint(
+        stage=stage,
+        stage_version="1.0.0",
+        producer_version="ai-ml/0.1.0",
+        provider_mode="fake",
+        source_checksums={"presentation": checksum},
+        providers={"vision": {"model": "mediapipe-v1", "config": {"sample_fps": 2.0}}},
+    )
+    fp_v2 = StageCheckpointFingerprint(
+        stage=stage,
+        stage_version="1.0.0",
+        producer_version="ai-ml/0.1.0",
+        provider_mode="fake",
+        source_checksums={"presentation": checksum},
+        providers={"vision": {"model": "mediapipe-v1", "config": {"sample_fps": 5.0}}},
+    )
+
+    ref_v1 = await save_stage_checkpoint(
+        storage=storage,
+        session_id=session_id,
+        stage=stage,
+        input_checksum=checksum,
+        data={"sample_fps": 2.0},
+        compatibility_fingerprint=fp_v1,
+    )
+    ref_v2 = await save_stage_checkpoint(
+        storage=storage,
+        session_id=session_id,
+        stage=stage,
+        input_checksum=checksum,
+        data={"sample_fps": 5.0},
+        compatibility_fingerprint=fp_v2,
+    )
+
+    assert ref_v1.object_key != ref_v2.object_key
+    assert compute_fingerprint_digest(fp_v1)[:16] in ref_v1.object_key
+    assert compute_fingerprint_digest(fp_v2)[:16] in ref_v2.object_key
+
+    assert await get_stage_checkpoint(
+        storage, session_id, stage, checksum, expected_compatibility_fingerprint=fp_v1
+    ) == {"sample_fps": 2.0}
+    assert await get_stage_checkpoint(
+        storage, session_id, stage, checksum, expected_compatibility_fingerprint=fp_v2
+    ) == {"sample_fps": 5.0}
+
+    # Un-fingerprinted reads must not reuse a fingerprinted checkpoint even if stored at base key.
+    clean_hash = checksum.removeprefix("sha256:")
+    base_key = f"ai/session/{session_id}/checkpoints/{stage}_{clean_hash}.json"
+    fingerprinted_payload = await storage.read_json(ref_v1.object_key)
+    await storage.upload_json(base_key, fingerprinted_payload)
+    assert await get_stage_checkpoint(storage, session_id, stage, checksum) is None
+
+    # Payload-level validation still rejects a tampered fingerprint at the target key.
+    tampered_payload = dict(fingerprinted_payload)
+    tampered_payload["compatibility_fingerprint"] = fp_v1.to_canonical_dict()
+    await storage.upload_json(ref_v2.object_key, tampered_payload)
+    assert (
+        await get_stage_checkpoint(
+            storage, session_id, stage, checksum, expected_compatibility_fingerprint=fp_v2
+        )
+        is None
+    )
+
+
+class _SpySpeech(FakeSpeechProvider):
+    def __init__(self, model_name: str = "whisper-v1", adapter_version: str = "1.0.0") -> None:
+        self.model_name = model_name
+        self.adapter_version = adapter_version
+        self.calls = 0
+
+    async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+        self.calls += 1
+        return await super().transcribe(audio_path)
+
+
+class _SpyDiarization(FakeDiarizationProvider):
+    def __init__(
+        self,
+        model_name: str = "pyannote-v1",
+        min_speakers: int | None = None,
+    ) -> None:
+        self.model_name = model_name
+        self.min_speakers = min_speakers
+        self.calls = 0
+
+    async def diarize(self, audio_path: Path) -> DiarizationResult:
+        self.calls += 1
+        return await super().diarize(audio_path)
+
+
+class _SpyVision(FakeVisionProvider):
+    def __init__(
+        self,
+        *,
+        sample_fps: float = 2.0,
+        feature_version: str = "pose_v1",
+        duration_ms: int = 15000,
+    ) -> None:
+        super().__init__(duration_ms=duration_ms)
+        self.sample_fps = sample_fps
+        self.feature_version = feature_version
+        self.calls = 0
+
+    async def analyze_video(
+        self, video_path: Path, *, source_artifact_id: str = ""
+    ) -> list[VisualObservation]:
+        self.calls += 1
+        return await super().analyze_video(video_path, source_artifact_id=source_artifact_id)
+
+
+class _SpyAudio(FakeAudioMetricsProvider):
+    def __init__(
+        self,
+        *,
+        sample_rate: int = 16000,
+        window_sec: float = 5.0,
+        hop_sec: float = 2.5,
+        silence_threshold_db: float = -35.0,
+        algorithm_version: str = "audio_v1",
+        duration_ms: int = 15000,
+    ) -> None:
+        super().__init__(duration_ms=duration_ms)
+        self.sample_rate = sample_rate
+        self.window_sec = window_sec
+        self.hop_sec = hop_sec
+        self.silence_threshold_db = silence_threshold_db
+        self.algorithm_version = algorithm_version
+        self.calls = 0
+
+    async def extract_metrics(
+        self, audio_path: Path, *, source_artifact_id: str = ""
+    ) -> list[AudioObservation]:
+        self.calls += 1
+        return await super().extract_metrics(audio_path, source_artifact_id=source_artifact_id)
+
+
+def _sample_session_job(session_id: str = "01JSESSCKPT630000000000001") -> AnalyzeSessionPayload:
+    return AnalyzeSessionPayload(
+        presentation=AssetInput(
+            artifact_id="01JPRESCKPT630000000000001",
+            object_key="uploads/team/project/missing_synthetic_pitch.mp4",
+            checksum="sha256:" + "a" * 64,
+            media_type="video/mp4",
+            duration_ms=15000,
+        ),
+        supporting_documents=[],
+        rubric=RubricRef(rubric_id="startup_pitch", version=1),
+        requested_capabilities=["speech", "diarization", "vision", "audio", "questions"],
+        practice_session_id=session_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_reuses_identical_and_recomputes_affected_stage_on_changes(
+    tmp_path: Path,
+) -> None:
+    """Identical config reuses checkpoints; config/mode changes recompute affected stages."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    job = _sample_session_job()
+
+    speech_v1 = _SpySpeech(model_name="whisper-v1")
+    diar_v1 = _SpyDiarization(model_name="pyannote-v1", min_speakers=1)
+    vision_v1 = _SpyVision(sample_fps=2.0, feature_version="pose_v1")
+    audio_v1 = _SpyAudio(sample_rate=16000, window_sec=5.0, hop_sec=2.5, algorithm_version="aud_v1")
+
+    pipeline_v1 = FakePipeline(
+        speech_provider=speech_v1,
+        diarization_provider=diar_v1,
+        vision_provider=vision_v1,
+        audio_provider=audio_v1,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("fake"),
+    )
+
+    # 1. Attempt 1 computes all stages and saves checkpoints.
+    await pipeline_v1.analyze_session(job, job_id="job_1", attempt=1)
+    assert (speech_v1.calls, diar_v1.calls, vision_v1.calls, audio_v1.calls) == (1, 1, 1, 1)
+
+    # 2. Attempt 2 with identical inputs and configuration reuses all 3 stage checkpoints.
+    await pipeline_v1.analyze_session(job, job_id="job_2", attempt=2)
+    assert (speech_v1.calls, diar_v1.calls, vision_v1.calls, audio_v1.calls) == (1, 1, 1, 1)
+
+    # 3. Speech model change recomputes ONLY speech (speech + diarization); vision/audio reuse.
+    speech_v2 = _SpySpeech(model_name="whisper-v2")
+    pipeline_speech_model = FakePipeline(
+        speech_provider=speech_v2,
+        diarization_provider=diar_v1,
+        vision_provider=vision_v1,
+        audio_provider=audio_v1,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("fake"),
+    )
+    await pipeline_speech_model.analyze_session(job, job_id="job_3", attempt=2)
+    assert speech_v2.calls == 1
+    assert diar_v1.calls == 2
+    assert vision_v1.calls == 1
+    assert audio_v1.calls == 1
+
+    # 4. Vision sampling change (sample_fps) recomputes ONLY vision; speech & audio reuse.
+    vision_fps = _SpyVision(sample_fps=5.0, feature_version="pose_v1")
+    pipeline_vision_fps = FakePipeline(
+        speech_provider=speech_v1,
+        diarization_provider=diar_v1,
+        vision_provider=vision_fps,
+        audio_provider=audio_v1,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("fake"),
+    )
+    await pipeline_vision_fps.analyze_session(job, job_id="job_4", attempt=2)
+    assert speech_v1.calls == 1
+    assert diar_v1.calls == 2
+    assert vision_fps.calls == 1
+    assert audio_v1.calls == 1
+
+    # 5. Vision feature version change recomputes ONLY vision.
+    vision_feat = _SpyVision(sample_fps=5.0, feature_version="pose_v2")
+    pipeline_vision_feat = FakePipeline(
+        speech_provider=speech_v1,
+        diarization_provider=diar_v1,
+        vision_provider=vision_feat,
+        audio_provider=audio_v1,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("fake"),
+    )
+    await pipeline_vision_feat.analyze_session(job, job_id="job_5", attempt=2)
+    assert speech_v1.calls == 1
+    assert vision_feat.calls == 1
+    assert audio_v1.calls == 1
+
+    # 6. Audio sampling/feature configuration change recomputes ONLY audio.
+    audio_hop = _SpyAudio(
+        sample_rate=16000, window_sec=4.0, hop_sec=1.0, algorithm_version="aud_v1"
+    )
+    pipeline_audio_cfg = FakePipeline(
+        speech_provider=speech_v1,
+        diarization_provider=diar_v1,
+        vision_provider=vision_v1,
+        audio_provider=audio_hop,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("fake"),
+    )
+    await pipeline_audio_cfg.analyze_session(job, job_id="job_6", attempt=2)
+    assert speech_v1.calls == 1
+    assert vision_v1.calls == 1
+    assert audio_hop.calls == 1
+
+    # 7. Switching back to v1 configuration reuses original namespaced checkpoints (no clobber).
+    await pipeline_v1.analyze_session(job, job_id="job_7", attempt=2)
+    assert (speech_v1.calls, diar_v1.calls, vision_v1.calls, audio_v1.calls) == (1, 2, 1, 1)
+
+    # 8. Provider-mode change (fake -> mixed) recomputes all stages.
+    pipeline_mixed = FakePipeline(
+        speech_provider=speech_v1,
+        diarization_provider=diar_v1,
+        vision_provider=vision_v1,
+        audio_provider=audio_v1,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("mixed"),
+    )
+    await pipeline_mixed.analyze_session(job, job_id="job_8", attempt=2)
+    assert (speech_v1.calls, diar_v1.calls, vision_v1.calls, audio_v1.calls) == (2, 3, 2, 2)
+
+    # 9. Producer version change recomputes all stages.
+    pipeline_new_prod = FakePipeline(
+        speech_provider=speech_v1,
+        diarization_provider=diar_v1,
+        vision_provider=vision_v1,
+        audio_provider=audio_v1,
+        object_storage=storage,
+        mode_policy=resolve_runtime_mode("fake"),
+        producer_version="ai-ml/0.2.0",
+    )
+    await pipeline_new_prod.analyze_session(job, job_id="job_9", attempt=2)
+    assert (speech_v1.calls, diar_v1.calls, vision_v1.calls, audio_v1.calls) == (3, 4, 3, 3)
+
+
+def test_extract_provider_fingerprint_captures_config_without_secrets() -> None:
+    """Provider fingerprinting records model/adapter/sampling config and never leaks secrets."""
+    secret_key = "gsk_test_super_secret_token_value"
+    groq_speech = GroqSpeechProvider(api_key=secret_key, model="whisper-large-v3-turbo")
+    speech_fp = extract_provider_fingerprint(groq_speech)
+
+    serialized = json.dumps(speech_fp)
+    assert secret_key not in serialized
+    assert speech_fp["model"] == "whisper-large-v3-turbo"
+    assert speech_fp["adapter_version"] == "groq_speech/1.0.0"
+
+    from app.providers.librosa_audio import LibrosaAudioProvider
+    from app.providers.mediapipe_vision import MediaPipeVisionProvider
+
+    vision_a = MediaPipeVisionProvider(
+        face_landmarker=object(),
+        pose_landmarker=object(),
+        sample_fps=2.0,
+        max_persons=10,
+    )
+    vision_b = MediaPipeVisionProvider(
+        face_landmarker=object(),
+        pose_landmarker=object(),
+        sample_fps=4.0,
+        max_persons=10,
+    )
+    assert extract_provider_fingerprint(vision_a) != extract_provider_fingerprint(vision_b)
+
+    audio_a = LibrosaAudioProvider(sample_rate=16000, window_sec=5.0, hop_sec=2.5)
+    audio_b = LibrosaAudioProvider(sample_rate=16000, window_sec=5.0, hop_sec=1.0)
+    assert extract_provider_fingerprint(audio_a) != extract_provider_fingerprint(audio_b)

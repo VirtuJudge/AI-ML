@@ -56,15 +56,21 @@ from app.runtime_mode import RuntimeModePolicy, resolve_runtime_mode
 from app.stages.aggregation import aggregate_speaker_observations
 from app.stages.answer_assessment import run_answer_assessment_stage
 from app.stages.answers import run_answer_speech_stage
-from app.stages.audio import AudioStageResult, run_audio_stage
-from app.stages.checkpoint import get_stage_checkpoint, save_stage_checkpoint
+from app.stages.audio import AUDIO_STAGE_VERSION, AudioStageResult, run_audio_stage
+from app.stages.checkpoint import (
+    DEFAULT_PRODUCER_VERSION,
+    StageCheckpointFingerprint,
+    build_stage_compatibility_fingerprint,
+    get_stage_checkpoint,
+    save_stage_checkpoint,
+)
 from app.stages.common import with_transient_retries
 from app.stages.documents import run_document_stage
-from app.stages.media import split_media
+from app.stages.media import MEDIA_NORMALIZATION_VERSION, split_media
 from app.stages.questions import run_question_stage
 from app.stages.reporting import run_report_stage
-from app.stages.speech import SpeechStageResult, run_speech_stage
-from app.stages.vision import VisionStageResult, run_vision_stage
+from app.stages.speech import SPEECH_STAGE_VERSION, SpeechStageResult, run_speech_stage
+from app.stages.vision import VISION_STAGE_VERSION, VisionStageResult, run_vision_stage
 from app.storage import create_object_storage
 from app.storage.base import (
     ObjectNotFoundError,
@@ -76,7 +82,7 @@ from app.storage.local import LocalDiskObjectStorage
 
 logger = logging.getLogger(__name__)
 
-PRODUCER_VERSION: str = "ai-ml/0.1.0"
+PRODUCER_VERSION: str = DEFAULT_PRODUCER_VERSION
 
 
 def generate_deterministic_ulid(seed_key: str, dt: datetime | str | None = None) -> str:
@@ -274,6 +280,7 @@ class FakePipeline:
         document_store: DocumentStore | None = None,
         object_storage: ObjectStorageProtocol | None = None,
         mode_policy: RuntimeModePolicy | None = None,
+        producer_version: str = PRODUCER_VERSION,
     ) -> None:
         self.speech_provider = speech_provider or FakeSpeechProvider()
         self.diarization_provider = diarization_provider or FakeDiarizationProvider()
@@ -283,6 +290,7 @@ class FakePipeline:
         self.judge_provider = judge_provider or FakeJudgeModelProvider()
         self.document_store = document_store or FakeDocumentStore()
         self.mode_policy = mode_policy
+        self.producer_version = producer_version
         if object_storage is not None:
             self.object_storage = object_storage
         elif os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
@@ -306,6 +314,86 @@ class FakePipeline:
         ):
             return policy.with_synthetic_fixtures(False)
         return policy
+
+    def _resolve_checkpoint_mode_policy(self) -> RuntimeModePolicy:
+        """Return the active runtime mode policy for stage checkpoint compatibility."""
+        return self.mode_policy if self.mode_policy is not None else resolve_runtime_mode()
+
+    def build_stage_checkpoint_fingerprint(
+        self,
+        stage: str,
+        *,
+        presentation_checksum: str,
+        media_duration_ms: int,
+        source_artifact_id: str = "",
+        skip_file_check: bool = True,
+        has_video_stream: bool = True,
+        has_audio_stream: bool = True,
+        audio_sample_rate: int | None = None,
+        audio_channels: int | None = None,
+    ) -> StageCheckpointFingerprint:
+        """Build a versioned compatibility fingerprint for a presentation analysis stage."""
+        mode_policy = self._resolve_checkpoint_mode_policy()
+        source_checksums = {"presentation": presentation_checksum}
+        normalization_version = MEDIA_NORMALIZATION_VERSION if not skip_file_check else "none"
+
+        if stage == "speech":
+            return build_stage_compatibility_fingerprint(
+                stage="speech",
+                stage_version=SPEECH_STAGE_VERSION,
+                producer_version=self.producer_version,
+                provider_mode=mode_policy.provider_mode,
+                source_checksums=source_checksums,
+                providers={
+                    "speech": self.speech_provider,
+                    "diarization": self.diarization_provider,
+                },
+                stage_config={
+                    "media_duration_ms": media_duration_ms,
+                    "skip_file_check": skip_file_check,
+                    "skip_normalization": True,
+                    "strict_timestamps": False,
+                    "has_audio_stream": has_audio_stream,
+                    "media_normalization_version": normalization_version,
+                    "audio_sample_rate": audio_sample_rate if not skip_file_check else None,
+                    "audio_channels": audio_channels if not skip_file_check else None,
+                },
+            )
+        if stage == "vision":
+            return build_stage_compatibility_fingerprint(
+                stage="vision",
+                stage_version=VISION_STAGE_VERSION,
+                producer_version=self.producer_version,
+                provider_mode=mode_policy.provider_mode,
+                source_checksums=source_checksums,
+                providers={"vision": self.vision_provider},
+                stage_config={
+                    "media_duration_ms": media_duration_ms,
+                    "source_artifact_id": source_artifact_id,
+                    "skip_file_check": skip_file_check,
+                    "has_video_stream": has_video_stream,
+                    "media_split_version": normalization_version,
+                },
+            )
+        if stage == "audio":
+            return build_stage_compatibility_fingerprint(
+                stage="audio",
+                stage_version=AUDIO_STAGE_VERSION,
+                producer_version=self.producer_version,
+                provider_mode=mode_policy.provider_mode,
+                source_checksums=source_checksums,
+                providers={"audio": self.audio_provider},
+                stage_config={
+                    "media_duration_ms": media_duration_ms,
+                    "source_artifact_id": source_artifact_id,
+                    "skip_file_check": skip_file_check,
+                    "has_audio_stream": has_audio_stream,
+                    "media_normalization_version": normalization_version,
+                    "audio_sample_rate": audio_sample_rate if not skip_file_check else None,
+                    "audio_channels": audio_channels if not skip_file_check else None,
+                },
+            )
+        raise ValueError(f"Unsupported checkpoint stage: {stage!r}")
 
     async def _check_cancellation(
         self,
@@ -541,10 +629,14 @@ class FakePipeline:
             audio_path: Path | None = split_res.audio_path
             video_path: Path | None = split_res.video_path
             duration_ms = split_res.duration_ms or job.presentation.duration_ms or 15000
+            split_sample_rate: int | None = split_res.sample_rate
+            split_channels: int | None = split_res.channels
         else:
             audio_path = input_file
             video_path = input_file
             duration_ms = job.presentation.duration_ms or 15000
+            split_sample_rate = None
+            split_channels = None
 
         # Inspection point 1: After asset verification, before speech transcription & diarization
         await self._check_cancellation(job_id, backend_client, stage="speech")
@@ -554,24 +646,67 @@ class FakePipeline:
 
         target_audio: Path = audio_path if audio_path is not None else input_file
 
+        speech_fp = self.build_stage_checkpoint_fingerprint(
+            "speech",
+            presentation_checksum=job.presentation.checksum,
+            media_duration_ms=duration_ms,
+            skip_file_check=skip_file_check,
+            has_audio_stream=audio_path is not None,
+            audio_sample_rate=split_sample_rate,
+            audio_channels=split_channels,
+        )
+        vision_fp = self.build_stage_checkpoint_fingerprint(
+            "vision",
+            presentation_checksum=job.presentation.checksum,
+            media_duration_ms=duration_ms,
+            source_artifact_id=job.presentation.artifact_id,
+            skip_file_check=skip_file_check,
+            has_video_stream=video_path is not None,
+        )
+        audio_fp = self.build_stage_checkpoint_fingerprint(
+            "audio",
+            presentation_checksum=job.presentation.checksum,
+            media_duration_ms=duration_ms,
+            source_artifact_id=job.presentation.artifact_id,
+            skip_file_check=skip_file_check,
+            has_audio_stream=audio_path is not None,
+            audio_sample_rate=split_sample_rate,
+            audio_channels=split_channels,
+        )
+
         # Checkpoint reuse for speech, vision, audio on retry attempts (N+1):
         speech_cached = (
             await get_stage_checkpoint(
-                self.object_storage, session_id, "speech", job.presentation.checksum
+                self.object_storage,
+                session_id,
+                "speech",
+                job.presentation.checksum,
+                expected_producer_version=self.producer_version,
+                expected_compatibility_fingerprint=speech_fp,
             )
             if attempt > 1
             else None
         )
         vision_cached = (
             await get_stage_checkpoint(
-                self.object_storage, session_id, "vision", job.presentation.checksum
+                self.object_storage,
+                session_id,
+                "vision",
+                job.presentation.checksum,
+                expected_producer_version=self.producer_version,
+                expected_compatibility_fingerprint=vision_fp,
             )
             if attempt > 1
             else None
         )
         audio_cached = (
             await get_stage_checkpoint(
-                self.object_storage, session_id, "audio", job.presentation.checksum
+                self.object_storage,
+                session_id,
+                "audio",
+                job.presentation.checksum,
+                expected_producer_version=self.producer_version,
+                expected_compatibility_fingerprint=audio_fp,
             )
             if attempt > 1
             else None
@@ -592,7 +727,13 @@ class FakePipeline:
                 stage_name="speech",
             )
             await save_stage_checkpoint(
-                self.object_storage, session_id, "speech", job.presentation.checksum, res
+                self.object_storage,
+                session_id,
+                "speech",
+                job.presentation.checksum,
+                res,
+                producer_version=self.producer_version,
+                compatibility_fingerprint=speech_fp,
             )
             return res
 
@@ -610,7 +751,13 @@ class FakePipeline:
                 stage_name="vision",
             )
             await save_stage_checkpoint(
-                self.object_storage, session_id, "vision", job.presentation.checksum, res
+                self.object_storage,
+                session_id,
+                "vision",
+                job.presentation.checksum,
+                res,
+                producer_version=self.producer_version,
+                compatibility_fingerprint=vision_fp,
             )
             return res
 
@@ -628,7 +775,13 @@ class FakePipeline:
                 stage_name="audio",
             )
             await save_stage_checkpoint(
-                self.object_storage, session_id, "audio", job.presentation.checksum, res
+                self.object_storage,
+                session_id,
+                "audio",
+                job.presentation.checksum,
+                res,
+                producer_version=self.producer_version,
+                compatibility_fingerprint=audio_fp,
             )
             return res
 
@@ -823,7 +976,7 @@ class FakePipeline:
             "practice_session_id": job.practice_session_id,
             "kind": "transcript",
             "schema_version": 1,
-            "producer_version": PRODUCER_VERSION,
+            "producer_version": self.producer_version,
             "source_artifact_ids": transcript_source_ids,
             "created_at": created_at,
             "transcript": {
@@ -872,7 +1025,7 @@ class FakePipeline:
             "question_id": job.question_id,
             "kind": "answer_assessment",
             "schema_version": 1,
-            "producer_version": PRODUCER_VERSION,
+            "producer_version": self.producer_version,
             "source_artifact_ids": [transcript_artifact_id],
             "created_at": created_at,
             "assessment": {
@@ -949,7 +1102,7 @@ class FakePipeline:
                 judge_provider=self.judge_provider,
                 rubric_id=job.rubric.rubric_id,
                 rubric_version=job.rubric.version,
-                pipeline_version=PRODUCER_VERSION,
+                pipeline_version=self.producer_version,
                 mode_policy=self._resolve_report_mode_policy(),
             ),
             stage_name="reporting",

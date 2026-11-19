@@ -18,6 +18,8 @@ from app.stages.common import validate_observation_timestamps
 
 logger = logging.getLogger(__name__)
 
+VISION_STAGE_VERSION = "1.0.0"
+
 
 class VisionStageResult(BaseModel):
     """Result of the vision measurement stage."""
@@ -185,6 +187,7 @@ async def run_vision_stage(
 
 
 __all__ = [
+    "VISION_STAGE_VERSION",
     "VisionStageResult",
     "check_coverage_limitations",
     "run_vision_stage",
