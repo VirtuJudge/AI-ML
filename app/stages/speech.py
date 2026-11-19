@@ -39,7 +39,7 @@ class SpeechStageResult(BaseModel):
 
 def validate_word_timestamps(
     transcription: TranscriptionResult,
-    media_duration_ms: int,
+    media_duration_ms: int | None,
     *,
     strict: bool = True,
 ) -> list[Limitation]:
@@ -47,7 +47,8 @@ def validate_word_timestamps(
 
     Args:
         transcription: Transcription result containing segments and word timestamps.
-        media_duration_ms: Total media duration in milliseconds.
+        media_duration_ms: Total media duration in milliseconds, or None when it is unknown
+            (upper-bound checks are then skipped; lower-bound and ordering checks still apply).
         strict: If True, raises ValueError if a timestamp exceeds duration or is inverted.
                 If False, clamps timestamps to media duration, corrects inverted intervals,
                 and produces Limitations.
@@ -70,7 +71,7 @@ def validate_word_timestamps(
             seg.start_ms = 0
             has_out_of_bounds = True
 
-        if seg.end_ms > media_duration_ms:
+        if media_duration_ms is not None and seg.end_ms > media_duration_ms:
             if strict:
                 raise ValueError(
                     f"Segment end timestamp ({seg.end_ms}ms) exceeds "
@@ -79,7 +80,7 @@ def validate_word_timestamps(
             seg.end_ms = media_duration_ms
             has_out_of_bounds = True
 
-        if seg.start_ms > media_duration_ms:
+        if media_duration_ms is not None and seg.start_ms > media_duration_ms:
             if strict:
                 raise ValueError(
                     f"Segment start timestamp ({seg.start_ms}ms) exceeds "
@@ -110,7 +111,7 @@ def validate_word_timestamps(
                 word.start_ms = 0
                 has_out_of_bounds = True
 
-            if word.end_ms > media_duration_ms:
+            if media_duration_ms is not None and word.end_ms > media_duration_ms:
                 if strict:
                     raise ValueError(
                         f"Word '{word.word}' end timestamp ({word.end_ms}ms) "
@@ -119,7 +120,7 @@ def validate_word_timestamps(
                 word.end_ms = media_duration_ms
                 has_out_of_bounds = True
 
-            if word.start_ms > media_duration_ms:
+            if media_duration_ms is not None and word.start_ms > media_duration_ms:
                 if strict:
                     raise ValueError(
                         f"Word '{word.word}' start timestamp ({word.start_ms}ms) "

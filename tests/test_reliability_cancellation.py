@@ -365,7 +365,7 @@ async def test_stage_checkpoint_reuse_across_attempts(
     speech_fp_v1 = pipeline.build_stage_checkpoint_fingerprint(
         "speech",
         presentation_checksum=checksum_v1,
-        media_duration_ms=job_v1.presentation.duration_ms or 15000,
+        media_duration_ms=job_v1.presentation.duration_ms,
         skip_file_check=True,
         has_audio_stream=True,
     )
@@ -407,7 +407,7 @@ async def test_stage_checkpoint_reuse_across_attempts(
     speech_fp_v2 = pipeline.build_stage_checkpoint_fingerprint(
         "speech",
         presentation_checksum=checksum_v2,
-        media_duration_ms=job_v2.presentation.duration_ms or 15000,
+        media_duration_ms=job_v2.presentation.duration_ms,
         skip_file_check=True,
         has_audio_stream=True,
     )

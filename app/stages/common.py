@@ -266,7 +266,7 @@ def classify_stage_error(
 
 def validate_observation_timestamps(
     observations: list[T],
-    media_duration_ms: int,
+    media_duration_ms: int | None,
     *,
     scope: str,
     clamped_code: str,
@@ -276,13 +276,17 @@ def validate_observation_timestamps(
 ) -> tuple[list[T], list[Limitation]]:
     """Validate observation timestamps, clamping or discarding out-of-bounds intervals.
 
-    Guarantees the contract invariant: 0 <= start_ms < end_ms <= media_duration_ms.
+    Guarantees the contract invariant: 0 <= start_ms < end_ms <= media_duration_ms
+    (or 0 <= start_ms < end_ms when media_duration_ms is None).
     Any observation with start_ms >= media_duration_ms, or where start_ms >= end_ms
     (after boundary correction), is discarded rather than collapsed into a degenerate
     zero-duration interval.
 
     Also ensures source_artifact_id is populated if provided or absent.
     """
+    if media_duration_ms is not None and media_duration_ms < 0:
+        raise ValueError(f"media_duration_ms ({media_duration_ms}ms) cannot be negative.")
+
     valid: list[T] = []
     limitations: list[Limitation] = []
     had_clamping = False
@@ -302,15 +306,17 @@ def validate_observation_timestamps(
             start_ms = 0
             clamped = True
 
-        # Discard observations that start at or beyond media duration
-        if media_duration_ms > 0 and start_ms >= media_duration_ms:
-            had_clamping = True
-            continue
+        # Apply upper-bound checks only when media duration is known
+        if media_duration_ms is not None:
+            # Discard observations that start at or beyond media duration
+            if start_ms >= media_duration_ms:
+                had_clamping = True
+                continue
 
-        # Clamp end to media duration
-        if media_duration_ms > 0 and end_ms > media_duration_ms:
-            end_ms = media_duration_ms
-            clamped = True
+            # Clamp end to media duration
+            if end_ms > media_duration_ms:
+                end_ms = media_duration_ms
+                clamped = True
 
         # Strict contract invariant: start_ms must be strictly less than end_ms
         if start_ms >= end_ms:

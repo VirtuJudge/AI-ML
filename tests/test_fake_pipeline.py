@@ -88,7 +88,9 @@ async def test_analyze_session_with_supporting_documents(
     result = await fake_pipeline.analyze_session(payload)
     assert len(result.primary_questions) == 3
     assert result.analysis_artifact.artifact_id is not None
-    assert len(result.limitations) == 0
+    # The job declares no duration and there is no probe-able media in this fake run, so the
+    # only limitation is the explicit missing-duration one (no invented 15 s default).
+    assert [lim.code for lim in result.limitations] == ["media_duration_unavailable"]
 
 
 @pytest.mark.asyncio

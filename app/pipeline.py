@@ -76,6 +76,7 @@ from app.stages.media import (
     MEDIA_NORMALIZATION_VERSION,
     cleanup_job_temp_dirs_for_scope,
     owned_job_temp_dir,
+    resolve_media_duration,
     split_media,
 )
 from app.stages.questions import run_question_stage
@@ -429,7 +430,7 @@ class FakePipeline:
         stage: str,
         *,
         presentation_checksum: str,
-        media_duration_ms: int,
+        media_duration_ms: int | None,
         source_artifact_id: str = "",
         skip_file_check: bool = True,
         has_video_stream: bool = True,
@@ -876,13 +877,21 @@ class FakePipeline:
                     )
                     audio_path: Path | None = split_res.audio_path
                     video_path: Path | None = split_res.video_path
-                    duration_ms = split_res.duration_ms or job.presentation.duration_ms or 15000
+                    duration_ms, duration_limitations = resolve_media_duration(
+                        probed_duration_ms=split_res.duration_ms or None,
+                        declared_duration_ms=job.presentation.duration_ms,
+                        media_role="Presentation",
+                    )
                     split_sample_rate: int | None = split_res.sample_rate
                     split_channels: int | None = split_res.channels
                 else:
                     audio_path = input_file
                     video_path = input_file
-                    duration_ms = job.presentation.duration_ms or 15000
+                    duration_ms, duration_limitations = resolve_media_duration(
+                        probed_duration_ms=None,
+                        declared_duration_ms=job.presentation.duration_ms,
+                        media_role="Presentation",
+                    )
                     split_sample_rate = None
                     split_channels = None
 
@@ -1124,7 +1133,9 @@ class FakePipeline:
                     visual_observations=updated_visual,
                     audio_observations=updated_audio,
                     rubric_id=job.rubric.rubric_id,
-                    extra_limitations=corr_limitations + doc_stage_res.limitations,
+                    extra_limitations=(
+                        duration_limitations + corr_limitations + doc_stage_res.limitations
+                    ),
                 ),
                 stage_name="questions",
             )
@@ -1279,7 +1290,9 @@ class FakePipeline:
                     audio_asset,
                     media_role="Answer",
                 )
-                duration_ms = audio_asset.duration_ms or 15000
+                # Declared duration only; the answer speech stage probes the media and
+                # emits a limitation when neither is available.
+                duration_ms = audio_asset.duration_ms
 
                 with owned_job_temp_dir(
                     job_kind="answer",

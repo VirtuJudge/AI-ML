@@ -31,7 +31,7 @@ class VisionStageResult(BaseModel):
 
 def validate_visual_observations(
     observations: list[VisualObservation],
-    media_duration_ms: int,
+    media_duration_ms: int | None,
     *,
     source_artifact_id: str = "",
 ) -> tuple[list[VisualObservation], list[Limitation]]:
@@ -52,7 +52,7 @@ def validate_visual_observations(
 
 def check_coverage_limitations(
     observations: list[VisualObservation],
-    media_duration_ms: int,
+    media_duration_ms: int | None,
 ) -> list[Limitation]:
     """Check if face/body observations cover enough of the video."""
     limitations: list[Limitation] = []
@@ -63,7 +63,7 @@ def check_coverage_limitations(
     has_face = any(obs.metric in face_metrics for obs in observations)
     has_body = any(obs.metric in body_metrics for obs in observations)
 
-    if not has_face and media_duration_ms > 0:
+    if not has_face and (media_duration_ms or 0) > 0:
         limitations.append(
             Limitation(
                 code="no_face_detected",
@@ -76,7 +76,7 @@ def check_coverage_limitations(
             )
         )
 
-    if not has_body and media_duration_ms > 0:
+    if not has_body and (media_duration_ms or 0) > 0:
         limitations.append(
             Limitation(
                 code="no_body_detected",
@@ -96,7 +96,7 @@ async def run_vision_stage(
     video_path: Path | str | None,
     vision_provider: VisionProvider,
     *,
-    media_duration_ms: int,
+    media_duration_ms: int | None,
     source_artifact_id: str = "",
     skip_file_check: bool = False,
 ) -> VisionStageResult:

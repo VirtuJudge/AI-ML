@@ -31,7 +31,7 @@ class AudioStageResult(BaseModel):
 
 def validate_audio_observations(
     observations: list[AudioObservation],
-    media_duration_ms: int,
+    media_duration_ms: int | None,
     *,
     source_artifact_id: str = "",
 ) -> tuple[list[AudioObservation], list[Limitation]]:
@@ -54,7 +54,7 @@ async def run_audio_stage(
     audio_path: Path | str | None,
     audio_provider: AudioMetricsProvider,
     *,
-    media_duration_ms: int,
+    media_duration_ms: int | None,
     source_artifact_id: str = "",
     skip_file_check: bool = False,
 ) -> AudioStageResult:

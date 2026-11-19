@@ -96,7 +96,7 @@ class AssetInput(BaseModel):
     object_key: str
     checksum: str
     media_type: str
-    duration_ms: int | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
 
     @field_validator("checksum")
     @classmethod
@@ -109,7 +109,7 @@ class AssetInput(BaseModel):
 class AudioAssetInput(AssetInput):
     """Input audio asset reference requiring explicit duration in milliseconds."""
 
-    duration_ms: int
+    duration_ms: int = Field(ge=0)
 
 
 class RubricRef(BaseModel):

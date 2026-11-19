@@ -12,6 +12,7 @@ once upfront saves downstream stages from repeated audio conversions.
 import asyncio
 import contextlib
 import hashlib
+import logging
 import math
 import os
 import re
@@ -25,9 +26,13 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
-from app.contracts import AssetInput, Limitation
+from app.contracts import AssetInput, ErrorCode, Limitation
+from app.stages.common import StageValidationError
+
+logger = logging.getLogger(__name__)
 
 MEDIA_NORMALIZATION_VERSION = "ffmpeg_pcm_s16le_16k_mono_v1"
+DURATION_MISMATCH_TOLERANCE_MS = 250
 JOB_TEMP_ROOT_ENV = "AI_MEDIA_TEMP_DIR"
 DEFAULT_JOB_TEMP_DIRNAME = "virtujudge_media_jobs"
 MEDIA_TIMEOUT_ENV = "AI_MEDIA_TIMEOUT_SECONDS"
@@ -278,6 +283,100 @@ def create_normalization_limitation(
         message=message,
         affected_dimensions=["delivery_pace", "acoustic_features"],
     )
+
+
+def create_missing_duration_limitation(
+    message: str = (
+        "Media duration could not be determined from the media file or job metadata; "
+        "duration-bounded validation and pacing metrics were omitted."
+    ),
+) -> Limitation:
+    """Create a log-safe limitation when media duration is unavailable."""
+    return Limitation(
+        code="media_duration_unavailable",
+        scope="media",
+        message=message,
+        affected_dimensions=["delivery_pace", "timing_and_speech_mechanics"],
+    )
+
+
+def create_duration_mismatch_limitation(
+    message: str = (
+        "Declared media duration did not match the probed media duration; "
+        "analysis used the probed duration."
+    ),
+) -> Limitation:
+    """Create a log-safe limitation when declared duration disagrees with probed duration."""
+    return Limitation(
+        code="media_duration_mismatch",
+        scope="media",
+        message=message,
+        affected_dimensions=[],
+    )
+
+
+def resolve_media_duration(
+    *,
+    probed_duration_ms: int | None,
+    declared_duration_ms: int | None,
+    media_role: str = "Media",
+    stage: str = "ingestion",
+    mismatch_tolerance_ms: int = DURATION_MISMATCH_TOLERANCE_MS,
+) -> tuple[int | None, list[Limitation]]:
+    """Resolve authoritative media duration from probed media and declared job metadata.
+
+    Policy:
+        - When probed media duration is available:
+          * Reject non-positive (<= 0) probed durations with StageValidationError;
+            never fall back to declared duration or an invented default.
+          * Use the positive probed duration as authoritative.
+          * If declared duration is also supplied and disagrees beyond tolerance
+            (or is non-positive), emit a safe ``media_duration_mismatch`` limitation.
+        - When probed duration is unavailable (None):
+          * If declared duration is supplied and non-positive (<= 0), fail validation
+            with StageValidationError.
+          * If declared duration is positive, use it.
+          * If neither probed nor declared duration is available, return None and emit
+            an explicit ``media_duration_unavailable`` limitation instead of defaulting
+            to an arbitrary length.
+    """
+    if probed_duration_ms is not None:
+        if probed_duration_ms <= 0:
+            raise StageValidationError(
+                f"{media_role} media probed duration must be positive "
+                f"(got {probed_duration_ms}ms).",
+                stage=stage,
+                code=ErrorCode.VALIDATION_ERROR,
+                safe_message=f"{media_role} media has zero or invalid duration.",
+            )
+
+        limitations: list[Limitation] = []
+        if declared_duration_ms is not None and (
+            declared_duration_ms <= 0
+            or abs(probed_duration_ms - declared_duration_ms) > mismatch_tolerance_ms
+        ):
+            logger.warning(
+                "%s declared duration (%dms) mismatched probed duration (%dms); "
+                "using probed duration.",
+                media_role,
+                declared_duration_ms,
+                probed_duration_ms,
+            )
+            limitations.append(create_duration_mismatch_limitation())
+        return probed_duration_ms, limitations
+
+    if declared_duration_ms is not None:
+        if declared_duration_ms <= 0:
+            raise StageValidationError(
+                f"{media_role} media declared duration must be positive "
+                f"(got {declared_duration_ms}ms).",
+                stage=stage,
+                code=ErrorCode.VALIDATION_ERROR,
+                safe_message=f"{media_role} media has zero or invalid duration.",
+            )
+        return declared_duration_ms, []
+
+    return None, [create_missing_duration_limitation()]
 
 
 class _PreparedOutput(NamedTuple):
@@ -673,6 +772,7 @@ __all__ = [
     "DEFAULT_JOB_TEMP_DIRNAME",
     "DEFAULT_MEDIA_TERMINATE_GRACE_SECONDS",
     "DEFAULT_MEDIA_TIMEOUT_SECONDS",
+    "DURATION_MISMATCH_TOLERANCE_MS",
     "JOB_TEMP_ROOT_ENV",
     "MEDIA_NORMALIZATION_VERSION",
     "MEDIA_TERMINATE_GRACE_ENV",
@@ -687,6 +787,8 @@ __all__ = [
     "WavMetadata",
     "cleanup_job_temp_dirs_for_scope",
     "cleanup_stale_worker_temp_dirs",
+    "create_duration_mismatch_limitation",
+    "create_missing_duration_limitation",
     "create_normalization_limitation",
     "get_media_temp_root",
     "get_media_terminate_grace_seconds",
@@ -694,5 +796,6 @@ __all__ = [
     "get_wav_metadata",
     "normalize_media",
     "owned_job_temp_dir",
+    "resolve_media_duration",
     "split_media",
 ]
