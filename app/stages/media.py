@@ -10,9 +10,14 @@ once upfront saves downstream stages from repeated audio conversions.
 """
 
 import asyncio
+import contextlib
+import hashlib
 import os
+import re
+import shutil
 import tempfile
 import wave
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -21,6 +26,8 @@ from pydantic import BaseModel, Field
 from app.contracts import AssetInput, Limitation
 
 MEDIA_NORMALIZATION_VERSION = "ffmpeg_pcm_s16le_16k_mono_v1"
+JOB_TEMP_ROOT_ENV = "AI_MEDIA_TEMP_DIR"
+DEFAULT_JOB_TEMP_DIRNAME = "virtujudge_media_jobs"
 
 SUPPORTED_MEDIA_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -110,6 +117,147 @@ def get_wav_metadata(wav_path: Path) -> WavMetadata:
         raise MediaNormalizationError("Failed to read normalized WAV file header.") from err
 
 
+def get_media_temp_root(*, base_dir: Path | str | None = None) -> Path:
+    """Return the root directory for worker-owned per-job temporary media."""
+    if base_dir is not None:
+        return Path(base_dir)
+    configured = os.getenv(JOB_TEMP_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured)
+    return Path(tempfile.gettempdir()) / DEFAULT_JOB_TEMP_DIRNAME
+
+
+def _scope_tag(prefix: str, value: str | None) -> str | None:
+    if not value:
+        return None
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+
+def _remove_empty_dir(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+
+
+def _unlink_owned_output(path: Path, source_path: Path, *, should_unlink: bool) -> None:
+    if not should_unlink:
+        return
+    if path.resolve() == source_path.resolve():
+        return
+    path.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def owned_job_temp_dir(
+    *,
+    job_kind: str = "job",
+    job_id: str | None = None,
+    session_id: str | None = None,
+    asset_version_id: str | None = None,
+    answer_id: str | None = None,
+    base_dir: Path | str | None = None,
+) -> Iterator[Path]:
+    """Create an owned per-job temporary directory and remove it on exit.
+
+    Cleans up the directory after normal completion, failures, and cancellation.
+    """
+    root = get_media_temp_root(base_dir=base_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_kind = re.sub(r"[^A-Za-z0-9_-]", "", job_kind) or "job"
+    tags = [
+        tag
+        for tag in (
+            _scope_tag("s", session_id),
+            _scope_tag("v", asset_version_id),
+            _scope_tag("a", answer_id),
+            _scope_tag("j", job_id),
+        )
+        if tag is not None
+    ]
+    prefix = "_".join(["vj", safe_kind, *tags]) + "_"
+    job_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=str(root)))
+    try:
+        yield job_dir
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        _remove_empty_dir(root)
+
+
+def cleanup_job_temp_dirs_for_scope(
+    *,
+    session_ids: list[str] | None = None,
+    asset_version_ids: list[str] | None = None,
+    answer_ids: list[str] | None = None,
+    base_dir: Path | str | None = None,
+) -> int:
+    """Remove any orphaned per-job temporary directories matching erased resource IDs."""
+    root = get_media_temp_root(base_dir=base_dir)
+    if not root.is_dir():
+        return 0
+
+    target_tags: set[str] = set()
+    for sid in session_ids or ():
+        tag = _scope_tag("s", sid)
+        if tag:
+            target_tags.add(tag)
+    for vid in asset_version_ids or ():
+        tag = _scope_tag("v", vid)
+        if tag:
+            target_tags.add(tag)
+    for aid in answer_ids or ():
+        tag = _scope_tag("a", aid)
+        if tag:
+            target_tags.add(tag)
+
+    if not target_tags:
+        return 0
+
+    removed = 0
+    for entry in list(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if any(f"_{tag}_" in entry.name for tag in target_tags):
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+
+    _remove_empty_dir(root)
+    return removed
+
+
+def cleanup_stale_worker_temp_dirs(
+    *,
+    base_dir: Path | str | None = None,
+    scratch_dirs: tuple[Path, ...] | None = None,
+) -> int:
+    """Remove leftover owned per-job and worker scratch directories on worker startup."""
+    removed = 0
+    root = get_media_temp_root(base_dir=base_dir)
+    if root.is_dir():
+        # Only remove directories this worker creates (owned_job_temp_dir uses the "vj_"
+        # prefix), so a shared AI_MEDIA_TEMP_DIR never loses files owned by anything else.
+        for entry in list(root.iterdir()):
+            if entry.is_dir() and entry.name.startswith("vj_"):
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        _remove_empty_dir(root)
+
+    target_scratch = (
+        scratch_dirs
+        if scratch_dirs is not None
+        else (Path(".storage/temp_media"), Path(".storage/temp_reports"))
+    )
+    for scratch_root in target_scratch:
+        if scratch_root.is_dir():
+            for entry in list(scratch_root.iterdir()):
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                removed += 1
+    return removed
+
+
 def create_normalization_limitation(
     message: str = "Audio normalization unavailable or failed; speech analysis may be impacted.",
 ) -> Limitation:
@@ -161,12 +309,18 @@ async def normalize_media(
     if not input_file.is_file():
         raise FileNotFoundError(f"Input file not found: {input_file}")
 
+    temp_root = get_media_temp_root()
+    created_temp = False
+    existed_before = False
     if output_path is None:
-        fd, temp_path_str = tempfile.mkstemp(suffix="_normalized.wav")
+        temp_root.mkdir(parents=True, exist_ok=True)
+        fd, temp_path_str = tempfile.mkstemp(suffix="_normalized.wav", dir=str(temp_root))
         os.close(fd)
         target_output = Path(temp_path_str)
+        created_temp = True
     else:
         target_output = Path(output_path)
+        existed_before = target_output.exists()
         target_output.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -185,24 +339,36 @@ async def normalize_media(
     ]
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as err:
-        raise FFmpegNotFoundError(f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH.") from err
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as err:
+            raise FFmpegNotFoundError(
+                f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH."
+            ) from err
 
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        stderr_text = stderr.decode("utf-8", errors="replace")
-        raise FFmpegExecutionError(
-            f"ffmpeg process exited with code {proc.returncode}",
-            returncode=proc.returncode,
-            stderr=stderr_text,
-        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            raise FFmpegExecutionError(
+                f"ffmpeg process exited with code {proc.returncode}",
+                returncode=proc.returncode,
+                stderr=stderr_text,
+            )
 
-    meta = get_wav_metadata(target_output)
+        meta = get_wav_metadata(target_output)
+    except BaseException:
+        _unlink_owned_output(
+            target_output,
+            input_file,
+            should_unlink=created_temp or not existed_before,
+        )
+        if created_temp:
+            _remove_empty_dir(temp_root)
+        raise
 
     return MediaNormalizationResult(
         output_path=target_output,
@@ -250,22 +416,44 @@ async def split_media(
     if not input_file.is_file():
         raise FileNotFoundError(f"Input file not found: {input_file}")
 
+    temp_root = get_media_temp_root()
+    created_audio_temp = False
+    created_video_temp = False
+    audio_existed_before = False
+    video_existed_before = False
+
     if output_audio_path is None:
-        fd_a, temp_audio_str = tempfile.mkstemp(suffix="_normalized.wav")
+        temp_root.mkdir(parents=True, exist_ok=True)
+        fd_a, temp_audio_str = tempfile.mkstemp(suffix="_normalized.wav", dir=str(temp_root))
         os.close(fd_a)
         target_audio = Path(temp_audio_str)
+        created_audio_temp = True
     else:
         target_audio = Path(output_audio_path)
+        audio_existed_before = target_audio.exists()
         target_audio.parent.mkdir(parents=True, exist_ok=True)
 
-    if output_video_path is None:
-        suffix = input_file.suffix if input_file.suffix else ".mp4"
-        fd_v, temp_video_str = tempfile.mkstemp(suffix=f"_vision{suffix}")
-        os.close(fd_v)
-        target_video = Path(temp_video_str)
-    else:
-        target_video = Path(output_video_path)
-        target_video.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if output_video_path is None:
+            temp_root.mkdir(parents=True, exist_ok=True)
+            suffix = input_file.suffix if input_file.suffix else ".mp4"
+            fd_v, temp_video_str = tempfile.mkstemp(suffix=f"_vision{suffix}", dir=str(temp_root))
+            os.close(fd_v)
+            target_video = Path(temp_video_str)
+            created_video_temp = True
+        else:
+            target_video = Path(output_video_path)
+            video_existed_before = target_video.exists()
+            target_video.parent.mkdir(parents=True, exist_ok=True)
+    except BaseException:
+        _unlink_owned_output(
+            target_audio,
+            input_file,
+            should_unlink=created_audio_temp or not audio_existed_before,
+        )
+        if created_audio_temp:
+            _remove_empty_dir(temp_root)
+        raise
 
     cmd = [
         ffmpeg_bin,
@@ -287,46 +475,66 @@ async def split_media(
     ]
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as err:
-        raise FFmpegNotFoundError(f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH.") from err
-
-    _, stderr = await proc.communicate()
-    has_video = True
-
-    if proc.returncode != 0:
-        stderr_text = stderr.decode("utf-8", errors="replace")
-        if (
-            "Output file does not contain any stream" in stderr_text
-            or "matches no streams" in stderr_text
-        ):
-            norm_res = await normalize_media(
-                input_file,
-                output_path=target_audio,
-                ffmpeg_bin=ffmpeg_bin,
-                target_sample_rate=target_sample_rate,
-                target_channels=target_channels,
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if target_video.exists():
-                target_video.unlink(missing_ok=True)
-            return MediaSplitResult(
-                audio_path=norm_res.output_path,
-                video_path=None,
-                duration_ms=norm_res.duration_ms,
-                sample_rate=norm_res.sample_rate,
-                channels=norm_res.channels,
-            )
-        raise FFmpegExecutionError(
-            f"ffmpeg process exited with code {proc.returncode}",
-            returncode=proc.returncode,
-            stderr=stderr_text,
-        )
+        except FileNotFoundError as err:
+            raise FFmpegNotFoundError(
+                f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH."
+            ) from err
 
-    meta = get_wav_metadata(target_audio)
+        _, stderr = await proc.communicate()
+        has_video = True
+
+        if proc.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            if (
+                "Output file does not contain any stream" in stderr_text
+                or "matches no streams" in stderr_text
+            ):
+                _unlink_owned_output(
+                    target_video,
+                    input_file,
+                    should_unlink=created_video_temp or not video_existed_before,
+                )
+                norm_res = await normalize_media(
+                    input_file,
+                    output_path=target_audio,
+                    ffmpeg_bin=ffmpeg_bin,
+                    target_sample_rate=target_sample_rate,
+                    target_channels=target_channels,
+                )
+                return MediaSplitResult(
+                    audio_path=norm_res.output_path,
+                    video_path=None,
+                    duration_ms=norm_res.duration_ms,
+                    sample_rate=norm_res.sample_rate,
+                    channels=norm_res.channels,
+                )
+            raise FFmpegExecutionError(
+                f"ffmpeg process exited with code {proc.returncode}",
+                returncode=proc.returncode,
+                stderr=stderr_text,
+            )
+
+        meta = get_wav_metadata(target_audio)
+    except BaseException:
+        _unlink_owned_output(
+            target_audio,
+            input_file,
+            should_unlink=created_audio_temp or not audio_existed_before,
+        )
+        _unlink_owned_output(
+            target_video,
+            input_file,
+            should_unlink=created_video_temp or not video_existed_before,
+        )
+        if created_audio_temp or created_video_temp:
+            _remove_empty_dir(temp_root)
+        raise
 
     return MediaSplitResult(
         audio_path=target_audio,
@@ -338,6 +546,8 @@ async def split_media(
 
 
 __all__ = [
+    "DEFAULT_JOB_TEMP_DIRNAME",
+    "JOB_TEMP_ROOT_ENV",
     "MEDIA_NORMALIZATION_VERSION",
     "SUPPORTED_MEDIA_EXTENSIONS",
     "FFmpegExecutionError",
@@ -346,8 +556,12 @@ __all__ = [
     "MediaNormalizationResult",
     "MediaSplitResult",
     "WavMetadata",
+    "cleanup_job_temp_dirs_for_scope",
+    "cleanup_stale_worker_temp_dirs",
     "create_normalization_limitation",
+    "get_media_temp_root",
     "get_wav_metadata",
     "normalize_media",
+    "owned_job_temp_dir",
     "split_media",
 ]

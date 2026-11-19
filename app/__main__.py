@@ -14,6 +14,7 @@ from app.providers.fake_vision import FakeVisionProvider
 from app.providers.groq_judge import GroqJudgeModelProvider
 from app.providers.groq_speech import GroqSpeechProvider
 from app.runtime_mode import resolve_runtime_mode
+from app.stages.media import cleanup_stale_worker_temp_dirs
 from app.storage import create_object_storage
 
 logging.basicConfig(
@@ -135,6 +136,7 @@ async def build_pipeline() -> FakePipeline:
 def main() -> None:
     """Initialize environment and start Celery worker on queue ai_jobs."""
     _load_env()
+    cleanup_stale_worker_temp_dirs()
     from app.worker import _run_async, set_default_pipeline
 
     # Build providers before the worker begins consuming jobs so broken live

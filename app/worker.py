@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
+from celery.signals import worker_init  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from app.backend_client import (
@@ -46,6 +47,10 @@ from app.contracts import (
 from app.pipeline import PitchAnalysisPipeline
 from app.providers.groq_speech import GroqSpeechProviderError
 from app.stages.common import StageError, StageValidationError, classify_stage_error
+from app.stages.media import (
+    cleanup_job_temp_dirs_for_scope,
+    cleanup_stale_worker_temp_dirs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +387,12 @@ async def process_job(
             temp_dir = Path(".storage/temp_media") / asset_id
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
+        answer_id_raw = message.payload.get("answer_id")
+        cleanup_job_temp_dirs_for_scope(
+            session_ids=[message.practice_session_id] if message.practice_session_id else None,
+            asset_version_ids=asset_ids or None,
+            answer_ids=[str(answer_id_raw)] if answer_id_raw else None,
+        )
 
         terminal_seq = tracker.next_sequence if tracker else 2
         terminal_update = WorkerUpdate(
@@ -774,6 +785,14 @@ async def _async_process_job_task(
             retry_args=[envelope],
         )
         return None
+
+
+def _on_celery_worker_init(**_kwargs: Any) -> None:
+    """Clean up orphaned per-job and scratch temp directories on Celery worker startup."""
+    cleanup_stale_worker_temp_dirs()
+
+
+worker_init.connect(_on_celery_worker_init)
 
 
 @celery_app.task(

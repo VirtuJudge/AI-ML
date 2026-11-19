@@ -7,6 +7,7 @@ results into SpeechStageResult.
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Sequence
 from pathlib import Path
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 from app.contracts import AnalyzeSessionPayload, AssetInput, Limitation
 from app.providers.base import DiarizationProvider, SpeechProvider
 from app.providers.types import DiarizationResult, SpeakerSegment, TranscriptionResult
-from app.stages.media import get_wav_metadata, normalize_media
+from app.stages.media import get_media_temp_root, get_wav_metadata, normalize_media
 
 logger = logging.getLogger(__name__)
 
@@ -416,10 +417,14 @@ async def run_speech_stage(
 
     # 1. Normalize audio to 16kHz mono WAV (unless skipped)
     duration_known = True
+
+    owned_temp_wav: Path | None = None
     if not skip_normalization:
         norm_result = await normalize_media(input_path, output_path=output_wav_path)
         audio_for_providers = norm_result.output_path
         duration_ms = norm_result.duration_ms
+        if output_wav_path is None and audio_for_providers.resolve() != input_path.resolve():
+            owned_temp_wav = audio_for_providers
     else:
         audio_for_providers = input_path
         if expected_duration is not None:
@@ -448,19 +453,27 @@ async def run_speech_stage(
             )
             return None, True
 
-    transcription, (diarization_res, diarization_failed) = await asyncio.gather(
-        speech_provider.transcribe(audio_for_providers),
-        _safe_diarize(),
-    )
-
     limitations: list[Limitation] = []
-
-    # 3. Validate word timestamps stay within media duration
-    if duration_ms > 0:
-        ts_limitations = validate_word_timestamps(
-            transcription, duration_ms, strict=strict_timestamps
+    try:
+        transcription, (diarization_res, diarization_failed) = await asyncio.gather(
+            speech_provider.transcribe(audio_for_providers),
+            _safe_diarize(),
         )
-        limitations.extend(ts_limitations)
+
+        # 3. Validate word timestamps stay within media duration
+        if duration_ms > 0:
+            ts_limitations = validate_word_timestamps(
+                transcription, duration_ms, strict=strict_timestamps
+            )
+            limitations.extend(ts_limitations)
+    finally:
+        if owned_temp_wav is not None:
+            owned_temp_wav.unlink(missing_ok=True)
+            temp_root = get_media_temp_root()
+            if owned_temp_wav.parent == temp_root:
+                with contextlib.suppress(OSError):
+                    if temp_root.is_dir() and not any(temp_root.iterdir()):
+                        temp_root.rmdir()
 
     if diarization_failed or diarization_res is None:
         # Fallback: create a single SPEAKER_00 label assigned to valid transcript segments

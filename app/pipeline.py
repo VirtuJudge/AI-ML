@@ -67,7 +67,12 @@ from app.stages.checkpoint import (
 )
 from app.stages.common import StageValidationError, with_transient_retries
 from app.stages.documents import run_document_stage
-from app.stages.media import MEDIA_NORMALIZATION_VERSION, split_media
+from app.stages.media import (
+    MEDIA_NORMALIZATION_VERSION,
+    cleanup_job_temp_dirs_for_scope,
+    owned_job_temp_dir,
+    split_media,
+)
 from app.stages.questions import run_question_stage
 from app.stages.reporting import run_report_stage
 from app.stages.speech import SPEECH_STAGE_VERSION, SpeechStageResult, run_speech_stage
@@ -625,248 +630,283 @@ class FakePipeline:
             session_id,
         )
 
-        if not skip_file_check:
-            split_res = await split_media(input_file)
-            audio_path: Path | None = split_res.audio_path
-            video_path: Path | None = split_res.video_path
-            duration_ms = split_res.duration_ms or job.presentation.duration_ms or 15000
-            split_sample_rate: int | None = split_res.sample_rate
-            split_channels: int | None = split_res.channels
-        else:
-            audio_path = input_file
-            video_path = input_file
-            duration_ms = job.presentation.duration_ms or 15000
-            split_sample_rate = None
-            split_channels = None
+        try:
+            with owned_job_temp_dir(
+                job_kind="session",
+                job_id=job_id,
+                session_id=session_id,
+                asset_version_id=job.presentation.artifact_id,
+            ) as job_temp_dir:
+                if not skip_file_check:
+                    video_suffix = input_file.suffix if input_file.suffix else ".mp4"
+                    split_res = await split_media(
+                        input_file,
+                        output_audio_path=job_temp_dir / "presentation_normalized.wav",
+                        output_video_path=job_temp_dir / f"presentation_vision{video_suffix}",
+                    )
+                    audio_path: Path | None = split_res.audio_path
+                    video_path: Path | None = split_res.video_path
+                    duration_ms = split_res.duration_ms or job.presentation.duration_ms or 15000
+                    split_sample_rate: int | None = split_res.sample_rate
+                    split_channels: int | None = split_res.channels
+                else:
+                    audio_path = input_file
+                    video_path = input_file
+                    duration_ms = job.presentation.duration_ms or 15000
+                    split_sample_rate = None
+                    split_channels = None
 
-        # Inspection point 1: After asset verification, before speech transcription & diarization
-        await self._check_cancellation(job_id, backend_client, stage="speech")
-        await self._emit_progress(
-            backend_client, job_id, "speech", 0.20, "Transcribing presentation speech..."
-        )
+                # Inspection point 1: After asset verification, before speech transcription
+                await self._check_cancellation(job_id, backend_client, stage="speech")
+                await self._emit_progress(
+                    backend_client, job_id, "speech", 0.20, "Transcribing presentation speech..."
+                )
 
-        target_audio: Path = audio_path if audio_path is not None else input_file
+                target_audio: Path = audio_path if audio_path is not None else input_file
 
-        speech_fp = self.build_stage_checkpoint_fingerprint(
-            "speech",
-            presentation_checksum=job.presentation.checksum,
-            media_duration_ms=duration_ms,
-            skip_file_check=skip_file_check,
-            has_audio_stream=audio_path is not None,
-            audio_sample_rate=split_sample_rate,
-            audio_channels=split_channels,
-        )
-        vision_fp = self.build_stage_checkpoint_fingerprint(
-            "vision",
-            presentation_checksum=job.presentation.checksum,
-            media_duration_ms=duration_ms,
-            source_artifact_id=job.presentation.artifact_id,
-            skip_file_check=skip_file_check,
-            has_video_stream=video_path is not None,
-        )
-        audio_fp = self.build_stage_checkpoint_fingerprint(
-            "audio",
-            presentation_checksum=job.presentation.checksum,
-            media_duration_ms=duration_ms,
-            source_artifact_id=job.presentation.artifact_id,
-            skip_file_check=skip_file_check,
-            has_audio_stream=audio_path is not None,
-            audio_sample_rate=split_sample_rate,
-            audio_channels=split_channels,
-        )
-
-        # Checkpoint reuse for speech, vision, audio on retry attempts (N+1):
-        speech_cached = (
-            await get_stage_checkpoint(
-                self.object_storage,
-                session_id,
-                "speech",
-                job.presentation.checksum,
-                expected_producer_version=self.producer_version,
-                expected_compatibility_fingerprint=speech_fp,
-            )
-            if attempt > 1
-            else None
-        )
-        vision_cached = (
-            await get_stage_checkpoint(
-                self.object_storage,
-                session_id,
-                "vision",
-                job.presentation.checksum,
-                expected_producer_version=self.producer_version,
-                expected_compatibility_fingerprint=vision_fp,
-            )
-            if attempt > 1
-            else None
-        )
-        audio_cached = (
-            await get_stage_checkpoint(
-                self.object_storage,
-                session_id,
-                "audio",
-                job.presentation.checksum,
-                expected_producer_version=self.producer_version,
-                expected_compatibility_fingerprint=audio_fp,
-            )
-            if attempt > 1
-            else None
-        )
-
-        async def _run_speech() -> SpeechStageResult:
-            if speech_cached is not None:
-                return SpeechStageResult.model_validate(speech_cached)
-            res = await with_transient_retries(
-                lambda: run_speech_stage(
-                    target_audio,
-                    self.speech_provider,
-                    self.diarization_provider,
+                speech_fp = self.build_stage_checkpoint_fingerprint(
+                    "speech",
+                    presentation_checksum=job.presentation.checksum,
                     media_duration_ms=duration_ms,
-                    skip_normalization=True,
-                    strict_timestamps=False,
-                ),
-                stage_name="speech",
-            )
-            await save_stage_checkpoint(
-                self.object_storage,
-                session_id,
-                "speech",
-                job.presentation.checksum,
-                res,
-                producer_version=self.producer_version,
-                compatibility_fingerprint=speech_fp,
-            )
-            return res
-
-        async def _run_vision() -> VisionStageResult:
-            if vision_cached is not None:
-                return VisionStageResult.model_validate(vision_cached)
-            res = await with_transient_retries(
-                lambda: run_vision_stage(
-                    video_path,
-                    self.vision_provider,
+                    skip_file_check=skip_file_check,
+                    has_audio_stream=audio_path is not None,
+                    audio_sample_rate=split_sample_rate,
+                    audio_channels=split_channels,
+                )
+                vision_fp = self.build_stage_checkpoint_fingerprint(
+                    "vision",
+                    presentation_checksum=job.presentation.checksum,
                     media_duration_ms=duration_ms,
                     source_artifact_id=job.presentation.artifact_id,
                     skip_file_check=skip_file_check,
-                ),
-                stage_name="vision",
-            )
-            await save_stage_checkpoint(
-                self.object_storage,
-                session_id,
-                "vision",
-                job.presentation.checksum,
-                res,
-                producer_version=self.producer_version,
-                compatibility_fingerprint=vision_fp,
-            )
-            return res
-
-        async def _run_audio() -> AudioStageResult:
-            if audio_cached is not None:
-                return AudioStageResult.model_validate(audio_cached)
-            res = await with_transient_retries(
-                lambda: run_audio_stage(
-                    audio_path,
-                    self.audio_provider,
+                    has_video_stream=video_path is not None,
+                )
+                audio_fp = self.build_stage_checkpoint_fingerprint(
+                    "audio",
+                    presentation_checksum=job.presentation.checksum,
                     media_duration_ms=duration_ms,
                     source_artifact_id=job.presentation.artifact_id,
                     skip_file_check=skip_file_check,
+                    has_audio_stream=audio_path is not None,
+                    audio_sample_rate=split_sample_rate,
+                    audio_channels=split_channels,
+                )
+
+                # Checkpoint reuse for speech, vision, audio on retry attempts (N+1):
+                speech_cached = (
+                    await get_stage_checkpoint(
+                        self.object_storage,
+                        session_id,
+                        "speech",
+                        job.presentation.checksum,
+                        expected_producer_version=self.producer_version,
+                        expected_compatibility_fingerprint=speech_fp,
+                    )
+                    if attempt > 1
+                    else None
+                )
+                vision_cached = (
+                    await get_stage_checkpoint(
+                        self.object_storage,
+                        session_id,
+                        "vision",
+                        job.presentation.checksum,
+                        expected_producer_version=self.producer_version,
+                        expected_compatibility_fingerprint=vision_fp,
+                    )
+                    if attempt > 1
+                    else None
+                )
+                audio_cached = (
+                    await get_stage_checkpoint(
+                        self.object_storage,
+                        session_id,
+                        "audio",
+                        job.presentation.checksum,
+                        expected_producer_version=self.producer_version,
+                        expected_compatibility_fingerprint=audio_fp,
+                    )
+                    if attempt > 1
+                    else None
+                )
+
+                async def _run_speech() -> SpeechStageResult:
+                    if speech_cached is not None:
+                        return SpeechStageResult.model_validate(speech_cached)
+                    res = await with_transient_retries(
+                        lambda: run_speech_stage(
+                            target_audio,
+                            self.speech_provider,
+                            self.diarization_provider,
+                            media_duration_ms=duration_ms,
+                            skip_normalization=True,
+                            strict_timestamps=False,
+                        ),
+                        stage_name="speech",
+                    )
+                    await save_stage_checkpoint(
+                        self.object_storage,
+                        session_id,
+                        "speech",
+                        job.presentation.checksum,
+                        res,
+                        producer_version=self.producer_version,
+                        compatibility_fingerprint=speech_fp,
+                    )
+                    return res
+
+                async def _run_vision() -> VisionStageResult:
+                    if vision_cached is not None:
+                        return VisionStageResult.model_validate(vision_cached)
+                    res = await with_transient_retries(
+                        lambda: run_vision_stage(
+                            video_path,
+                            self.vision_provider,
+                            media_duration_ms=duration_ms,
+                            source_artifact_id=job.presentation.artifact_id,
+                            skip_file_check=skip_file_check,
+                        ),
+                        stage_name="vision",
+                    )
+                    await save_stage_checkpoint(
+                        self.object_storage,
+                        session_id,
+                        "vision",
+                        job.presentation.checksum,
+                        res,
+                        producer_version=self.producer_version,
+                        compatibility_fingerprint=vision_fp,
+                    )
+                    return res
+
+                async def _run_audio() -> AudioStageResult:
+                    if audio_cached is not None:
+                        return AudioStageResult.model_validate(audio_cached)
+                    res = await with_transient_retries(
+                        lambda: run_audio_stage(
+                            audio_path,
+                            self.audio_provider,
+                            media_duration_ms=duration_ms,
+                            source_artifact_id=job.presentation.artifact_id,
+                            skip_file_check=skip_file_check,
+                        ),
+                        stage_name="audio",
+                    )
+                    await save_stage_checkpoint(
+                        self.object_storage,
+                        session_id,
+                        "audio",
+                        job.presentation.checksum,
+                        res,
+                        producer_version=self.producer_version,
+                        compatibility_fingerprint=audio_fp,
+                    )
+                    return res
+
+                speech_res = await _run_speech()
+                await self._emit_progress(
+                    backend_client,
+                    job_id,
+                    "diarization",
+                    0.35,
+                    "Identifying presentation speakers...",
+                )
+
+                # Inspection point 2: After speech transcription, before vision
+                await self._check_cancellation(job_id, backend_client, stage="vision")
+                await self._emit_progress(
+                    backend_client,
+                    job_id,
+                    "vision",
+                    0.50,
+                    "Extracting visual cues and slide structure...",
+                )
+                await self._emit_progress(
+                    backend_client,
+                    job_id,
+                    "audio_features",
+                    0.60,
+                    "Measuring acoustic delivery features...",
+                )
+
+                vision_res, audio_res = await asyncio.gather(_run_vision(), _run_audio())
+
+            # Inspection point 3: After visual/acoustic extraction, before retrieval
+            await self._check_cancellation(job_id, backend_client, stage="documents")
+            await self._emit_progress(
+                backend_client, job_id, "documents", 0.70, "Processing supporting documentation..."
+            )
+
+            (
+                updated_visual,
+                updated_audio,
+                speaker_mapping,
+                corr_limitations,
+            ) = combine_timed_evidence(
+                speech_res.diarization,
+                vision_res.observations,
+                audio_res.observations,
+            )
+
+            by_speaker = aggregate_speaker_observations(
+                updated_visual,
+                updated_audio,
+                speech_res.diarization,
+            )
+
+            doc_stage_res = await run_document_stage(
+                supporting_documents,
+                self.document_provider,
+                practice_session_id=session_id,
+            )
+
+            if doc_stage_res.chunks and self.document_store is not None:
+                await self.document_store.store_chunks(session_id, doc_stage_res.chunks)
+
+            await self._emit_progress(
+                backend_client, job_id, "aggregation", 0.80, "Aggregating multimodal evidence..."
+            )
+            await self._emit_progress(
+                backend_client,
+                job_id,
+                "grounding",
+                0.85,
+                "Grounding evidence against rubric dimensions...",
+            )
+
+            # Inspection point 4: After document retrieval, before calling Groq 3-Judge LLM panel
+            await self._check_cancellation(job_id, backend_client, stage="questions")
+            await self._emit_progress(
+                backend_client,
+                job_id,
+                "questions",
+                0.95,
+                "Generating primary evaluation questions...",
+            )
+
+            question_stage_res = await with_transient_retries(
+                lambda: run_question_stage(
+                    self.judge_provider,
+                    speech_result=speech_res,
+                    vision_result=vision_res,
+                    audio_result=audio_res,
+                    document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
+                    visual_observations=updated_visual,
+                    audio_observations=updated_audio,
+                    rubric_id=job.rubric.rubric_id,
+                    extra_limitations=corr_limitations + doc_stage_res.limitations,
                 ),
-                stage_name="audio",
+                stage_name="questions",
             )
-            await save_stage_checkpoint(
-                self.object_storage,
-                session_id,
-                "audio",
-                job.presentation.checksum,
-                res,
-                producer_version=self.producer_version,
-                compatibility_fingerprint=audio_fp,
-            )
-            return res
 
-        speech_res = await _run_speech()
-        await self._emit_progress(
-            backend_client, job_id, "diarization", 0.35, "Identifying presentation speakers..."
-        )
-
-        # Inspection point 2: After speech transcription, before vision
-        await self._check_cancellation(job_id, backend_client, stage="vision")
-        await self._emit_progress(
-            backend_client, job_id, "vision", 0.50, "Extracting visual cues and slide structure..."
-        )
-        await self._emit_progress(
-            backend_client,
-            job_id,
-            "audio_features",
-            0.60,
-            "Measuring acoustic delivery features...",
-        )
-
-        vision_res, audio_res = await asyncio.gather(_run_vision(), _run_audio())
-
-        # Inspection point 3: After visual/acoustic extraction, before Supabase pgvector retrieval
-        await self._check_cancellation(job_id, backend_client, stage="documents")
-        await self._emit_progress(
-            backend_client, job_id, "documents", 0.70, "Processing supporting documentation..."
-        )
-
-        updated_visual, updated_audio, speaker_mapping, corr_limitations = combine_timed_evidence(
-            speech_res.diarization,
-            vision_res.observations,
-            audio_res.observations,
-        )
-
-        by_speaker = aggregate_speaker_observations(
-            updated_visual,
-            updated_audio,
-            speech_res.diarization,
-        )
-
-        doc_stage_res = await run_document_stage(
-            supporting_documents,
-            self.document_provider,
-            practice_session_id=session_id,
-        )
-
-        if doc_stage_res.chunks and self.document_store is not None:
-            await self.document_store.store_chunks(session_id, doc_stage_res.chunks)
-
-        await self._emit_progress(
-            backend_client, job_id, "aggregation", 0.80, "Aggregating multimodal evidence..."
-        )
-        await self._emit_progress(
-            backend_client,
-            job_id,
-            "grounding",
-            0.85,
-            "Grounding evidence against rubric dimensions...",
-        )
-
-        # Inspection point 4: After document retrieval, before calling Groq 3-Judge LLM panel
-        await self._check_cancellation(job_id, backend_client, stage="questions")
-        await self._emit_progress(
-            backend_client, job_id, "questions", 0.95, "Generating primary evaluation questions..."
-        )
-
-        question_stage_res = await with_transient_retries(
-            lambda: run_question_stage(
-                self.judge_provider,
-                speech_result=speech_res,
-                vision_result=vision_res,
-                audio_result=audio_res,
-                document_chunks=doc_stage_res.chunks if doc_stage_res.chunks else None,
-                visual_observations=updated_visual,
-                audio_observations=updated_audio,
-                rubric_id=job.rubric.rubric_id,
-                extra_limitations=corr_limitations + doc_stage_res.limitations,
-            ),
-            stage_name="questions",
-        )
-
-        # Inspection point 5: Before final analysis.json upload
-        await self._check_cancellation(job_id, backend_client, stage="aggregation")
+            # Inspection point 5: Before final analysis.json upload
+            await self._check_cancellation(job_id, backend_client, stage="aggregation")
+        except JobCancelledError:
+            for scratch_id in dict.fromkeys((session_id, job.presentation.artifact_id)):
+                scratch = Path(".storage/temp_media") / scratch_id
+                if scratch.exists():
+                    shutil.rmtree(scratch, ignore_errors=True)
+            raise
 
         artifact_key = f"ai/session/{session_id}/analysis.json"
         if os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
@@ -933,117 +973,137 @@ class FakePipeline:
         await self._check_cancellation(job_id, backend_client, stage="speech")
 
         audio_asset = getattr(job, "audio", None)
-        if audio_asset is None:
-            speech_res = await run_answer_speech_stage(
-                None,
-                self.speech_provider,
-                media_duration_ms=0,
-                skip_normalization=True,
-            )
-        else:
-            input_file, skip_file_check = await self._resolve_and_verify_media(
-                audio_asset,
-                media_role="Answer",
-            )
-            duration_ms = audio_asset.duration_ms or 15000
-
-            speech_res = await with_transient_retries(
-                lambda: run_answer_speech_stage(
-                    input_file,
+        try:
+            if audio_asset is None:
+                speech_res = await run_answer_speech_stage(
+                    None,
                     self.speech_provider,
-                    media_duration_ms=duration_ms,
-                    skip_normalization=skip_file_check,
-                    strict_timestamps=False,
-                ),
-                stage_name="speech",
-            )
-
-        answer_prefix = (
-            f"ai/session/{job.practice_session_id}/answers/{job.answer_id}"
-            if job.practice_session_id
-            else f"ai/answer/{job.answer_id}"
-        )
-        artifact_key = f"{answer_prefix}/transcript.json"
-        assessment_artifact_key = f"{answer_prefix}/assessment.json"
-
-        now_utc = datetime.now(UTC)
-        created_at = now_utc.isoformat()
-        transcript_artifact_id = generate_deterministic_ulid(f"{job.answer_id}:transcript", now_utc)
-        assessment_artifact_id = generate_deterministic_ulid(f"{job.answer_id}:assessment", now_utc)
-
-        transcript_source_ids = [audio_asset.artifact_id] if audio_asset is not None else []
-        artifact_payload = {
-            "artifact_id": transcript_artifact_id,
-            "answer_id": job.answer_id,
-            "practice_session_id": job.practice_session_id,
-            "kind": "transcript",
-            "schema_version": 1,
-            "producer_version": self.producer_version,
-            "source_artifact_ids": transcript_source_ids,
-            "created_at": created_at,
-            "transcript": {
-                "text": speech_res.transcript.full_text,
-                "segments": [s.model_dump() for s in speech_res.transcript.segments],
-            },
-            "limitations": [lim.model_dump() for lim in speech_res.limitations],
-        }
-
-        transcript_ref = await self.object_storage.upload_json(
-            artifact_key,
-            artifact_payload,
-            artifact_id=transcript_artifact_id,
-        )
-
-        # Inspection point 2: Before Groq LLM answer assessment & follow-up question generation
-        await self._check_cancellation(job_id, backend_client, stage="assessment")
-
-        question_text = job.question_text or f"Question {job.question_id}"
-        rubric_dimension = job.rubric_dimension or "unmapped"
-
-        assessment_res = await with_transient_retries(
-            lambda: run_answer_assessment_stage(
-                answer_transcript=speech_res.transcript.full_text,
-                question_text=question_text,
-                rubric_dimension=rubric_dimension,
-                judge_provider=self.judge_provider,
-                remaining_follow_ups=job.remaining_follow_ups,
-            ),
-            stage_name="assessment",
-        )
-
-        follow_up = assessment_res.assessment.follow_up
-        if follow_up is not None:
-            if job.question_evidence_ids:
-                follow_up = follow_up.model_copy(
-                    update={"evidence_ids": list(job.question_evidence_ids)}
+                    media_duration_ms=0,
+                    skip_normalization=True,
                 )
             else:
-                follow_up = None
+                input_file, skip_file_check = await self._resolve_and_verify_media(
+                    audio_asset,
+                    media_role="Answer",
+                )
+                duration_ms = audio_asset.duration_ms or 15000
 
-        assessment_payload = {
-            "artifact_id": assessment_artifact_id,
-            "answer_id": job.answer_id,
-            "practice_session_id": job.practice_session_id,
-            "question_id": job.question_id,
-            "kind": "answer_assessment",
-            "schema_version": 1,
-            "producer_version": self.producer_version,
-            "source_artifact_ids": [transcript_artifact_id],
-            "created_at": created_at,
-            "assessment": {
-                "text": assessment_res.assessment.assessment_text,
-                "score": assessment_res.assessment.score,
-                "evidence_ids": assessment_res.assessment.evidence_ids,
-            },
-            "follow_up": (follow_up.model_dump() if follow_up else None),
-            "limitations": [lim.model_dump() for lim in assessment_res.limitations],
-        }
+                with owned_job_temp_dir(
+                    job_kind="answer",
+                    job_id=job_id,
+                    session_id=job.practice_session_id,
+                    asset_version_id=audio_asset.artifact_id,
+                    answer_id=job.answer_id,
+                ) as job_temp_dir:
+                    output_wav_path = job_temp_dir / "answer_normalized.wav"
+                    speech_res = await with_transient_retries(
+                        lambda: run_answer_speech_stage(
+                            input_file,
+                            self.speech_provider,
+                            media_duration_ms=duration_ms,
+                            skip_normalization=skip_file_check,
+                            strict_timestamps=False,
+                            output_wav_path=output_wav_path,
+                        ),
+                        stage_name="speech",
+                    )
 
-        assessment_ref = await self.object_storage.upload_json(
-            assessment_artifact_key,
-            assessment_payload,
-            artifact_id=assessment_artifact_id,
-        )
+            answer_prefix = (
+                f"ai/session/{job.practice_session_id}/answers/{job.answer_id}"
+                if job.practice_session_id
+                else f"ai/answer/{job.answer_id}"
+            )
+            artifact_key = f"{answer_prefix}/transcript.json"
+            assessment_artifact_key = f"{answer_prefix}/assessment.json"
+
+            now_utc = datetime.now(UTC)
+            created_at = now_utc.isoformat()
+            transcript_artifact_id = generate_deterministic_ulid(
+                f"{job.answer_id}:transcript", now_utc
+            )
+            assessment_artifact_id = generate_deterministic_ulid(
+                f"{job.answer_id}:assessment", now_utc
+            )
+
+            transcript_source_ids = [audio_asset.artifact_id] if audio_asset is not None else []
+            artifact_payload = {
+                "artifact_id": transcript_artifact_id,
+                "answer_id": job.answer_id,
+                "practice_session_id": job.practice_session_id,
+                "kind": "transcript",
+                "schema_version": 1,
+                "producer_version": self.producer_version,
+                "source_artifact_ids": transcript_source_ids,
+                "created_at": created_at,
+                "transcript": {
+                    "text": speech_res.transcript.full_text,
+                    "segments": [s.model_dump() for s in speech_res.transcript.segments],
+                },
+                "limitations": [lim.model_dump() for lim in speech_res.limitations],
+            }
+
+            transcript_ref = await self.object_storage.upload_json(
+                artifact_key,
+                artifact_payload,
+                artifact_id=transcript_artifact_id,
+            )
+
+            # Inspection point 2: Before Groq LLM answer assessment & follow-up generation
+            await self._check_cancellation(job_id, backend_client, stage="assessment")
+
+            question_text = job.question_text or f"Question {job.question_id}"
+            rubric_dimension = job.rubric_dimension or "unmapped"
+
+            assessment_res = await with_transient_retries(
+                lambda: run_answer_assessment_stage(
+                    answer_transcript=speech_res.transcript.full_text,
+                    question_text=question_text,
+                    rubric_dimension=rubric_dimension,
+                    judge_provider=self.judge_provider,
+                    remaining_follow_ups=job.remaining_follow_ups,
+                ),
+                stage_name="assessment",
+            )
+
+            follow_up = assessment_res.assessment.follow_up
+            if follow_up is not None:
+                if job.question_evidence_ids:
+                    follow_up = follow_up.model_copy(
+                        update={"evidence_ids": list(job.question_evidence_ids)}
+                    )
+                else:
+                    follow_up = None
+
+            assessment_payload = {
+                "artifact_id": assessment_artifact_id,
+                "answer_id": job.answer_id,
+                "practice_session_id": job.practice_session_id,
+                "question_id": job.question_id,
+                "kind": "answer_assessment",
+                "schema_version": 1,
+                "producer_version": self.producer_version,
+                "source_artifact_ids": [transcript_artifact_id],
+                "created_at": created_at,
+                "assessment": {
+                    "text": assessment_res.assessment.assessment_text,
+                    "score": assessment_res.assessment.score,
+                    "evidence_ids": assessment_res.assessment.evidence_ids,
+                },
+                "follow_up": (follow_up.model_dump() if follow_up else None),
+                "limitations": [lim.model_dump() for lim in assessment_res.limitations],
+            }
+
+            assessment_ref = await self.object_storage.upload_json(
+                assessment_artifact_key,
+                assessment_payload,
+                artifact_id=assessment_artifact_id,
+            )
+        except JobCancelledError:
+            if audio_asset is not None:
+                scratch = Path(".storage/temp_media") / audio_asset.artifact_id
+                if scratch.exists():
+                    shutil.rmtree(scratch, ignore_errors=True)
+            raise
 
         return AnswerAnalysisCompleted(
             answer_id=job.answer_id,
@@ -1230,6 +1290,11 @@ class FakePipeline:
                 f"ai/answer/{answer_id}/",
                 exclude_suffixes=excluded,
             )
+        cleanup_job_temp_dirs_for_scope(
+            session_ids=session_ids,
+            asset_version_ids=job.asset_version_ids,
+            answer_ids=job.answer_ids,
+        )
 
         return ErasureCompleted(
             erasure_request_id=job.erasure_request_id,

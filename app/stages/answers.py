@@ -6,6 +6,7 @@ Q&A answers, validating word timestamps and producing AnswerSpeechResult.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 from app.contracts import AssetInput, Limitation
 from app.providers.base import SpeechProvider
 from app.providers.types import TranscriptionResult
-from app.stages.media import get_wav_metadata, normalize_media
+from app.stages.media import get_media_temp_root, get_wav_metadata, normalize_media
 from app.stages.speech import validate_word_timestamps
 
 logger = logging.getLogger(__name__)
@@ -68,10 +69,13 @@ async def run_answer_speech_stage(
         input_path = Path(audio_path)
 
     # 1. Normalize audio to 16kHz mono WAV (unless skipped)
+    owned_temp_wav: Path | None = None
     if not skip_normalization:
         norm_result = await normalize_media(input_path, output_path=output_wav_path)
         audio_for_provider = norm_result.output_path
         duration_ms = norm_result.duration_ms
+        if output_wav_path is None and audio_for_provider.resolve() != input_path.resolve():
+            owned_temp_wav = audio_for_provider
     else:
         audio_for_provider = input_path
         if expected_duration is not None:
@@ -85,17 +89,25 @@ async def run_answer_speech_stage(
     if expected_duration is not None and duration_ms == 0:
         duration_ms = expected_duration
 
-    # 2. Transcribe via speech provider (single speaker, no diarization)
-    transcription = await speech_provider.transcribe(audio_for_provider)
-
     limitations: list[Limitation] = []
+    try:
+        # 2. Transcribe via speech provider (single speaker, no diarization)
+        transcription = await speech_provider.transcribe(audio_for_provider)
 
-    # 3. Validate word timestamps stay within media duration
-    if duration_ms > 0:
-        ts_limitations = validate_word_timestamps(
-            transcription, duration_ms, strict=strict_timestamps
-        )
-        limitations.extend(ts_limitations)
+        # 3. Validate word timestamps stay within media duration
+        if duration_ms > 0:
+            ts_limitations = validate_word_timestamps(
+                transcription, duration_ms, strict=strict_timestamps
+            )
+            limitations.extend(ts_limitations)
+    finally:
+        if owned_temp_wav is not None:
+            owned_temp_wav.unlink(missing_ok=True)
+            temp_root = get_media_temp_root()
+            if owned_temp_wav.parent == temp_root:
+                with contextlib.suppress(OSError):
+                    if temp_root.is_dir() and not any(temp_root.iterdir()):
+                        temp_root.rmdir()
 
     metadata: dict[str, Any] = {
         "stage": "answer_speech",
