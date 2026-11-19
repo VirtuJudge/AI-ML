@@ -1,8 +1,11 @@
 """Tests for safe error handling and input validation in the worker."""
 
+import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from app.contracts import (
@@ -21,6 +24,10 @@ from app.contracts import (
     UpdateStatus,
 )
 from app.pipeline import FakePipeline
+from app.providers.fake_judge import FakeJudgeModelProvider
+from app.providers.fake_speech import FakeSpeechProvider
+from app.providers.groq_speech import GroqSpeechProviderError
+from app.providers.types import TranscriptionResult
 from app.worker import process_job
 
 
@@ -136,3 +143,115 @@ async def test_error_message_does_not_leak_internals(
     assert "secrets.json" not in update.payload.message
     assert "Traceback" not in update.payload.message
     assert "RuntimeError" not in update.payload.message
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_groq_speech_503_reports_speech_stage_and_execution_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    analyze_answer_message: QueueMessage,
+) -> None:
+    """Reproduce #81: GroqSpeechProviderError('HTTP 503') reports stage='speech', retryable=True."""
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class FailingSpeechProvider(FakeSpeechProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            self.calls += 1
+            raise GroqSpeechProviderError("HTTP 503")
+
+    speech_provider = FailingSpeechProvider()
+    pipeline = FakePipeline(speech_provider=speech_provider)
+    msg = analyze_answer_message.model_copy(update={"analysis_attempt": 2})
+
+    update = await process_job(msg, pipeline, execution_attempt=1)
+    assert speech_provider.calls == 3
+    assert update.status == UpdateStatus.FAILED
+    assert isinstance(update.payload, FailedPayload)
+    assert update.payload.stage == "speech"
+    assert update.payload.code == ErrorCode.PROVIDER_ERROR
+    assert update.payload.retryable is True
+    assert update.payload.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_analyze_answer_non_retryable_provider_error_reports_real_stage(
+    analyze_answer_message: QueueMessage,
+) -> None:
+    """Non-retryable GroqSpeechProviderError fails immediately at stage='speech'."""
+
+    class BadRequestSpeechProvider(FakeSpeechProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            self.calls += 1
+            raise GroqSpeechProviderError("HTTP 400 Bad Request")
+
+    speech_provider = BadRequestSpeechProvider()
+    pipeline = FakePipeline(speech_provider=speech_provider)
+    msg = analyze_answer_message.model_copy(update={"analysis_attempt": 3})
+
+    update = await process_job(msg, pipeline, execution_attempt=1)
+    assert speech_provider.calls == 1
+    assert update.status == UpdateStatus.FAILED
+    assert isinstance(update.payload, FailedPayload)
+    assert update.payload.stage == "speech"
+    assert update.payload.code == ErrorCode.PROVIDER_ERROR
+    assert update.payload.retryable is False
+    assert update.payload.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_timeout_reports_real_stage_and_provider_timeout_code(
+    monkeypatch: pytest.MonkeyPatch,
+    analyze_answer_message: QueueMessage,
+    analyze_session_message: QueueMessage,
+    generate_report_message: QueueMessage,
+) -> None:
+    """Timeouts in assessment, questions, and reporting carry real stage and provider_timeout."""
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class TimeoutJudgeProvider(FakeJudgeModelProvider):
+        async def assess_answer(self, *args: Any, **kwargs: Any) -> Any:
+            raise httpx.ReadTimeout("Answer assessment timed out")
+
+        async def generate_questions(self, *args: Any, **kwargs: Any) -> Any:
+            raise TimeoutError("Question generation timed out")
+
+        async def generate_report_feedback(self, *args: Any, **kwargs: Any) -> Any:
+            raise httpx.ReadTimeout("Report generation timed out")
+
+    pipeline = FakePipeline(judge_provider=TimeoutJudgeProvider())
+
+    ans_update = await process_job(analyze_answer_message, pipeline, execution_attempt=2)
+    assert isinstance(ans_update.payload, FailedPayload)
+    assert ans_update.payload.stage == "assessment"
+    assert ans_update.payload.code == ErrorCode.PROVIDER_TIMEOUT
+    assert ans_update.payload.retryable is True
+    assert ans_update.payload.attempts == 2
+
+    sess_update = await process_job(analyze_session_message, pipeline, execution_attempt=1)
+    assert isinstance(sess_update.payload, FailedPayload)
+    assert sess_update.payload.stage == "questions"
+    assert sess_update.payload.code == ErrorCode.PROVIDER_TIMEOUT
+    assert sess_update.payload.retryable is True
+    assert sess_update.payload.attempts == 1
+
+    rep_update = await process_job(generate_report_message, pipeline, execution_attempt=1)
+    assert isinstance(rep_update.payload, FailedPayload)
+    assert rep_update.payload.stage == "reporting"
+    assert rep_update.payload.code == ErrorCode.PROVIDER_TIMEOUT
+    assert rep_update.payload.retryable is True
+    assert rep_update.payload.attempts == 1

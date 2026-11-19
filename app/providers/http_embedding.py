@@ -57,7 +57,8 @@ class HttpEmbeddingProvider:
         if not self.api_key:
             raise HttpEmbeddingProviderError(
                 "Embedding API key is required. Provide `api_key` to HttpEmbeddingProvider "
-                "or set the EMBEDDING_API_KEY environment variable."
+                "or set the EMBEDDING_API_KEY environment variable.",
+                retryable=False,
             )
 
         headers = {
@@ -88,27 +89,34 @@ class HttpEmbeddingProvider:
                     )
         except httpx.RequestError as err:
             raise HttpEmbeddingProviderError(
-                f"Embedding API request failed due to network error: {type(err).__name__}"
+                f"Embedding API request failed due to network error: {type(err).__name__}",
+                retryable=True,
+                is_timeout=isinstance(err, httpx.TimeoutException),
             ) from None
 
         if response.is_error or response.status_code >= 400:
+            status = response.status_code
             raise HttpEmbeddingProviderError(
-                f"Embedding API request failed with status {response.status_code}: "
-                f"{response.reason_phrase}"
+                f"Embedding API request failed with status {status}: {response.reason_phrase}",
+                status_code=status,
+                retryable=status in (408, 429) or 500 <= status < 600,
+                is_timeout=status in (408, 504),
             )
 
         try:
             resp_data = response.json()
         except Exception:
             raise HttpEmbeddingProviderError(
-                "Embedding API returned a response that could not be parsed as JSON."
+                "Embedding API returned a response that could not be parsed as JSON.",
+                retryable=False,
             ) from None
 
         data = resp_data.get("data", [])
         if not isinstance(data, list) or len(data) != len(texts):
             raise HttpEmbeddingProviderError(
                 f"Embedding API response length mismatch: expected {len(texts)} "
-                f"embeddings, got {len(data)}"
+                f"embeddings, got {len(data)}",
+                retryable=False,
             )
 
         # Sort by index if present to maintain order
