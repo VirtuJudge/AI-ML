@@ -292,7 +292,7 @@ def _append_unique_limitation(limitations: list[Limitation], lim: Limitation) ->
 
 
 def _candidate_assessment_keys(answer_id: str, session_ids: list[str]) -> list[str]:
-    """Return ordered, deduplicated object keys for an answer's assessment artifact."""
+    """Return ordered, deduplicated legacy object keys for an answer's assessment artifact."""
     keys: list[str] = []
     for sid in session_ids:
         if sid:
@@ -303,6 +303,65 @@ def _candidate_assessment_keys(answer_id: str, session_ids: list[str]) -> list[s
     if fallback not in keys:
         keys.append(fallback)
     return keys
+
+
+async def _discover_assessment_keys(
+    storage: ObjectStorageProtocol,
+    answer_id: str,
+    session_ids: list[str],
+    *,
+    expected_artifact_id: str | None = None,
+    analysis_attempt: int | None = None,
+) -> list[str]:
+    """Discover immutable and legacy assessment.json keys for an answer, ordered by specificity."""
+    prefixes: list[str] = []
+    for sid in session_ids:
+        if sid:
+            prefix = f"ai/session/{sid}/answers/{answer_id}/"
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    fallback_prefix = f"ai/answer/{answer_id}/"
+    if fallback_prefix not in prefixes:
+        prefixes.append(fallback_prefix)
+
+    listed_keys: list[str] = []
+    for prefix in prefixes:
+        try:
+            found = await storage.list_objects(prefix)
+        except Exception:
+            found = []
+        if isinstance(found, list):
+            for key in found:
+                if (
+                    isinstance(key, str)
+                    and key.endswith("/assessment.json")
+                    and key not in listed_keys
+                ):
+                    listed_keys.append(key)
+
+    exact_artifact_keys: list[str] = []
+    attempt_keys: list[str] = []
+    other_listed_keys: list[str] = []
+
+    attempt_marker = f"/attempts/{analysis_attempt}/" if analysis_attempt is not None else None
+    artifact_suffix = f"/{expected_artifact_id}/assessment.json" if expected_artifact_id else None
+
+    for key in listed_keys:
+        if artifact_suffix and key.endswith(artifact_suffix):
+            exact_artifact_keys.append(key)
+        elif attempt_marker and attempt_marker in key:
+            attempt_keys.append(key)
+        else:
+            other_listed_keys.append(key)
+
+    ordered: list[str] = []
+    for key in exact_artifact_keys + attempt_keys + other_listed_keys:
+        if key not in ordered:
+            ordered.append(key)
+    for key in _candidate_assessment_keys(answer_id, session_ids):
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
 
 
 def _verify_assessment_artifact(
@@ -398,6 +457,7 @@ async def _recover_missing_assessment_scores(
     storage: ObjectStorageProtocol | None,
     session_ids: list[str],
     expected_session_id: str,
+    analysis_attempt: int | None = None,
 ) -> None:
     """Read and verify assessment.json artifacts when qa.json omits assessment scores."""
     answers_by_qid: dict[str, dict[str, Any]] = {}
@@ -461,7 +521,14 @@ async def _recover_missing_assessment_scores(
         verification_failed = False
 
         if storage is not None and answer_id:
-            for key in _candidate_assessment_keys(answer_id, session_ids):
+            candidate_keys = await _discover_assessment_keys(
+                storage,
+                answer_id,
+                session_ids,
+                expected_artifact_id=expected_artifact_id,
+                analysis_attempt=analysis_attempt,
+            )
+            for key in candidate_keys:
                 try:
                     artifact_payload = await storage.read_json(key)
                 except ObjectNotFoundError:
@@ -892,6 +959,7 @@ async def load_report_evidence(
         storage=storage,
         session_ids=candidate_session_ids,
         expected_session_id=qa_session_id,
+        analysis_attempt=analysis_attempt,
     )
 
     return ReportEvidenceBundle(

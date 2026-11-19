@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from app.storage.base import (
+    ObjectAlreadyExistsError,
     ObjectNotFoundError,
     ObjectStorageError,
     ObjectStorageProtocol,
@@ -49,6 +50,7 @@ def create_object_storage(
 
 __all__ = [
     "LocalDiskObjectStorage",
+    "ObjectAlreadyExistsError",
     "ObjectNotFoundError",
     "ObjectStorageError",
     "ObjectStorageProtocol",

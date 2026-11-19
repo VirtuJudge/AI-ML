@@ -34,9 +34,9 @@ async def test_analyze_session_persists_artifact_to_storage(tmp_path: Path) -> N
     # 1. Assert ArtifactRef structure
     assert result.analysis_artifact is not None
     assert len(result.analysis_artifact.artifact_id) == 26
-    assert (
-        result.analysis_artifact.object_key
-        == "ai/session/01JTESTSESSION0000000000001/analysis.json"
+    expected_prefix = "ai/session/01JTESTSESSION0000000000001/attempts/1/jobs/direct/"
+    assert result.analysis_artifact.object_key == (
+        f"{expected_prefix}{result.analysis_artifact.artifact_id}/analysis.json"
     )
     assert result.analysis_artifact.checksum.startswith("sha256:")
     assert len(result.analysis_artifact.checksum) == 7 + 64

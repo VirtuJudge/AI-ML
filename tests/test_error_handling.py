@@ -212,11 +212,13 @@ async def test_analyze_answer_non_retryable_provider_error_reports_real_stage(
 @pytest.mark.asyncio
 async def test_stage_timeout_reports_real_stage_and_provider_timeout_code(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     analyze_answer_message: QueueMessage,
     analyze_session_message: QueueMessage,
     generate_report_message: QueueMessage,
 ) -> None:
     """Timeouts in assessment, questions, and reporting carry real stage and provider_timeout."""
+    from app.storage.local import LocalDiskObjectStorage
 
     async def no_sleep(_: float) -> None:
         return None
@@ -233,7 +235,10 @@ async def test_stage_timeout_reports_real_stage_and_provider_timeout_code(
         async def generate_report_feedback(self, *args: Any, **kwargs: Any) -> Any:
             raise httpx.ReadTimeout("Report generation timed out")
 
-    pipeline = FakePipeline(judge_provider=TimeoutJudgeProvider())
+    pipeline = FakePipeline(
+        judge_provider=TimeoutJudgeProvider(),
+        object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "storage"),
+    )
 
     ans_update = await process_job(analyze_answer_message, pipeline, execution_attempt=2)
     assert isinstance(ans_update.payload, FailedPayload)

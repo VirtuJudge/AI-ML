@@ -22,10 +22,17 @@ from pathlib import Path
 import pytest
 
 from app.contracts import (
+    AnalyzeAnswerPayload,
+    AnalyzeSessionPayload,
+    AssetInput,
+    AudioAssetInput,
     EraseAIDataPayload,
     ErasureCompleted,
+    GenerateReportPayload,
     JobType,
     QueueMessage,
+    RubricRef,
+    SpeakerMapping,
     UpdateStatus,
 )
 from app.document_store import FakeDocumentStore
@@ -377,3 +384,111 @@ async def test_worker_process_job_erasure(tmp_path: Path) -> None:
     finally:
         if scratch_dir.exists():
             shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_explicit_erasure_purges_real_pipeline_multi_attempt_layout(tmp_path: Path) -> None:
+    """Explicit erasure purges immutable artifacts across multiple pipeline attempts."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    document_store = FakeDocumentStore()
+    pipeline = FakePipeline(object_storage=storage, document_store=document_store)
+    session_id = "01JERASUREMULTI00000000001"
+    checksum = "sha256:" + "a" * 64
+
+    for attempt in (1, 2):
+        sess_res = await pipeline.analyze_session(
+            AnalyzeSessionPayload(
+                presentation=AssetInput(
+                    artifact_id=f"01JPRES000000000000000000{attempt}",
+                    object_key="uploads/presentation.mp4",
+                    checksum=checksum,
+                    media_type="video/mp4",
+                ),
+                supporting_documents=[],
+                rubric=RubricRef(rubric_id="startup_pitch", version=1),
+                requested_capabilities=["speech", "questions"],
+                practice_session_id=session_id,
+            ),
+            job_id=f"job-sess-{attempt}",
+            attempt=attempt,
+        )
+        ans_res = await pipeline.analyze_answer(
+            AnalyzeAnswerPayload(
+                qa_round_id=f"01JROUND00000000000000000{attempt}",
+                question_id="q_01",
+                answer_id=f"ans_{attempt}",
+                answered_by="user_1",
+                practice_session_id=session_id,
+                audio=AudioAssetInput(
+                    artifact_id=f"01JAUD000000000000000000{attempt}",
+                    object_key="answers/a.wav",
+                    checksum=checksum,
+                    media_type="audio/wav",
+                    duration_ms=15000,
+                ),
+                remaining_follow_ups=0,
+            ),
+            job_id=f"job-ans-{attempt}",
+            attempt=attempt,
+        )
+        qa_ref = await storage.upload_json(
+            f"ai/session/{session_id}/attempts/{attempt}/qa.json",
+            {
+                "artifact_id": f"01JQA0000000000000000000{attempt}",
+                "practice_session_id": session_id,
+                "qa_round_id": f"01JROUND00000000000000000{attempt}",
+                "analysis_attempt": attempt,
+                "questions": [
+                    {"id": "q_01", "text": "Why?", "rubric_dimension": "business_reasoning"}
+                ],
+                "answers": [
+                    {
+                        "id": ans_res.answer_id,
+                        "question_id": "q_01",
+                        "status": "submitted",
+                        "assessment_artifact_id": ans_res.assessment_artifact_id,
+                        "transcript": "Because.",
+                    }
+                ],
+                "assessments": [],
+            },
+        )
+        await pipeline.generate_report(
+            GenerateReportPayload(
+                report_id=f"01JREP0000000000000000000{attempt}",
+                analysis_artifact=sess_res.analysis_artifact,
+                qa_artifact=qa_ref,
+                speaker_mappings=[
+                    SpeakerMapping(
+                        speaker_label="SPEAKER_00",
+                        user_id="user_1",
+                        display_name="Founder",
+                    )
+                ],
+            ),
+            job_id=f"job-rep-{attempt}",
+            attempt=attempt,
+            practice_session_id=session_id,
+        )
+
+    assert len(await storage.list_objects(f"ai/session/{session_id}/")) >= 12
+
+    erasure_res = await pipeline.erase_data(
+        EraseAIDataPayload(
+            erasure_request_id="01JREQMULTI00000000000001",
+            scope="practice_session",
+            scope_id=session_id,
+            answer_ids=["ans_1", "ans_2"],
+        )
+    )
+    assert erasure_res.deleted_objects >= 12
+    assert await storage.list_objects(f"ai/session/{session_id}/") == []
+    retry = await pipeline.erase_data(
+        EraseAIDataPayload(
+            erasure_request_id="01JREQMULTI00000000000001",
+            scope="practice_session",
+            scope_id=session_id,
+            answer_ids=["ans_1", "ans_2"],
+        )
+    )
+    assert retry.deleted_objects == 0

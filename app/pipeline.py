@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
+import tempfile
 
 try:
     from datetime import UTC, datetime
@@ -11,15 +13,17 @@ except ImportError:
 
     UTC = timezone.utc
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import ulid
+from pydantic import BaseModel
 
 from app.backend_client import BackendClientProtocol
 from app.contracts import (
     AnalyzeAnswerPayload,
     AnalyzeSessionPayload,
     AnswerAnalysisCompleted,
+    ArtifactRef,
     AssetInput,
     ChecksumMismatchError,
     EraseAIDataPayload,
@@ -33,6 +37,7 @@ from app.contracts import (
     SessionAnalysisCompleted,
     UpdateStatus,
     WorkerUpdate,
+    is_safe_identifier,
 )
 from app.document_store import DocumentStore, FakeDocumentStore
 from app.providers.base import (
@@ -74,6 +79,7 @@ from app.stages.speech import SPEECH_STAGE_VERSION, SpeechStageResult, run_speec
 from app.stages.vision import VISION_STAGE_VERSION, VisionStageResult, run_vision_stage
 from app.storage import create_object_storage
 from app.storage.base import (
+    ObjectAlreadyExistsError,
     ObjectNotFoundError,
     ObjectStorageError,
     ObjectStorageProtocol,
@@ -84,6 +90,99 @@ from app.storage.local import LocalDiskObjectStorage
 logger = logging.getLogger(__name__)
 
 PRODUCER_VERSION: str = DEFAULT_PRODUCER_VERSION
+
+
+def _safe_key_segment(value: str, *, fallback_prefix: str = "id") -> str:
+    """Return a path-safe storage key segment, hashing unsafe values deterministically."""
+    if is_safe_identifier(value):
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{fallback_prefix}-{digest}"
+
+
+def _attempt_segment(attempt: int) -> str:
+    return str(max(1, int(attempt)))
+
+
+def _job_segment(job_id: str | None) -> str:
+    return _safe_key_segment(job_id, fallback_prefix="job") if job_id else "direct"
+
+
+def _build_session_artifact_key(
+    *,
+    session_id: str,
+    attempt: int,
+    job_id: str | None,
+    artifact_id: str,
+    filename: str,
+) -> str:
+    """Build an immutable session-scoped artifact object key."""
+    safe_session = _safe_key_segment(session_id, fallback_prefix="session")
+    safe_artifact = _safe_key_segment(artifact_id, fallback_prefix="art")
+    return (
+        f"ai/session/{safe_session}/attempts/{_attempt_segment(attempt)}/"
+        f"jobs/{_job_segment(job_id)}/{safe_artifact}/{filename}"
+    )
+
+
+def _build_answer_artifact_key(
+    *,
+    practice_session_id: str | None,
+    answer_id: str,
+    attempt: int,
+    job_id: str | None,
+    artifact_id: str,
+    filename: str,
+) -> str:
+    """Build an immutable answer-scoped artifact object key."""
+    safe_answer = _safe_key_segment(answer_id, fallback_prefix="answer")
+    safe_artifact = _safe_key_segment(artifact_id, fallback_prefix="art")
+    if practice_session_id:
+        safe_session = _safe_key_segment(practice_session_id, fallback_prefix="session")
+        base_prefix = f"ai/session/{safe_session}/answers/{safe_answer}"
+    else:
+        base_prefix = f"ai/answer/{safe_answer}"
+    return (
+        f"{base_prefix}/attempts/{_attempt_segment(attempt)}/"
+        f"jobs/{_job_segment(job_id)}/{safe_artifact}/{filename}"
+    )
+
+
+def _build_job_result_key(
+    *,
+    job_type: str,
+    attempt: int,
+    job_id: str,
+    session_id: str | None = None,
+    answer_id: str | None = None,
+) -> str:
+    """Build the immutable job-completion manifest key for idempotent redelivery."""
+    job_seg = _job_segment(job_id)
+    attempt_seg = _attempt_segment(attempt)
+    if answer_id is not None:
+        safe_answer = _safe_key_segment(answer_id, fallback_prefix="answer")
+        if session_id:
+            safe_session = _safe_key_segment(session_id, fallback_prefix="session")
+            base_prefix = f"ai/session/{safe_session}/answers/{safe_answer}"
+        else:
+            base_prefix = f"ai/answer/{safe_answer}"
+        return f"{base_prefix}/attempts/{attempt_seg}/jobs/{job_seg}/{job_type}.result.json"
+    safe_session = _safe_key_segment(session_id or "unknown", fallback_prefix="session")
+    return f"ai/session/{safe_session}/attempts/{attempt_seg}/jobs/{job_seg}/{job_type}.result.json"
+
+
+def _compute_job_input_fingerprint(
+    job_type: str,
+    attempt: int,
+    payload_data: dict[str, Any],
+) -> str:
+    """Compute a canonical SHA-256 fingerprint for logical job inputs."""
+    canonical = json.dumps(
+        {"job_type": job_type, "attempt": attempt, "payload": payload_data},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def generate_deterministic_ulid(seed_key: str, dt: datetime | str | None = None) -> str:
@@ -595,6 +694,98 @@ class FakePipeline:
 
         return resolved_documents
 
+    async def _verify_stored_artifact_ref(self, ref: ArtifactRef) -> bool:
+        """Verify that an ArtifactRef exists in storage and matches its recorded checksum."""
+        with tempfile.TemporaryDirectory(prefix="virtujudge_verify_") as tmpdir:
+            dest = Path(tmpdir) / "artifact"
+            try:
+                await self.object_storage.download_file(ref.object_key, dest)
+                verify_file_checksum(
+                    dest,
+                    ref.checksum,
+                    stage="dispatch",
+                    artifact_id=ref.artifact_id,
+                )
+            except (ObjectNotFoundError, ChecksumMismatchError):
+                return False
+        return True
+
+    async def _load_cached_job_result(
+        self,
+        result_key: str,
+        *,
+        job_id: str,
+        job_type: str,
+        attempt: int,
+        input_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """Load and validate an existing completion manifest for job_id if intact."""
+        try:
+            record = await self.object_storage.read_json(result_key)
+        except ObjectNotFoundError:
+            return None
+
+        if not isinstance(record, dict):
+            return None
+        if (
+            record.get("job_id") != job_id
+            or record.get("job_type") != job_type
+            or record.get("attempt") != attempt
+            or record.get("input_fingerprint") != input_fingerprint
+        ):
+            raise StageValidationError(
+                f"Conflicting inputs received for logical job '{job_id}'.",
+                stage="dispatch",
+                code=ErrorCode.VALIDATION_ERROR,
+                safe_message="Job payload conflicts with an existing recorded job execution.",
+            )
+
+        raw_artifacts = record.get("artifacts")
+        if not isinstance(raw_artifacts, list) or not raw_artifacts:
+            return None
+        for raw_ref in raw_artifacts:
+            ref = ArtifactRef.model_validate(raw_ref)
+            if not await self._verify_stored_artifact_ref(ref):
+                await self.object_storage.delete_object(result_key)
+                return None
+        return record
+
+    async def _save_or_load_job_result(
+        self,
+        result_key: str,
+        *,
+        job_id: str,
+        job_type: str,
+        attempt: int,
+        input_fingerprint: str,
+        result_model: BaseModel,
+        artifact_refs: list[ArtifactRef],
+    ) -> dict[str, Any]:
+        """Persist completion manifest immutably, converging on winner on concurrent race."""
+        record: dict[str, Any] = {
+            "schema_version": 1,
+            "job_id": job_id,
+            "job_type": job_type,
+            "attempt": attempt,
+            "input_fingerprint": input_fingerprint,
+            "artifacts": [ref.model_dump(mode="json") for ref in artifact_refs],
+            "result": result_model.model_dump(mode="json"),
+        }
+        try:
+            await self.object_storage.upload_json(result_key, record, overwrite=False)
+        except ObjectAlreadyExistsError:
+            existing = await self._load_cached_job_result(
+                result_key,
+                job_id=job_id,
+                job_type=job_type,
+                attempt=attempt,
+                input_fingerprint=input_fingerprint,
+            )
+            if existing is not None:
+                return existing
+            raise
+        return record
+
     async def analyze_session(
         self,
         job: AnalyzeSessionPayload,
@@ -608,6 +799,45 @@ class FakePipeline:
             or getattr(job, "session_id", None)
             or job.presentation.artifact_id
         )
+        session_input_fp = _compute_job_input_fingerprint(
+            "analyze_session",
+            attempt,
+            {
+                "session_id": session_id,
+                "presentation": {
+                    "artifact_id": job.presentation.artifact_id,
+                    "checksum": job.presentation.checksum,
+                },
+                "supporting_documents": [
+                    {"artifact_id": d.artifact_id, "checksum": d.checksum}
+                    for d in job.supporting_documents
+                ],
+                "rubric": job.rubric.model_dump(mode="json"),
+                "requested_capabilities": sorted(job.requested_capabilities),
+                "producer_version": self.producer_version,
+            },
+        )
+        result_key = (
+            _build_job_result_key(
+                job_type="analyze_session",
+                attempt=attempt,
+                job_id=job_id,
+                session_id=session_id,
+            )
+            if job_id
+            else None
+        )
+        if job_id and result_key is not None:
+            cached_record = await self._load_cached_job_result(
+                result_key,
+                job_id=job_id,
+                job_type="analyze_session",
+                attempt=attempt,
+                input_fingerprint=session_input_fp,
+            )
+            if cached_record is not None:
+                await self._check_cancellation(job_id, backend_client, stage="dispatch")
+                return SessionAnalysisCompleted.model_validate(cached_record["result"])
         await self._emit_progress(
             backend_client,
             job_id,
@@ -868,12 +1098,18 @@ class FakePipeline:
         # Inspection point 5: Before final analysis.json upload
         await self._check_cancellation(job_id, backend_client, stage="aggregation")
 
-        artifact_key = f"ai/session/{session_id}/analysis.json"
         if os.getenv("APP_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
             created_at = "2026-09-02T12:00:00Z"
         else:
             created_at = datetime.now(UTC).isoformat()
-        artifact_id = generate_deterministic_ulid(f"{session_id}:analysis", created_at)
+        artifact_id = ulid.new().str
+        artifact_key = _build_session_artifact_key(
+            session_id=session_id,
+            attempt=attempt,
+            job_id=job_id,
+            artifact_id=artifact_id,
+            filename="analysis.json",
+        )
 
         artifact_payload = {
             "artifact_id": artifact_id,
@@ -912,14 +1148,27 @@ class FakePipeline:
             artifact_key,
             artifact_payload,
             artifact_id=artifact_id,
+            overwrite=False,
         )
 
-        return SessionAnalysisCompleted(
+        completed = SessionAnalysisCompleted(
             analysis_artifact=analysis_ref,
             primary_questions=question_stage_res.primary_questions,
             speaker_labels=speech_res.speaker_labels,
             limitations=question_stage_res.limitations,
         )
+        if job_id and result_key is not None:
+            saved = await self._save_or_load_job_result(
+                result_key,
+                job_id=job_id,
+                job_type="analyze_session",
+                attempt=attempt,
+                input_fingerprint=session_input_fp,
+                result_model=completed,
+                artifact_refs=[analysis_ref],
+            )
+            return SessionAnalysisCompleted.model_validate(saved["result"])
+        return completed
 
     async def analyze_answer(
         self,
@@ -929,10 +1178,54 @@ class FakePipeline:
         backend_client: BackendClientProtocol | None = None,
         attempt: int = 1,
     ) -> AnswerAnalysisCompleted:
+        audio_asset = getattr(job, "audio", None)
+        answer_input_fp = _compute_job_input_fingerprint(
+            "analyze_answer",
+            attempt,
+            {
+                "practice_session_id": job.practice_session_id,
+                "qa_round_id": job.qa_round_id,
+                "question_id": job.question_id,
+                "answer_id": job.answer_id,
+                "answered_by": job.answered_by,
+                "audio": (
+                    {"artifact_id": audio_asset.artifact_id, "checksum": audio_asset.checksum}
+                    if audio_asset is not None
+                    else None
+                ),
+                "question_text": job.question_text,
+                "rubric_dimension": job.rubric_dimension,
+                "question_evidence_ids": list(job.question_evidence_ids),
+                "remaining_follow_ups": job.remaining_follow_ups,
+                "producer_version": self.producer_version,
+            },
+        )
+        result_key = (
+            _build_job_result_key(
+                job_type="analyze_answer",
+                attempt=attempt,
+                job_id=job_id,
+                session_id=job.practice_session_id,
+                answer_id=job.answer_id,
+            )
+            if job_id
+            else None
+        )
+        if job_id and result_key is not None:
+            cached_record = await self._load_cached_job_result(
+                result_key,
+                job_id=job_id,
+                job_type="analyze_answer",
+                attempt=attempt,
+                input_fingerprint=answer_input_fp,
+            )
+            if cached_record is not None:
+                await self._check_cancellation(job_id, backend_client, stage="dispatch")
+                return AnswerAnalysisCompleted.model_validate(cached_record["result"])
+
         # Inspection point 1: Before Whisper transcription of student answer
         await self._check_cancellation(job_id, backend_client, stage="speech")
 
-        audio_asset = getattr(job, "audio", None)
         if audio_asset is None:
             speech_res = await run_answer_speech_stage(
                 None,
@@ -958,24 +1251,33 @@ class FakePipeline:
                 stage_name="speech",
             )
 
-        answer_prefix = (
-            f"ai/session/{job.practice_session_id}/answers/{job.answer_id}"
-            if job.practice_session_id
-            else f"ai/answer/{job.answer_id}"
-        )
-        artifact_key = f"{answer_prefix}/transcript.json"
-        assessment_artifact_key = f"{answer_prefix}/assessment.json"
-
         now_utc = datetime.now(UTC)
         created_at = now_utc.isoformat()
-        transcript_artifact_id = generate_deterministic_ulid(f"{job.answer_id}:transcript", now_utc)
-        assessment_artifact_id = generate_deterministic_ulid(f"{job.answer_id}:assessment", now_utc)
+        transcript_artifact_id = ulid.new().str
+        assessment_artifact_id = ulid.new().str
+        artifact_key = _build_answer_artifact_key(
+            practice_session_id=job.practice_session_id,
+            answer_id=job.answer_id,
+            attempt=attempt,
+            job_id=job_id,
+            artifact_id=transcript_artifact_id,
+            filename="transcript.json",
+        )
+        assessment_artifact_key = _build_answer_artifact_key(
+            practice_session_id=job.practice_session_id,
+            answer_id=job.answer_id,
+            attempt=attempt,
+            job_id=job_id,
+            artifact_id=assessment_artifact_id,
+            filename="assessment.json",
+        )
 
         transcript_source_ids = [audio_asset.artifact_id] if audio_asset is not None else []
         artifact_payload = {
             "artifact_id": transcript_artifact_id,
             "answer_id": job.answer_id,
             "practice_session_id": job.practice_session_id,
+            "analysis_attempt": attempt,
             "kind": "transcript",
             "schema_version": 1,
             "producer_version": self.producer_version,
@@ -992,6 +1294,7 @@ class FakePipeline:
             artifact_key,
             artifact_payload,
             artifact_id=transcript_artifact_id,
+            overwrite=False,
         )
 
         # Inspection point 2: Before Groq LLM answer assessment & follow-up question generation
@@ -1024,6 +1327,7 @@ class FakePipeline:
             "artifact_id": assessment_artifact_id,
             "answer_id": job.answer_id,
             "practice_session_id": job.practice_session_id,
+            "analysis_attempt": attempt,
             "question_id": job.question_id,
             "kind": "answer_assessment",
             "schema_version": 1,
@@ -1043,14 +1347,27 @@ class FakePipeline:
             assessment_artifact_key,
             assessment_payload,
             artifact_id=assessment_artifact_id,
+            overwrite=False,
         )
 
-        return AnswerAnalysisCompleted(
+        completed = AnswerAnalysisCompleted(
             answer_id=job.answer_id,
             transcript_artifact_id=transcript_ref.artifact_id,
             assessment_artifact_id=assessment_ref.artifact_id,
             follow_up=follow_up,
         )
+        if job_id and result_key is not None:
+            saved = await self._save_or_load_job_result(
+                result_key,
+                job_id=job_id,
+                job_type="analyze_answer",
+                attempt=attempt,
+                input_fingerprint=answer_input_fp,
+                result_model=completed,
+                artifact_refs=[transcript_ref, assessment_ref],
+            )
+            return AnswerAnalysisCompleted.model_validate(saved["result"])
+        return completed
 
     async def generate_report(
         self,
@@ -1072,6 +1389,47 @@ class FakePipeline:
             )
             or job.report_id
         )
+        report_input_fp = _compute_job_input_fingerprint(
+            "generate_report",
+            attempt,
+            {
+                "session_id": session_id,
+                "report_id": job.report_id,
+                "analysis_artifact": {
+                    "artifact_id": job.analysis_artifact.artifact_id,
+                    "checksum": job.analysis_artifact.checksum,
+                },
+                "qa_artifact": {
+                    "artifact_id": job.qa_artifact.artifact_id,
+                    "checksum": job.qa_artifact.checksum,
+                },
+                "rubric": job.rubric.model_dump(mode="json"),
+                "speaker_mappings": [m.model_dump(mode="json") for m in job.speaker_mappings],
+                "analysis_attempt_id": job.analysis_attempt_id,
+                "producer_version": self.producer_version,
+            },
+        )
+        result_key = (
+            _build_job_result_key(
+                job_type="generate_report",
+                attempt=attempt,
+                job_id=job_id,
+                session_id=session_id,
+            )
+            if job_id
+            else None
+        )
+        if job_id and result_key is not None:
+            cached_record = await self._load_cached_job_result(
+                result_key,
+                job_id=job_id,
+                job_type="generate_report",
+                attempt=attempt,
+                input_fingerprint=report_input_fp,
+            )
+            if cached_record is not None:
+                await self._check_cancellation(job_id, backend_client, stage="dispatch")
+                return ReportCompleted.model_validate(cached_record["result"])
 
         # Inspection point 1: Before loading analysis.json and qa.json
         await self._check_cancellation(job_id, backend_client, stage="ingestion")
@@ -1133,25 +1491,31 @@ class FakePipeline:
             "Uploading evaluation artifact and markdown report...",
         )
 
-        created_at = datetime.now(UTC).isoformat()
-        evaluation_artifact_id = generate_deterministic_ulid(
-            f"{job.report_id}:evaluation",
-            created_at,
+        evaluation_artifact_id = ulid.new().str
+        evaluation_artifact_key = _build_session_artifact_key(
+            session_id=session_id,
+            attempt=attempt,
+            job_id=job_id,
+            artifact_id=evaluation_artifact_id,
+            filename="evaluation.json",
         )
-        evaluation_artifact_key = f"ai/session/{session_id}/evaluation.json"
 
         # Serialize evaluation model to JSON and upload
         evaluation_ref = await self.object_storage.upload_json(
             evaluation_artifact_key,
             stage_res.evaluation,
             artifact_id=evaluation_artifact_id,
+            overwrite=False,
         )
 
-        report_artifact_id = generate_deterministic_ulid(
-            f"{job.report_id}:report",
-            created_at,
+        report_artifact_id = ulid.new().str
+        report_artifact_key = _build_session_artifact_key(
+            session_id=session_id,
+            attempt=attempt,
+            job_id=job_id,
+            artifact_id=report_artifact_id,
+            filename="report.md",
         )
-        report_artifact_key = f"ai/session/{session_id}/report.md"
 
         # Write markdown report to temporary file and upload
         temp_dir = Path(".storage/temp_reports")
@@ -1164,16 +1528,29 @@ class FakePipeline:
                 source_path=temp_md_path,
                 content_type="text/markdown",
                 artifact_id=report_artifact_id,
+                overwrite=False,
             )
         finally:
             temp_md_path.unlink(missing_ok=True)
 
-        return ReportCompleted(
+        completed = ReportCompleted(
             evaluation_artifact=evaluation_ref,
             report_artifact=report_ref,
             member_feedback_user_ids=stage_res.member_feedback_user_ids,
             limitations=stage_res.limitations,
         )
+        if job_id and result_key is not None:
+            saved = await self._save_or_load_job_result(
+                result_key,
+                job_id=job_id,
+                job_type="generate_report",
+                attempt=attempt,
+                input_fingerprint=report_input_fp,
+                result_model=completed,
+                artifact_refs=[evaluation_ref, report_ref],
+            )
+            return ReportCompleted.model_validate(saved["result"])
+        return completed
 
     async def erase_data(
         self,

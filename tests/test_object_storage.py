@@ -3,10 +3,16 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import botocore.exceptions
 import pytest
 
 from app.storage import create_object_storage
-from app.storage.base import ObjectNotFoundError, S3StorageConfig
+from app.storage.base import (
+    ObjectAlreadyExistsError,
+    ObjectNotFoundError,
+    S3StorageConfig,
+    compute_file_sha256,
+)
 from app.storage.local import LocalDiskObjectStorage
 from app.storage.s3 import S3ObjectStorage
 
@@ -324,3 +330,100 @@ async def test_s3_storage_delete_prefix_chunking() -> None:
     deleted = await storage.delete_prefix("logs/")
     assert deleted == 1500
     assert mock_boto_client.delete_objects.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_local_disk_storage_immutable_write_rejects_conflicting_bytes(
+    tmp_path: Path,
+) -> None:
+    """overwrite=False allows identical idempotent writes and rejects differing bytes."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path / "storage")
+    key = "ai/session/s1/attempts/1/jobs/j1/art1/analysis.json"
+    payload_v1 = {"transcript": "initial"}
+    payload_v2 = {"transcript": "changed"}
+
+    ref1 = await storage.upload_json(key, payload_v1, artifact_id="art1", overwrite=False)
+    ref1_dup = await storage.upload_json(key, payload_v1, artifact_id="art1", overwrite=False)
+    assert ref1_dup.checksum == ref1.checksum
+
+    with pytest.raises(ObjectAlreadyExistsError):
+        await storage.upload_json(key, payload_v2, artifact_id="art1", overwrite=False)
+    assert await storage.read_json(key) == payload_v1
+
+    file_key = "ai/session/s1/attempts/1/jobs/j1/art2/report.md"
+    src1 = tmp_path / "r1.md"
+    src2 = tmp_path / "r2.md"
+    src1.write_text("# Report v1", encoding="utf-8")
+    src2.write_text("# Report v2", encoding="utf-8")
+
+    fref1 = await storage.upload_file(
+        file_key, src1, content_type="text/markdown", artifact_id="art2", overwrite=False
+    )
+    fref1_dup = await storage.upload_file(
+        file_key, src1, content_type="text/markdown", artifact_id="art2", overwrite=False
+    )
+    assert fref1_dup.checksum == fref1.checksum
+
+    with pytest.raises(ObjectAlreadyExistsError):
+        await storage.upload_file(
+            file_key, src2, content_type="text/markdown", artifact_id="art2", overwrite=False
+        )
+    assert compute_file_sha256(storage.base_dir / file_key) == fref1.checksum
+
+
+@pytest.mark.asyncio
+async def test_s3_storage_immutable_write_uses_if_none_match_and_rejects_conflict(
+    tmp_path: Path,
+) -> None:
+    """overwrite=False passes IfNoneMatch='*' and verifies checksum on 412 conflict."""
+    import hashlib
+    import io
+    import json
+
+    mock_boto_client = MagicMock()
+    storage = S3ObjectStorage(
+        endpoint_url="https://mock.r2.cloudflarestorage.com",
+        bucket="test-bucket",
+        access_key="mock-key",
+        secret_key="mock-secret",
+        client=mock_boto_client,
+    )
+
+    payload = {"transcript": "initial"}
+    raw = json.dumps(payload, indent=2).encode("utf-8")
+    key = "ai/session/s1/attempts/1/jobs/j1/art1/analysis.json"
+
+    ref = await storage.upload_json(key, payload, artifact_id="art1", overwrite=False)
+    assert ref.checksum == "sha256:" + hashlib.sha256(raw).hexdigest()
+    assert mock_boto_client.put_object.call_args.kwargs["IfNoneMatch"] == "*"
+
+    precondition_err = botocore.exceptions.ClientError(
+        {
+            "Error": {"Code": "PreconditionFailed", "Message": "At least one pre-condition failed"},
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+        },
+        "PutObject",
+    )
+    mock_boto_client.put_object.side_effect = precondition_err
+    mock_boto_client.get_object.return_value = {"Body": io.BytesIO(raw)}
+
+    ref_dup = await storage.upload_json(key, payload, artifact_id="art1", overwrite=False)
+    assert ref_dup.checksum == ref.checksum
+
+    mock_boto_client.get_object.return_value = {"Body": io.BytesIO(b'{"transcript": "other"}')}
+
+    with pytest.raises(ObjectAlreadyExistsError):
+        await storage.upload_json(key, payload, artifact_id="art1", overwrite=False)
+
+    report_path = tmp_path / "report.md"
+    report_path.write_text("# Report", encoding="utf-8")
+    mock_boto_client.put_object.side_effect = None
+    fref = await storage.upload_file(
+        "ai/session/s1/attempts/1/jobs/j1/art2/report.md",
+        report_path,
+        content_type="text/markdown",
+        artifact_id="art2",
+        overwrite=False,
+    )
+    assert fref.checksum == compute_file_sha256(report_path)
+    assert mock_boto_client.put_object.call_args.kwargs["IfNoneMatch"] == "*"

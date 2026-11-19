@@ -38,6 +38,7 @@ from app.providers.fake_speech import FakeSpeechProvider
 from app.providers.groq_speech import GroqSpeechProviderError
 from app.providers.types import TranscriptionResult
 from app.stages.common import StageTransientError
+from app.storage.local import LocalDiskObjectStorage
 from app.worker import (
     _async_process_job_task,
     _run_async,
@@ -362,6 +363,7 @@ async def test_celery_task_all_job_types_round_trip():
 @pytest.mark.asyncio
 async def test_celery_task_provider_transient_success_after_retry(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Verify transient provider error triggers Celery retry and succeeds on next execution."""
 
@@ -385,7 +387,10 @@ async def test_celery_task_provider_transient_success_after_retry(
     envelope = _load_fixture("job_analyze_answer_valid.json")
     envelope["analysis_attempt"] = 2
     client = MockBackendClient()
-    pipeline = FakePipeline(speech_provider=FlakySpeechProvider())
+    pipeline = FakePipeline(
+        speech_provider=FlakySpeechProvider(),
+        object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "storage"),
+    )
 
     # First worker execution (retries=0 -> attempt 1) triggers Celery task.retry
     first_task = MagicMock()
@@ -421,6 +426,7 @@ async def test_celery_task_provider_transient_success_after_retry(
 @pytest.mark.asyncio
 async def test_celery_task_provider_exhausted_retries_reports_stage_and_attempts(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Verify exhausted transient retries post non-retryable failed with real stage and attempts."""
 
@@ -436,7 +442,10 @@ async def test_celery_task_provider_exhausted_retries_reports_stage_and_attempts
     envelope = _load_fixture("job_analyze_answer_valid.json")
     envelope["analysis_attempt"] = 2
     client = MockBackendClient()
-    pipeline = FakePipeline(speech_provider=AlwaysFailingSpeechProvider())
+    pipeline = FakePipeline(
+        speech_provider=AlwaysFailingSpeechProvider(),
+        object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "storage"),
+    )
 
     exhausted_task = MagicMock()
     exhausted_task.request.retries = 3
@@ -460,9 +469,9 @@ async def test_celery_task_provider_exhausted_retries_reports_stage_and_attempts
 
 
 @pytest.mark.asyncio
-async def test_celery_task_non_retryable_provider_error_skips_retry_and_uses_exec_attempts() -> (
-    None
-):
+async def test_celery_task_non_retryable_provider_error_skips_retry_and_uses_exec_attempts(
+    tmp_path: Path,
+) -> None:
     """Verify non-retryable provider failure does not retry and uses request.retries + 1."""
 
     class NonRetryableSpeechProvider(FakeSpeechProvider):
@@ -478,7 +487,10 @@ async def test_celery_task_non_retryable_provider_error_skips_retry_and_uses_exe
     envelope = _load_fixture("job_analyze_answer_valid.json")
     envelope["analysis_attempt"] = 2
     client = MockBackendClient()
-    pipeline = FakePipeline(speech_provider=speech_provider)
+    pipeline = FakePipeline(
+        speech_provider=speech_provider,
+        object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "storage"),
+    )
 
     celery_task = MagicMock()
     celery_task.request.retries = 0

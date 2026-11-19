@@ -138,7 +138,7 @@ async def test_analyze_session_downloads_supporting_documents_from_object_storag
 
 @pytest.mark.asyncio
 async def test_analyze_session_result_is_stable(fake_pipeline: FakePipeline) -> None:
-    """Test that analyze_session returns stable, identical results for repeated calls."""
+    """Test that analyze_session returns stable outputs and idempotent refs for the same job_id."""
     payload = AnalyzeSessionPayload(
         presentation=AssetInput(
             artifact_id="01JTEST0000000000000000001",
@@ -151,9 +151,16 @@ async def test_analyze_session_result_is_stable(fake_pipeline: FakePipeline) -> 
         requested_capabilities=["speech"],
     )
 
-    result1 = await fake_pipeline.analyze_session(payload)
-    result2 = await fake_pipeline.analyze_session(payload)
+    result1 = await fake_pipeline.analyze_session(payload, job_id="01JSTABLEJOB00000000000001")
+    result2 = await fake_pipeline.analyze_session(payload, job_id="01JSTABLEJOB00000000000001")
     assert result1 == result2
+
+    result3 = await fake_pipeline.analyze_session(payload)
+    assert result3.primary_questions == result1.primary_questions
+    assert result3.speaker_labels == result1.speaker_labels
+    assert result3.limitations == result1.limitations
+    assert result3.analysis_artifact.artifact_id != result1.analysis_artifact.artifact_id
+    assert result3.analysis_artifact.object_key != result1.analysis_artifact.object_key
 
 
 @pytest.mark.asyncio
@@ -254,9 +261,11 @@ async def test_analyze_answer_skipped_produces_no_invented_evidence() -> None:
     assert result.follow_up is None
 
     # Verify assessment artifact uploaded to object storage has no invented evidence
-    assessment_data = await pipeline.object_storage.read_json(
-        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
+    assessment_key = (
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/"
+        f"attempts/1/jobs/direct/{result.assessment_artifact_id}/assessment.json"
     )
+    assessment_data = await pipeline.object_storage.read_json(assessment_key)
     assert assessment_data["assessment"]["evidence_ids"] == []
     assert assessment_data["assessment"]["text"] == ""
     assert assessment_data["follow_up"] is None
@@ -726,8 +735,9 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
     assert result.follow_up is None
 
     # Verify DerivedArtifact fields in stored artifacts
+    answer_prefix = f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}"
     transcript_data = await fake_pipeline.object_storage.read_json(
-        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/transcript.json"
+        f"{answer_prefix}/attempts/1/jobs/direct/{result.transcript_artifact_id}/transcript.json"
     )
     assert transcript_data["kind"] == "transcript"
     assert transcript_data["producer_version"] == "ai-ml/0.1.0"
@@ -735,7 +745,7 @@ async def test_analyze_answer_skipped_with_none_audio(fake_pipeline: FakePipelin
     assert transcript_data["created_at"] != "2026-09-02T12:00:00Z"
 
     assessment_data = await fake_pipeline.object_storage.read_json(
-        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
+        f"{answer_prefix}/attempts/1/jobs/direct/{result.assessment_artifact_id}/assessment.json"
     )
     assert assessment_data["kind"] == "answer_assessment"
     assert assessment_data["producer_version"] == "ai-ml/0.1.0"
@@ -764,8 +774,9 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
     )
     result = await fake_pipeline.analyze_answer(payload)
 
+    answer_prefix = f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}"
     transcript_data = await fake_pipeline.object_storage.read_json(
-        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/transcript.json"
+        f"{answer_prefix}/attempts/1/jobs/direct/{result.transcript_artifact_id}/transcript.json"
     )
     assert transcript_data["kind"] == "transcript"
     assert transcript_data["producer_version"] == "ai-ml/0.1.0"
@@ -773,7 +784,7 @@ async def test_analyze_answer_derived_artifact_fields(fake_pipeline: FakePipelin
     assert transcript_data["created_at"] != "2026-09-02T12:00:00Z"
 
     assessment_data = await fake_pipeline.object_storage.read_json(
-        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
+        f"{answer_prefix}/attempts/1/jobs/direct/{result.assessment_artifact_id}/assessment.json"
     )
     assert assessment_data["kind"] == "answer_assessment"
     assert assessment_data["producer_version"] == "ai-ml/0.1.0"
@@ -1075,7 +1086,8 @@ async def test_analyze_answer_over_length_follow_up_dropped_and_completion_succe
     assert result.follow_up is None
 
     assessment_data = await storage.read_json(
-        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/assessment.json"
+        f"ai/session/{payload.practice_session_id}/answers/{payload.answer_id}/"
+        f"attempts/1/jobs/direct/{result.assessment_artifact_id}/assessment.json"
     )
     assert assessment_data["assessment"]["text"] == "Clear explanation of CAC payback period."
     assert assessment_data["assessment"]["score"] == 0.78

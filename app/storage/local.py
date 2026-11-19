@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,43 @@ import ulid
 from pydantic import BaseModel
 
 from app.contracts import ArtifactRef
-from app.storage.base import ObjectNotFoundError, compute_file_sha256
+from app.storage.base import (
+    ObjectAlreadyExistsError,
+    ObjectNotFoundError,
+    compute_file_sha256,
+)
+
+
+def _write_immutable_from_temp(
+    temp_path: Path,
+    dest: Path,
+    object_key: str,
+    checksum: str,
+) -> None:
+    """Atomically link temp_path to dest without overwriting differing existing content."""
+    try:
+        try:
+            os.link(temp_path, dest)
+        except OSError as link_err:
+            if isinstance(link_err, FileExistsError):
+                raise
+            # Fallback for filesystems without hard-link support.
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                with os.fdopen(fd, "wb") as dst_handle, temp_path.open("rb") as src_handle:
+                    shutil.copyfileobj(src_handle, dst_handle)
+            except Exception:
+                dest.unlink(missing_ok=True)
+                raise
+    except FileExistsError as err:
+        existing_checksum = compute_file_sha256(dest)
+        if existing_checksum == checksum:
+            return
+        raise ObjectAlreadyExistsError(
+            f"Immutable object '{object_key}' already exists with different content."
+        ) from err
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 class LocalDiskObjectStorage:
@@ -43,15 +80,28 @@ class LocalDiskObjectStorage:
         source_path: Path,
         content_type: str = "application/octet-stream",
         artifact_id: str | None = None,
+        *,
+        overwrite: bool = True,
     ) -> ArtifactRef:
         if not source_path.is_file():
             raise FileNotFoundError(f"Source file '{source_path}' does not exist.")
 
         dest = self._resolve_path(object_key)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_path, dest)
+        checksum = compute_file_sha256(source_path)
+        if overwrite:
+            shutil.copyfile(source_path, dest)
+        else:
+            fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".tmp_imm_")
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "wb") as dst_handle, source_path.open("rb") as src_handle:
+                    shutil.copyfileobj(src_handle, dst_handle)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            _write_immutable_from_temp(tmp_path, dest, object_key, checksum)
 
-        checksum = compute_file_sha256(dest)
         art_id = artifact_id or ulid.new().str
 
         return ArtifactRef(
@@ -66,6 +116,8 @@ class LocalDiskObjectStorage:
         object_key: str,
         data: dict[str, Any] | BaseModel,
         artifact_id: str | None = None,
+        *,
+        overwrite: bool = True,
     ) -> ArtifactRef:
         if isinstance(data, BaseModel):
             json_str = data.model_dump_json(indent=2)
@@ -78,7 +130,18 @@ class LocalDiskObjectStorage:
 
         dest = self._resolve_path(object_key)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(raw_bytes)
+        if overwrite:
+            dest.write_bytes(raw_bytes)
+        else:
+            fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".tmp_imm_")
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "wb") as dst_handle:
+                    dst_handle.write(raw_bytes)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            _write_immutable_from_temp(tmp_path, dest, object_key, checksum)
 
         return ArtifactRef(
             artifact_id=art_id,

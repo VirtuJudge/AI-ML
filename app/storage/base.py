@@ -24,6 +24,10 @@ class ObjectNotFoundError(ObjectStorageError):
     """Raised when an object key is not found in storage."""
 
 
+class ObjectAlreadyExistsError(ObjectStorageError):
+    """Raised when a non-overwriting write targets an object key with different content."""
+
+
 class ObjectStorageProtocol(Protocol):
     """Protocol for reading and writing media and artifacts in object storage."""
 
@@ -37,6 +41,8 @@ class ObjectStorageProtocol(Protocol):
         source_path: Path,
         content_type: str = "application/octet-stream",
         artifact_id: str | None = None,
+        *,
+        overwrite: bool = True,
     ) -> ArtifactRef:
         """Upload a local file to object storage and return its ArtifactRef."""
         ...
@@ -46,6 +52,8 @@ class ObjectStorageProtocol(Protocol):
         object_key: str,
         data: dict[str, Any] | BaseModel,
         artifact_id: str | None = None,
+        *,
+        overwrite: bool = True,
     ) -> ArtifactRef:
         """Serialize data to JSON, upload to object storage, and return its ArtifactRef."""
         ...
@@ -143,6 +151,7 @@ def verify_file_checksum(
 
 
 __all__ = [
+    "ObjectAlreadyExistsError",
     "ObjectNotFoundError",
     "ObjectStorageError",
     "ObjectStorageProtocol",

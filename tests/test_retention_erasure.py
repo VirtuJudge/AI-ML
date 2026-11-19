@@ -130,3 +130,97 @@ async def test_unreachable_cancellation_check_fails_closed() -> None:
         assert isinstance(error.value.__cause__, httpx.ConnectError)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_retention_and_explicit_erasure_cover_immutable_multi_attempt_layout(
+    tmp_path: Path,
+) -> None:
+    """Retention and explicit erasure cover all immutable attempt/job/artifact prefixes."""
+    storage = LocalDiskObjectStorage(tmp_path)
+    documents = FakeDocumentStore()
+    pipeline = FakePipeline(object_storage=storage, document_store=documents)
+
+    session_id = "target-multi"
+    for attempt in (1, 2):
+        job_id = f"job-{attempt}"
+        await storage.upload_json(
+            f"ai/session/{session_id}/attempts/{attempt}/jobs/{job_id}/art-a-{attempt}/analysis.json",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+        await storage.upload_json(
+            f"ai/session/{session_id}/attempts/{attempt}/jobs/{job_id}/analyze_session.result.json",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+        await storage.upload_json(
+            f"ai/session/{session_id}/attempts/{attempt}/jobs/rep-{attempt}/art-e-{attempt}/evaluation.json",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+        await storage.upload_json(
+            f"ai/session/{session_id}/attempts/{attempt}/jobs/rep-{attempt}/art-r-{attempt}/report.md",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+        await storage.upload_json(
+            f"ai/session/{session_id}/answers/ans-{attempt}/attempts/{attempt}/jobs/aj-{attempt}/art-t-{attempt}/transcript.json",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+        await storage.upload_json(
+            f"ai/session/{session_id}/answers/ans-{attempt}/attempts/{attempt}/jobs/aj-{attempt}/art-s-{attempt}/assessment.json",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+        await storage.upload_json(
+            f"ai/session/{session_id}/answers/ans-{attempt}/attempts/{attempt}/jobs/aj-{attempt}/analyze_answer.result.json",
+            {"attempt": attempt},
+            overwrite=False,
+        )
+    await storage.upload_json(
+        f"ai/session/{session_id}/checkpoints/speech_abc.json",
+        {"synthetic": True},
+    )
+    await storage.upload_json(
+        "ai/answer/ans-orphan/attempts/1/jobs/j-orphan/art-o/transcript.json",
+        {"synthetic": True},
+        overwrite=False,
+    )
+    await storage.upload_json("ai/session/unrelated/attempts/1/jobs/j/a/analysis.json", {"s": 1})
+    await storage.upload_json("uploads/backend-owned.mp4", {"synthetic": True})
+
+    retention_job = EraseAIDataPayload(
+        erasure_request_id="req-retention",
+        scope="asset",
+        scope_id="raw",
+        practice_session_ids=[session_id],
+        asset_version_ids=["raw-version"],
+        retention_only=True,
+    )
+    retention_res = await pipeline.erase_data(retention_job)
+    # 2 analysis.json + 2 analyze_session.result.json + 2 analyze_answer.result.json + 1 ckpt = 7
+    assert retention_res.deleted_objects == 7
+    remaining = await storage.list_objects(f"ai/session/{session_id}/")
+    assert len(remaining) == 8
+    assert all(
+        key.endswith(("evaluation.json", "report.md", "transcript.json", "assessment.json"))
+        for key in remaining
+    )
+    assert await storage.list_objects("ai/session/unrelated/")
+    assert await storage.list_objects("uploads/")
+
+    explicit_job = EraseAIDataPayload(
+        erasure_request_id="req-explicit",
+        scope="practice_session",
+        scope_id=session_id,
+        answer_ids=["ans-1", "ans-2", "ans-orphan"],
+        retention_only=False,
+    )
+    explicit_res = await pipeline.erase_data(explicit_job)
+    assert explicit_res.deleted_objects == 9
+    assert await storage.list_objects(f"ai/session/{session_id}/") == []
+    assert await storage.list_objects("ai/answer/ans-orphan/") == []
+    assert await storage.list_objects("ai/session/unrelated/")
+    assert await storage.list_objects("uploads/")

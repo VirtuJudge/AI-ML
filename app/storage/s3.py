@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.contracts import ArtifactRef
 from app.storage.base import (
+    ObjectAlreadyExistsError,
     ObjectNotFoundError,
     ObjectStorageError,
     S3StorageConfig,
@@ -27,6 +28,39 @@ from app.storage.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_precondition_failed(err: botocore.exceptions.ClientError) -> bool:
+    code = err.response.get("Error", {}).get("Code")
+    status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in ("PreconditionFailed", "412", "ConditionalRequestConflict") or status in (
+        409,
+        412,
+    )
+
+
+def _verify_existing_object_checksum(
+    client: BaseClient,
+    bucket: str,
+    object_key: str,
+    expected_checksum: str,
+    cause: Exception,
+) -> None:
+    """Confirm existing S3 object matches expected_checksum or raise ObjectAlreadyExistsError."""
+    res = client.get_object(Bucket=bucket, Key=object_key)
+    body = res.get("Body")
+    hasher = hashlib.sha256()
+    if body is not None:
+        if hasattr(body, "iter_chunks"):
+            for chunk in body.iter_chunks(chunk_size=64 * 1024):
+                hasher.update(chunk)
+        else:
+            hasher.update(body.read())
+    existing_checksum = "sha256:" + hasher.hexdigest()
+    if existing_checksum != expected_checksum:
+        raise ObjectAlreadyExistsError(
+            f"Immutable object '{object_key}' already exists with different content."
+        ) from cause
 
 
 class S3ObjectStorage:
@@ -114,6 +148,8 @@ class S3ObjectStorage:
         source_path: Path,
         content_type: str = "application/octet-stream",
         artifact_id: str | None = None,
+        *,
+        overwrite: bool = True,
     ) -> ArtifactRef:
         """Upload a local file to S3/R2 and compute its sha256 checksum."""
         if not source_path.is_file():
@@ -124,13 +160,34 @@ class S3ObjectStorage:
         def _upload_sync() -> str:
             checksum = compute_file_sha256(source_path)
             client = self._get_client()
+            if overwrite:
+                try:
+                    client.upload_file(
+                        str(source_path),
+                        self.bucket,
+                        object_key,
+                        ExtraArgs={"ContentType": content_type},
+                    )
+                except Exception as exc:
+                    raise ObjectStorageError(f"Failed to upload '{object_key}': {exc}") from exc
+                return checksum
+
             try:
-                client.upload_file(
-                    str(source_path),
-                    self.bucket,
-                    object_key,
-                    ExtraArgs={"ContentType": content_type},
-                )
+                with source_path.open("rb") as fh:
+                    client.put_object(
+                        Bucket=self.bucket,
+                        Key=object_key,
+                        Body=fh,
+                        ContentType=content_type,
+                        IfNoneMatch="*",
+                    )
+            except botocore.exceptions.ClientError as err:
+                if _is_precondition_failed(err):
+                    _verify_existing_object_checksum(client, self.bucket, object_key, checksum, err)
+                    return checksum
+                raise ObjectStorageError(f"Failed to upload '{object_key}': {err}") from err
+            except ObjectAlreadyExistsError:
+                raise
             except Exception as exc:
                 raise ObjectStorageError(f"Failed to upload '{object_key}': {exc}") from exc
             return checksum
@@ -149,6 +206,8 @@ class S3ObjectStorage:
         object_key: str,
         data: dict[str, Any] | BaseModel,
         artifact_id: str | None = None,
+        *,
+        overwrite: bool = True,
     ) -> ArtifactRef:
         """Serialize data to JSON and upload to S3/R2."""
         if isinstance(data, BaseModel):
@@ -162,13 +221,23 @@ class S3ObjectStorage:
 
         def _upload_sync() -> None:
             client = self._get_client()
+            put_kwargs: dict[str, Any] = {
+                "Bucket": self.bucket,
+                "Key": object_key,
+                "Body": raw_bytes,
+                "ContentType": "application/json",
+            }
+            if not overwrite:
+                put_kwargs["IfNoneMatch"] = "*"
             try:
-                client.put_object(
-                    Bucket=self.bucket,
-                    Key=object_key,
-                    Body=raw_bytes,
-                    ContentType="application/json",
-                )
+                client.put_object(**put_kwargs)
+            except botocore.exceptions.ClientError as err:
+                if not overwrite and _is_precondition_failed(err):
+                    _verify_existing_object_checksum(client, self.bucket, object_key, checksum, err)
+                    return
+                raise ObjectStorageError(f"Failed to upload JSON '{object_key}': {err}") from err
+            except ObjectAlreadyExistsError:
+                raise
             except Exception as exc:
                 raise ObjectStorageError(f"Failed to upload JSON '{object_key}': {exc}") from exc
 

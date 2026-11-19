@@ -8,6 +8,7 @@ import pytest
 from app.backend_client import FakeBackendClient
 from app.contracts import JobType, QueueMessage
 from app.pipeline import FakePipeline
+from app.storage.local import LocalDiskObjectStorage
 
 
 @pytest.fixture
@@ -30,9 +31,9 @@ def load_json_fixture_text(relative_path: str | Path) -> str:
 
 
 @pytest.fixture
-def fake_pipeline() -> FakePipeline:
-    """Fixture providing an instance of FakePipeline."""
-    return FakePipeline()
+def fake_pipeline(tmp_path: Path) -> FakePipeline:
+    """Fixture providing an isolated FakePipeline instance."""
+    return FakePipeline(object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "object_storage"))
 
 
 @pytest.fixture
@@ -165,6 +166,6 @@ def backend_client() -> FakeBackendClient:
 
 
 @pytest.fixture
-def journey_pipeline() -> FakePipeline:
-    """Fixture providing a FakePipeline with all fake providers wired."""
-    return FakePipeline()
+def journey_pipeline(tmp_path: Path) -> FakePipeline:
+    """Fixture providing an isolated FakePipeline with all fake providers wired."""
+    return FakePipeline(object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "object_storage"))
