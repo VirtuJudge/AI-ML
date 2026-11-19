@@ -12,10 +12,12 @@ once upfront saves downstream stages from repeated audio conversions.
 import asyncio
 import contextlib
 import hashlib
+import math
 import os
 import re
 import shutil
 import tempfile
+import time
 import wave
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,6 +30,10 @@ from app.contracts import AssetInput, Limitation
 MEDIA_NORMALIZATION_VERSION = "ffmpeg_pcm_s16le_16k_mono_v1"
 JOB_TEMP_ROOT_ENV = "AI_MEDIA_TEMP_DIR"
 DEFAULT_JOB_TEMP_DIRNAME = "virtujudge_media_jobs"
+MEDIA_TIMEOUT_ENV = "AI_MEDIA_TIMEOUT_SECONDS"
+DEFAULT_MEDIA_TIMEOUT_SECONDS = 300.0
+MEDIA_TERMINATE_GRACE_ENV = "AI_MEDIA_TERMINATE_GRACE_SECONDS"
+DEFAULT_MEDIA_TERMINATE_GRACE_SECONDS = 5.0
 
 SUPPORTED_MEDIA_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -90,6 +96,10 @@ class FFmpegExecutionError(MediaNormalizationError):
         super().__init__(message)
         self.returncode = returncode
         self.stderr = stderr
+
+
+class FFmpegTimeoutError(MediaNormalizationError, TimeoutError):
+    """Raised when ffmpeg exceeds the configured media processing deadline."""
 
 
 class WavMetadata(NamedTuple):
@@ -270,6 +280,165 @@ def create_normalization_limitation(
     )
 
 
+class _PreparedOutput(NamedTuple):
+    """Resolved output path paired with ownership metadata for failure cleanup."""
+
+    path: Path
+    created_temp: bool
+    existed_before: bool
+
+    @property
+    def is_owned(self) -> bool:
+        return self.created_temp or not self.existed_before
+
+
+def _resolve_positive_seconds(
+    explicit: float | None,
+    *,
+    env_var: str,
+    default: float,
+    label: str,
+) -> float:
+    """Resolve a positive finite duration in seconds from argument, env var, or default."""
+    if explicit is not None:
+        value = float(explicit)
+    else:
+        raw = os.getenv(env_var, "").strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError as err:
+            raise ValueError(f"{env_var} must be a positive finite number.") from err
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{label} must be a positive finite number.")
+    return value
+
+
+def get_media_timeout_seconds(timeout_seconds: float | None = None) -> float:
+    """Return the effective deadline in seconds for FFmpeg media processing."""
+    return _resolve_positive_seconds(
+        timeout_seconds,
+        env_var=MEDIA_TIMEOUT_ENV,
+        default=DEFAULT_MEDIA_TIMEOUT_SECONDS,
+        label="timeout_seconds",
+    )
+
+
+def get_media_terminate_grace_seconds(terminate_grace_seconds: float | None = None) -> float:
+    """Return the grace period in seconds before escalating FFmpeg termination to SIGKILL."""
+    return _resolve_positive_seconds(
+        terminate_grace_seconds,
+        env_var=MEDIA_TERMINATE_GRACE_ENV,
+        default=DEFAULT_MEDIA_TERMINATE_GRACE_SECONDS,
+        label="terminate_grace_seconds",
+    )
+
+
+def _resolve_input_file(input_path: Path | str | AssetInput) -> Path:
+    input_file = (
+        Path(input_path.object_key) if isinstance(input_path, AssetInput) else Path(input_path)
+    )
+    if not input_file.is_file():
+        raise FileNotFoundError(f"Input file not found: {input_file}")
+    return input_file
+
+
+def _prepare_output_path(
+    output_path: Path | str | None,
+    *,
+    temp_root: Path,
+    suffix: str,
+) -> _PreparedOutput:
+    if output_path is None:
+        temp_root.mkdir(parents=True, exist_ok=True)
+        fd, temp_path_str = tempfile.mkstemp(suffix=suffix, dir=str(temp_root))
+        os.close(fd)
+        return _PreparedOutput(path=Path(temp_path_str), created_temp=True, existed_before=False)
+
+    target = Path(output_path)
+    existed_before = target.exists()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _PreparedOutput(path=target, created_temp=False, existed_before=existed_before)
+
+
+async def _reap_uninterruptibly(proc: asyncio.subprocess.Process) -> None:
+    """Await proc.wait() until the child is reaped, re-raising any later cancellation."""
+    pending_cancel: asyncio.CancelledError | None = None
+    wait_task = asyncio.ensure_future(proc.wait())
+    while not wait_task.done():
+        try:
+            await asyncio.shield(wait_task)
+        except asyncio.CancelledError as err:
+            pending_cancel = err
+    wait_task.result()
+    if pending_cancel is not None:
+        raise pending_cancel
+
+
+async def _terminate_and_reap(
+    proc: asyncio.subprocess.Process,
+    *,
+    grace_seconds: float,
+) -> None:
+    """Terminate a running child process, escalate to kill if needed, and reap it."""
+    # Checking isinstance(..., int) handles real Processes (None while running, int on exit)
+    # and prevents unconfigured mock objects from bypassing termination and reaping.
+    if isinstance(proc.returncode, int) and not isinstance(proc.returncode, bool):
+        return
+
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+        return
+    except TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await _reap_uninterruptibly(proc)
+        raise
+
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    await _reap_uninterruptibly(proc)
+
+
+async def _run_ffmpeg_command(
+    cmd: list[str],
+    *,
+    ffmpeg_bin: str,
+    timeout_seconds: float,
+    terminate_grace_seconds: float,
+) -> tuple[int, str]:
+    """Execute ffmpeg with an explicit deadline, terminating and reaping on cancel or timeout."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as err:
+        raise FFmpegNotFoundError(f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH.") from err
+
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+    except TimeoutError as err:
+        await _terminate_and_reap(proc, grace_seconds=terminate_grace_seconds)
+        raise FFmpegTimeoutError(
+            f"ffmpeg process exceeded {timeout_seconds:g}s stage deadline."
+        ) from err
+    except BaseException:
+        await _terminate_and_reap(proc, grace_seconds=terminate_grace_seconds)
+        raise
+
+    returncode = proc.returncode if isinstance(proc.returncode, int) else 0
+    stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+    return returncode, stderr_text
+
+
 async def normalize_media(
     input_path: Path | str | AssetInput,
     output_path: Path | str | None = None,
@@ -277,6 +446,8 @@ async def normalize_media(
     ffmpeg_bin: str = "ffmpeg",
     target_sample_rate: int = 16000,
     target_channels: int = 1,
+    timeout_seconds: float | None = None,
+    terminate_grace_seconds: float | None = None,
 ) -> MediaNormalizationResult:
     """Normalize input media file to canonical 16kHz mono 16-bit PCM WAV via ffmpeg.
 
@@ -291,6 +462,10 @@ async def normalize_media(
         ffmpeg_bin: Path or name of the ffmpeg binary.
         target_sample_rate: Target sample rate in Hz (default 16000).
         target_channels: Target channel count (default 1 for mono).
+        timeout_seconds: Explicit stage deadline in seconds (defaults to AI_MEDIA_TIMEOUT_SECONDS
+            or 300s).
+        terminate_grace_seconds: Grace period in seconds after SIGTERM before escalating to
+            SIGKILL (defaults to AI_MEDIA_TERMINATE_GRACE_SECONDS or 5s).
 
     Returns:
         MediaNormalizationResult containing output path, duration_ms, sample_rate, and channels.
@@ -298,30 +473,16 @@ async def normalize_media(
     Raises:
         FileNotFoundError: If the input file does not exist.
         FFmpegNotFoundError: If ffmpeg is not installed or not in PATH.
+        FFmpegTimeoutError: If ffmpeg exceeds the stage deadline.
         FFmpegExecutionError: If ffmpeg fails with non-zero exit code.
         MediaNormalizationError: If output WAV metadata cannot be read.
     """
-    if isinstance(input_path, AssetInput):
-        input_file = Path(input_path.object_key)
-    else:
-        input_file = Path(input_path)
-
-    if not input_file.is_file():
-        raise FileNotFoundError(f"Input file not found: {input_file}")
+    resolved_timeout = get_media_timeout_seconds(timeout_seconds)
+    resolved_grace = get_media_terminate_grace_seconds(terminate_grace_seconds)
+    input_file = _resolve_input_file(input_path)
 
     temp_root = get_media_temp_root()
-    created_temp = False
-    existed_before = False
-    if output_path is None:
-        temp_root.mkdir(parents=True, exist_ok=True)
-        fd, temp_path_str = tempfile.mkstemp(suffix="_normalized.wav", dir=str(temp_root))
-        os.close(fd)
-        target_output = Path(temp_path_str)
-        created_temp = True
-    else:
-        target_output = Path(output_path)
-        existed_before = target_output.exists()
-        target_output.parent.mkdir(parents=True, exist_ok=True)
+    target = _prepare_output_path(output_path, temp_root=temp_root, suffix="_normalized.wav")
 
     cmd = [
         ffmpeg_bin,
@@ -335,43 +496,32 @@ async def normalize_media(
         str(target_sample_rate),
         "-ac",
         str(target_channels),
-        str(target_output),
+        str(target.path),
     ]
 
     try:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError as err:
-            raise FFmpegNotFoundError(
-                f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH."
-            ) from err
-
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace")
+        returncode, stderr_text = await _run_ffmpeg_command(
+            cmd,
+            ffmpeg_bin=ffmpeg_bin,
+            timeout_seconds=resolved_timeout,
+            terminate_grace_seconds=resolved_grace,
+        )
+        if returncode != 0:
             raise FFmpegExecutionError(
-                f"ffmpeg process exited with code {proc.returncode}",
-                returncode=proc.returncode,
+                f"ffmpeg process exited with code {returncode}",
+                returncode=returncode,
                 stderr=stderr_text,
             )
 
-        meta = get_wav_metadata(target_output)
+        meta = get_wav_metadata(target.path)
     except BaseException:
-        _unlink_owned_output(
-            target_output,
-            input_file,
-            should_unlink=created_temp or not existed_before,
-        )
-        if created_temp:
+        _unlink_owned_output(target.path, input_file, should_unlink=target.is_owned)
+        if target.created_temp:
             _remove_empty_dir(temp_root)
         raise
 
     return MediaNormalizationResult(
-        output_path=target_output,
+        output_path=target.path,
         duration_ms=meta.duration_ms,
         sample_rate=meta.sample_rate,
         channels=meta.channels,
@@ -386,6 +536,8 @@ async def split_media(
     ffmpeg_bin: str = "ffmpeg",
     target_sample_rate: int = 16000,
     target_channels: int = 1,
+    timeout_seconds: float | None = None,
+    terminate_grace_seconds: float | None = None,
 ) -> MediaSplitResult:
     """Split presentation video into 16kHz mono WAV audio and audio-free video for vision.
 
@@ -404,54 +556,37 @@ async def split_media(
         ffmpeg_bin: Path or name of the ffmpeg binary.
         target_sample_rate: Target audio sample rate in Hz (default 16000).
         target_channels: Target audio channel count (default 1 for mono).
+        timeout_seconds: Explicit stage deadline in seconds (defaults to AI_MEDIA_TIMEOUT_SECONDS
+            or 300s).
+        terminate_grace_seconds: Grace period in seconds after SIGTERM before escalating to
+            SIGKILL (defaults to AI_MEDIA_TERMINATE_GRACE_SECONDS or 5s).
 
     Returns:
         MediaSplitResult containing audio_path, video_path, duration_ms, sample_rate, and channels.
-    """
-    if isinstance(input_path, AssetInput):
-        input_file = Path(input_path.object_key)
-    else:
-        input_file = Path(input_path)
 
-    if not input_file.is_file():
-        raise FileNotFoundError(f"Input file not found: {input_file}")
+    Raises:
+        FileNotFoundError: If the input file does not exist.
+        FFmpegNotFoundError: If ffmpeg is not installed or not in PATH.
+        FFmpegTimeoutError: If ffmpeg exceeds the stage deadline.
+        FFmpegExecutionError: If ffmpeg fails with non-zero exit code.
+        MediaNormalizationError: If output WAV metadata cannot be read.
+    """
+    resolved_timeout = get_media_timeout_seconds(timeout_seconds)
+    resolved_grace = get_media_terminate_grace_seconds(terminate_grace_seconds)
+    input_file = _resolve_input_file(input_path)
 
     temp_root = get_media_temp_root()
-    created_audio_temp = False
-    created_video_temp = False
-    audio_existed_before = False
-    video_existed_before = False
-
-    if output_audio_path is None:
-        temp_root.mkdir(parents=True, exist_ok=True)
-        fd_a, temp_audio_str = tempfile.mkstemp(suffix="_normalized.wav", dir=str(temp_root))
-        os.close(fd_a)
-        target_audio = Path(temp_audio_str)
-        created_audio_temp = True
-    else:
-        target_audio = Path(output_audio_path)
-        audio_existed_before = target_audio.exists()
-        target_audio.parent.mkdir(parents=True, exist_ok=True)
-
+    audio_out = _prepare_output_path(
+        output_audio_path, temp_root=temp_root, suffix="_normalized.wav"
+    )
     try:
-        if output_video_path is None:
-            temp_root.mkdir(parents=True, exist_ok=True)
-            suffix = input_file.suffix if input_file.suffix else ".mp4"
-            fd_v, temp_video_str = tempfile.mkstemp(suffix=f"_vision{suffix}", dir=str(temp_root))
-            os.close(fd_v)
-            target_video = Path(temp_video_str)
-            created_video_temp = True
-        else:
-            target_video = Path(output_video_path)
-            video_existed_before = target_video.exists()
-            target_video.parent.mkdir(parents=True, exist_ok=True)
-    except BaseException:
-        _unlink_owned_output(
-            target_audio,
-            input_file,
-            should_unlink=created_audio_temp or not audio_existed_before,
+        video_suffix = input_file.suffix if input_file.suffix else ".mp4"
+        video_out = _prepare_output_path(
+            output_video_path, temp_root=temp_root, suffix=f"_vision{video_suffix}"
         )
-        if created_audio_temp:
+    except BaseException:
+        _unlink_owned_output(audio_out.path, input_file, should_unlink=audio_out.is_owned)
+        if audio_out.created_temp:
             _remove_empty_dir(temp_root)
         raise
 
@@ -467,45 +602,42 @@ async def split_media(
         str(target_sample_rate),
         "-ac",
         str(target_channels),
-        str(target_audio),
+        str(audio_out.path),
         "-an",
         "-c:v",
         "copy",
-        str(target_video),
+        str(video_out.path),
     ]
 
+    started_at = time.monotonic()
     try:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError as err:
-            raise FFmpegNotFoundError(
-                f"ffmpeg binary '{ffmpeg_bin}' was not found in PATH."
-            ) from err
-
-        _, stderr = await proc.communicate()
+        returncode, stderr_text = await _run_ffmpeg_command(
+            cmd,
+            ffmpeg_bin=ffmpeg_bin,
+            timeout_seconds=resolved_timeout,
+            terminate_grace_seconds=resolved_grace,
+        )
         has_video = True
 
-        if proc.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace")
+        if returncode != 0:
             if (
                 "Output file does not contain any stream" in stderr_text
                 or "matches no streams" in stderr_text
             ):
-                _unlink_owned_output(
-                    target_video,
-                    input_file,
-                    should_unlink=created_video_temp or not video_existed_before,
-                )
+                _unlink_owned_output(video_out.path, input_file, should_unlink=video_out.is_owned)
+                remaining_timeout = resolved_timeout - (time.monotonic() - started_at)
+                if remaining_timeout <= 0:
+                    raise FFmpegTimeoutError(
+                        f"ffmpeg process exceeded {resolved_timeout:g}s stage deadline."
+                    )
                 norm_res = await normalize_media(
                     input_file,
-                    output_path=target_audio,
+                    output_path=audio_out.path,
                     ffmpeg_bin=ffmpeg_bin,
                     target_sample_rate=target_sample_rate,
                     target_channels=target_channels,
+                    timeout_seconds=remaining_timeout,
+                    terminate_grace_seconds=resolved_grace,
                 )
                 return MediaSplitResult(
                     audio_path=norm_res.output_path,
@@ -515,30 +647,22 @@ async def split_media(
                     channels=norm_res.channels,
                 )
             raise FFmpegExecutionError(
-                f"ffmpeg process exited with code {proc.returncode}",
-                returncode=proc.returncode,
+                f"ffmpeg process exited with code {returncode}",
+                returncode=returncode,
                 stderr=stderr_text,
             )
 
-        meta = get_wav_metadata(target_audio)
+        meta = get_wav_metadata(audio_out.path)
     except BaseException:
-        _unlink_owned_output(
-            target_audio,
-            input_file,
-            should_unlink=created_audio_temp or not audio_existed_before,
-        )
-        _unlink_owned_output(
-            target_video,
-            input_file,
-            should_unlink=created_video_temp or not video_existed_before,
-        )
-        if created_audio_temp or created_video_temp:
+        _unlink_owned_output(audio_out.path, input_file, should_unlink=audio_out.is_owned)
+        _unlink_owned_output(video_out.path, input_file, should_unlink=video_out.is_owned)
+        if audio_out.created_temp or video_out.created_temp:
             _remove_empty_dir(temp_root)
         raise
 
     return MediaSplitResult(
-        audio_path=target_audio,
-        video_path=target_video if has_video else None,
+        audio_path=audio_out.path,
+        video_path=video_out.path if has_video else None,
         duration_ms=meta.duration_ms,
         sample_rate=meta.sample_rate,
         channels=meta.channels,
@@ -547,11 +671,16 @@ async def split_media(
 
 __all__ = [
     "DEFAULT_JOB_TEMP_DIRNAME",
+    "DEFAULT_MEDIA_TERMINATE_GRACE_SECONDS",
+    "DEFAULT_MEDIA_TIMEOUT_SECONDS",
     "JOB_TEMP_ROOT_ENV",
     "MEDIA_NORMALIZATION_VERSION",
+    "MEDIA_TERMINATE_GRACE_ENV",
+    "MEDIA_TIMEOUT_ENV",
     "SUPPORTED_MEDIA_EXTENSIONS",
     "FFmpegExecutionError",
     "FFmpegNotFoundError",
+    "FFmpegTimeoutError",
     "MediaNormalizationError",
     "MediaNormalizationResult",
     "MediaSplitResult",
@@ -560,6 +689,8 @@ __all__ = [
     "cleanup_stale_worker_temp_dirs",
     "create_normalization_limitation",
     "get_media_temp_root",
+    "get_media_terminate_grace_seconds",
+    "get_media_timeout_seconds",
     "get_wav_metadata",
     "normalize_media",
     "owned_job_temp_dir",

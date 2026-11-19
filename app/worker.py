@@ -48,6 +48,7 @@ from app.pipeline import PitchAnalysisPipeline
 from app.providers.groq_speech import GroqSpeechProviderError
 from app.stages.common import StageError, StageValidationError, classify_stage_error
 from app.stages.media import (
+    MediaNormalizationError,
     cleanup_job_temp_dirs_for_scope,
     cleanup_stale_worker_temp_dirs,
 )
@@ -239,6 +240,8 @@ def _default_stage_for_error(exc: BaseException) -> str:
     """Infer the default pipeline stage when a provider error escapes without stage metadata."""
     if isinstance(exc, GroqSpeechProviderError):
         return "speech"
+    if isinstance(exc, MediaNormalizationError):
+        return "ingestion"
     return "dispatch"
 
 

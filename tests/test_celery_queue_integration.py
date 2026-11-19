@@ -50,6 +50,19 @@ if not FIXTURES_DIR.is_dir():
     )
 
 
+def test_celery_app_configuration_invariants():
+    """Verify AI Celery app explicitly matches the backend transport contract."""
+    conf = celery_app.conf
+    assert conf.task_default_queue == "ai_jobs"
+    assert conf.task_serializer == "json"
+    assert "json" in conf.accept_content
+    assert conf.result_serializer == "json"
+    assert conf.enable_utc is True
+    assert conf.task_acks_late is True
+    assert conf.task_reject_on_worker_lost is True
+    assert conf.worker_prefetch_multiplier == 1
+
+
 def _load_fixture(filename: str) -> dict[str, Any]:
     with open(FIXTURES_DIR / filename, encoding="utf-8") as f:
         return json.load(f)
@@ -205,17 +218,32 @@ class MockPipeline:
         )
 
 
-def test_celery_app_configuration_invariants():
-    """Verify AI Celery app explicitly matches the backend transport contract."""
-    conf = celery_app.conf
-    assert conf.task_default_queue == "ai_jobs"
-    assert conf.task_serializer == "json"
-    assert "json" in conf.accept_content
-    assert conf.result_serializer == "json"
-    assert conf.enable_utc is True
-    assert conf.task_acks_late is True
-    assert conf.task_reject_on_worker_lost is True
-    assert conf.worker_prefetch_multiplier == 1
+@pytest.mark.asyncio
+async def test_process_job_maps_ffmpeg_timeout_to_safe_provider_timeout() -> None:
+    """FFmpegTimeoutError escaping analyze_session maps to safe ingestion provider_timeout."""
+    from app.stages.media import FFmpegTimeoutError
+    from app.worker import process_job
+
+    class TimeoutMediaPipeline(MockPipeline):
+        async def analyze_session(
+            self,
+            payload: AnalyzeSessionPayload,
+            job_id: str,
+            backend_client: Any,
+            attempt: int = 1,
+        ) -> SessionAnalysisCompleted:
+            raise FFmpegTimeoutError("ffmpeg process exceeded 300s stage deadline.")
+
+    envelope = _load_fixture("job_analyze_session_valid.json")
+    from app.contracts import QueueMessage
+
+    msg = QueueMessage.model_validate(envelope)
+    update = await process_job(msg, TimeoutMediaPipeline())
+    assert update.status == UpdateStatus.FAILED
+    assert isinstance(update.payload, FailedPayload)
+    assert update.payload.stage == "ingestion"
+    assert update.payload.code == ErrorCode.PROVIDER_TIMEOUT
+    assert update.payload.retryable is True
 
 
 def test_celery_task_registration():
