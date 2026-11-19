@@ -544,3 +544,72 @@ async def test_retry_after_partial_failure_same_job_id_succeeds_without_overwrit
     res_dup = await pipeline.analyze_answer(ans_payload, job_id=job_id, attempt=1)
     assert res_dup == res
     assert judge.calls == 4
+
+
+async def test_completed_job_redelivery_is_acknowledged_without_republishing(
+    tmp_path: Path,
+) -> None:
+    """Backend reports the job completed: no provider calls and no further updates."""
+    storage = LocalDiskObjectStorage(base_dir=tmp_path)
+    spy_speech = _ConfigurableSpeechProvider("Already done")
+    pipeline = FakePipeline(speech_provider=spy_speech, object_storage=storage)
+    backend = FakeBackendClient()
+    session_id = "01JCOMPLETEDREDELIVERY0001"
+    msg = QueueMessage(
+        schema_version=1,
+        job_id="01JCOMPLETEDJOB00000000001",
+        job_type=JobType.ANALYZE_SESSION,
+        practice_session_id=session_id,
+        analysis_attempt=1,
+        created_at=datetime.now(UTC),
+        trace_id="trc_completed_1",
+        payload=_session_payload(session_id).model_dump(mode="json"),
+    )
+
+    first = await process_job(msg, pipeline, backend)
+    assert first.status == UpdateStatus.COMPLETED
+    updates_after_first = len(backend.updates)
+
+    backend.job_status = "completed"
+    second = await process_job(msg, pipeline, backend)
+    assert second.status == UpdateStatus.COMPLETED
+    assert second.payload == first.payload
+    assert spy_speech.calls == 1
+    assert len(backend.updates) == updates_after_first  # nothing re-published
+
+
+async def test_output_ids_are_deterministic_per_job_and_attempt(tmp_path: Path) -> None:
+    """The same job on fresh storage (no manifest) produces the same output IDs."""
+    session_id = "01JDETERMINISTICIDS0000001"
+    job_id = "01JDETERMINISTICJOB0000001"
+    results = []
+    for run in ("a", "b"):
+        storage = LocalDiskObjectStorage(base_dir=tmp_path / run)
+        pipeline = FakePipeline(
+            speech_provider=_ConfigurableSpeechProvider("same"), object_storage=storage
+        )
+        results.append(
+            await pipeline.analyze_session(_session_payload(session_id), job_id=job_id, attempt=1)
+        )
+    assert results[0].analysis_artifact.artifact_id == results[1].analysis_artifact.artifact_id
+    assert [q.candidate_id for q in results[0].primary_questions] == [
+        q.candidate_id for q in results[1].primary_questions
+    ]
+
+    other_attempt = await FakePipeline(
+        speech_provider=_ConfigurableSpeechProvider("same"),
+        object_storage=LocalDiskObjectStorage(base_dir=tmp_path / "c"),
+    ).analyze_session(_session_payload(session_id), job_id=job_id, attempt=2)
+    assert other_attempt.analysis_artifact.artifact_id != results[0].analysis_artifact.artifact_id
+
+
+def test_fallback_question_ids_are_stable_for_the_same_content() -> None:
+    from app.stages.evidence import EvidenceBundle
+    from app.stages.judge_panel import JUDGE_PANEL, create_fallback_question
+
+    bundle = EvidenceBundle(items=[])
+    first = create_fallback_question(JUDGE_PANEL[0], bundle)
+    again = create_fallback_question(JUDGE_PANEL[0], bundle)
+    other = create_fallback_question(JUDGE_PANEL[1], bundle)
+    assert first.candidate_id == again.candidate_id
+    assert first.candidate_id != other.candidate_id

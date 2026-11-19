@@ -29,6 +29,7 @@ from app.contracts import (
     EraseAIDataPayload,
     ErasureCompleted,
     ErrorCode,
+    FollowUpQuestion,
     GenerateReportPayload,
     JobCancelledError,
     Limitation,
@@ -70,7 +71,7 @@ from app.stages.checkpoint import (
     get_stage_checkpoint,
     save_stage_checkpoint,
 )
-from app.stages.common import StageValidationError, with_transient_retries
+from app.stages.common import StageValidationError, stable_ulid, with_transient_retries
 from app.stages.documents import run_document_stage
 from app.stages.media import (
     MEDIA_NORMALIZATION_VERSION,
@@ -756,6 +757,37 @@ class FakePipeline:
                 return None
         return record
 
+    async def _upload_json_first_write_wins(
+        self,
+        object_key: str,
+        payload: dict[str, Any],
+        *,
+        artifact_id: str,
+    ) -> tuple[ArtifactRef, dict[str, Any]]:
+        """Write an immutable JSON artifact, or reuse the one already stored at its key.
+
+        Output IDs are deterministic per job and attempt, so a retry after a partial failure
+        targets the same key. The first stored write is canonical: on a conflict the stored
+        artifact (and its exact checksum) is returned instead of failing the job.
+        """
+        try:
+            ref = await self.object_storage.upload_json(
+                object_key, payload, artifact_id=artifact_id, overwrite=False
+            )
+            return ref, payload
+        except ObjectAlreadyExistsError:
+            with tempfile.TemporaryDirectory(prefix="virtujudge_reuse_") as tmpdir:
+                dest = Path(tmpdir) / "artifact.json"
+                await self.object_storage.download_file(object_key, dest)
+                raw = dest.read_bytes()
+            stored = json.loads(raw.decode("utf-8"))
+            checksum = "sha256:" + hashlib.sha256(raw).hexdigest()
+            logger.info("Reusing stored artifact %s from an earlier attempt.", artifact_id)
+            return (
+                ArtifactRef(artifact_id=artifact_id, object_key=object_key, checksum=checksum),
+                stored if isinstance(stored, dict) else payload,
+            )
+
     async def _save_or_load_job_result(
         self,
         result_key: str,
@@ -1153,7 +1185,7 @@ class FakePipeline:
             created_at = "2026-09-02T12:00:00Z"
         else:
             created_at = datetime.now(UTC).isoformat()
-        artifact_id = ulid.new().str
+        artifact_id = stable_ulid("analysis", job_id, attempt) if job_id else ulid.new().str
         artifact_key = _build_session_artifact_key(
             session_id=session_id,
             attempt=attempt,
@@ -1316,8 +1348,12 @@ class FakePipeline:
 
             now_utc = datetime.now(UTC)
             created_at = now_utc.isoformat()
-            transcript_artifact_id = ulid.new().str
-            assessment_artifact_id = ulid.new().str
+            transcript_artifact_id = (
+                stable_ulid("transcript", job_id, attempt) if job_id else ulid.new().str
+            )
+            assessment_artifact_id = (
+                stable_ulid("assessment", job_id, attempt) if job_id else ulid.new().str
+            )
             artifact_key = _build_answer_artifact_key(
                 practice_session_id=job.practice_session_id,
                 answer_id=job.answer_id,
@@ -1353,11 +1389,8 @@ class FakePipeline:
                 "limitations": [lim.model_dump() for lim in speech_res.limitations],
             }
 
-            transcript_ref = await self.object_storage.upload_json(
-                artifact_key,
-                artifact_payload,
-                artifact_id=transcript_artifact_id,
-                overwrite=False,
+            transcript_ref, _ = await self._upload_json_first_write_wins(
+                artifact_key, artifact_payload, artifact_id=transcript_artifact_id
             )
 
             # Inspection point 2: Before Groq LLM answer assessment & follow-up generation
@@ -1412,12 +1445,16 @@ class FakePipeline:
                 },
             }
 
-            assessment_ref = await self.object_storage.upload_json(
-                assessment_artifact_key,
-                assessment_payload,
-                artifact_id=assessment_artifact_id,
-                overwrite=False,
+            assessment_ref, stored_assessment = await self._upload_json_first_write_wins(
+                assessment_artifact_key, assessment_payload, artifact_id=assessment_artifact_id
             )
+            if stored_assessment is not assessment_payload:
+                # An earlier partial run already stored this assessment: report its follow-up
+                # so the completion matches the stored artifact.
+                stored_follow_up = stored_assessment.get("follow_up")
+                follow_up = (
+                    FollowUpQuestion.model_validate(stored_follow_up) if stored_follow_up else None
+                )
         except JobCancelledError:
             if audio_asset is not None:
                 scratch = Path(".storage/temp_media") / audio_asset.artifact_id
@@ -1566,7 +1603,9 @@ class FakePipeline:
             "Uploading evaluation artifact and markdown report...",
         )
 
-        evaluation_artifact_id = ulid.new().str
+        evaluation_artifact_id = (
+            stable_ulid("evaluation_artifact", job_id, attempt) if job_id else ulid.new().str
+        )
         evaluation_artifact_key = _build_session_artifact_key(
             session_id=session_id,
             attempt=attempt,
@@ -1583,7 +1622,9 @@ class FakePipeline:
             overwrite=False,
         )
 
-        report_artifact_id = ulid.new().str
+        report_artifact_id = (
+            stable_ulid("report_artifact", job_id, attempt) if job_id else ulid.new().str
+        )
         report_artifact_key = _build_session_artifact_key(
             session_id=session_id,
             attempt=attempt,

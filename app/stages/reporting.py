@@ -12,7 +12,6 @@ import logging
 import time
 from typing import Any
 
-import ulid
 from pydantic import BaseModel, Field
 
 from app.contracts import (
@@ -31,7 +30,7 @@ from app.providers.base import JudgeModelProvider
 from app.providers.fake_judge import FakeJudgeModelProvider
 from app.runtime_mode import RuntimeModePolicy
 from app.stages.aggregation import format_duration_ms
-from app.stages.common import append_unique_limitation
+from app.stages.common import append_unique_limitation, stable_ulid
 from app.stages.report_loader import ReportEvidenceBundle, load_report_evidence
 from app.stages.report_markdown import generate_markdown_report
 from app.stages.scoring import (
@@ -657,7 +656,7 @@ async def run_report_stage(
             all_findings.extend(mf.qa_feedback.improvements)
 
     # 6. Construct Evaluation Model
-    eval_id = ulid.new().str
+    eval_id = stable_ulid("evaluation", report_id, analysis_attempt)
     session_id = bundle.practice_session_id or bundle.session_id or report_id
     attempt_num = (
         analysis_attempt

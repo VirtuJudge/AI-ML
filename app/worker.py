@@ -279,6 +279,30 @@ async def process_job(
     client_to_use: BackendClientProtocol | None = backend_client
     cancelled_before_dispatch = False
 
+    if backend_client is not None and message.job_type != JobType.ERASE_AI_DATA:
+        get_status = getattr(backend_client, "get_job_status", None)
+        status: object = None
+        if callable(get_status):
+            try:
+                status = await get_status(message.job_id)
+            except Exception:
+                status = None  # unknown status: fall through to the normal path
+        if status == "completed":
+            # Redelivery of a job Backend already accepted as completed: return the stored
+            # outcome (the pipeline's job-result manifest makes this a cache hit with no
+            # provider calls) without publishing any further updates.
+            logger.info(
+                "Job %s is already completed; returning the stored outcome without re-publishing.",
+                message.job_id,
+            )
+            return await process_job(
+                message,
+                pipeline,
+                None,
+                publish_terminal_update=False,
+                execution_attempt=execution_attempt,
+            )
+
     if backend_client is not None:
         if message.job_type != JobType.ERASE_AI_DATA:
             cancelled_before_dispatch = await backend_client.check_cancellation(message.job_id)

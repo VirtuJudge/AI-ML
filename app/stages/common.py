@@ -1,6 +1,7 @@
 """Shared utilities and validators for VirtuJudge AI-ML pipeline stages."""
 
 import asyncio
+import hashlib
 import logging
 import random
 import re
@@ -8,6 +9,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 import httpx
+import ulid
 
 from app.contracts import MAX_QUESTION_TEXT_LENGTH, ErrorCode, Limitation
 from app.providers.groq_pool import (
@@ -438,6 +440,16 @@ def append_unique_limitation(limitations: list[Limitation], lim: Limitation) -> 
         limitations.append(lim)
 
 
+def stable_ulid(*parts: object) -> str:
+    """Deterministic ULID-format ID from its inputs (same inputs -> same ID).
+
+    Used for output IDs so a redelivered job, or a rerun after a crash, produces the
+    same identifiers instead of fresh random ones.
+    """
+    seed = "".join(str(part) for part in parts).encode("utf-8")
+    return str(ulid.from_bytes(hashlib.sha256(seed).digest()[:16]))
+
+
 __all__ = [
     "StageError",
     "StageProviderError",
@@ -446,6 +458,7 @@ __all__ = [
     "append_unique_limitation",
     "build_over_length_follow_up_limitation",
     "classify_stage_error",
+    "stable_ulid",
     "validate_observation_timestamps",
     "with_transient_retries",
 ]

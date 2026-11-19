@@ -13,7 +13,6 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-import ulid
 from pydantic import BaseModel
 
 from app.contracts import MAX_QUESTION_TEXT_LENGTH, Limitation, PrimaryQuestion
@@ -25,8 +24,8 @@ from app.prompts.judges import (
     PRODUCT_ANALYST_PROMPT,
     TECHNICAL_EVALUATOR_PROMPT,
 )
+from app.stages.common import stable_ulid
 from app.stages.evidence import EvidenceBundle
-
 
 EVIDENCE_ID_IN_QUESTION_TEXT_REGEX = re.compile(
     r"(?i)\s*\(?\s*(?:evidence\s*(?:id)?\s*[:#-]?\s*)?ev_[a-z0-9_-]+\s*\)?\s*[,;:]?"
@@ -167,7 +166,9 @@ def create_fallback_question(judge: JudgeSpec, bundle: EvidenceBundle) -> Primar
         ev_ids.append(bundle.items[0].evidence_id)
 
     return PrimaryQuestion(
-        candidate_id=ulid.new().str,
+        candidate_id=stable_ulid(
+            "fallback_question", judge.default_rubric_dimension, judge.fallback_text, *ev_ids
+        ),
         text=judge.fallback_text,
         reason=judge.fallback_reason,
         rubric_dimension=judge.default_rubric_dimension,
@@ -311,7 +312,9 @@ def validate_judge_question(
         return None, limitations
 
     # 5. Ensure non-empty candidate_id
-    final_cand_id = cand_id if cand_id else ulid.new().str
+    final_cand_id = (
+        cand_id if cand_id else stable_ulid("question", dim_to_use, cleaned_question_text)
+    )
 
     validated = PrimaryQuestion(
         candidate_id=final_cand_id,
@@ -410,10 +413,10 @@ __all__ = [
     "PRODUCT_ANALYST_PROMPT",
     "TECHNICAL_EVALUATOR_PROMPT",
     "JudgeSpec",
-    "strip_evidence_ids_from_question_text",
     "check_for_subjective_emotional_claims",
     "create_fallback_question",
     "format_prompt_for_judge",
+    "strip_evidence_ids_from_question_text",
     "validate_judge_question",
     "validate_panel_questions",
 ]

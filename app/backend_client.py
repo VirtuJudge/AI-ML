@@ -227,6 +227,11 @@ class BackendClient:
 
         raise BackendUnavailableError(f"Backend job status unavailable for job {job_id}.")
 
+    async def get_job_status(self, job_id: str) -> str:
+        """Return Backend's current status for the job (e.g. "running", "completed")."""
+        data = await self._get_job_status(job_id)
+        return str(data["status"])
+
     async def get_last_update_sequence(self, job_id: str) -> int:
         """Read the backend's accepted sequence before starting or retrying a job."""
         data = await self._get_job_status(job_id)
@@ -282,7 +287,11 @@ class FakeBackendClient:
         self.cancel_requested = cancel_requested
         self.fail_with_status = fail_with_status
         self.reachable = True
+        self.job_status = "running"
         self._last_update_sequence: dict[str, int] = {}
+
+    async def get_job_status(self, job_id: str) -> str:
+        return self.job_status
 
     async def send_update(self, job_id: str, update: WorkerUpdate) -> dict[str, Any] | None:
         if self.fail_with_status == 401:
